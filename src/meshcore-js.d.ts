@@ -48,9 +48,11 @@ declare module "@liamcottle/meshcore.js" {
     getWaitingMessages(): Promise<Array<Record<string, unknown>> | null>;
     syncNextMessage(): Promise<Record<string, unknown> | null>;
 
-    on(event: string, listener: (...args: any[]) => void): this;
-    off(event: string, listener: (...args: any[]) => void): this;
-    once(event: string, listener: (...args: any[]) => void): this;
+    // NOTE: the library emits most response events by numeric code
+    // (Constants.ResponseCodes / PushCodes), not by friendly name.
+    on(event: string | number, listener: (...args: any[]) => void): this;
+    off(event: string | number, listener: (...args: any[]) => void): this;
+    once(event: string | number, listener: (...args: any[]) => void): this;
   }
 
   export default TCPConnection;

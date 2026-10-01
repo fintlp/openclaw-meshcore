@@ -101,9 +101,9 @@ function createConnection() {
   const emitter = new EventEmitter();
   return {
     connection: emitter as unknown as {
-      on: EventEmitter["on"];
-      off: EventEmitter["off"];
-      emit: EventEmitter["emit"];
+      on: (event: string | number, listener: (...args: any[]) => void) => unknown;
+      off: (event: string | number, listener: (...args: any[]) => void) => unknown;
+      emit: (event: string | number, ...args: unknown[]) => boolean;
       getWaitingMessages: () => Promise.resolve([]);
     },
     contacts: [],
@@ -172,7 +172,8 @@ describe("monitorMeshcoreProvider", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    handle.connection.emit("ContactMsgRecv", {
+    // meshcore.js emits ContactMsgRecv as numeric code 7.
+    handle.connection.emit(7, {
       pubKeyPrefix: new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
       pathLen: 0,
       txtType: 2,

@@ -6,6 +6,7 @@ import {
   connectMeshcoreDevice,
   disconnectMeshcoreDevice,
   getMeshcoreDevice,
+  rememberAdvertContact,
   resolveSenderNodeId,
   type MeshcoreDeviceHandle,
 } from "./device-client.js";
@@ -247,20 +248,28 @@ export function monitorMeshcoreProvider(
             config: cfg,
             runtime,
             sendReply: async (target, text, replyToId) => {
-              const { sendMessageMeshcore } = await import("./send.js");
-              await sendMessageMeshcore(target, text, {
-                cfg,
-                accountId: account.accountId,
-                replyTo: replyToId,
-                deviceHandle: handle,
-              });
-              rememberOutboundEcho(text);
-              opts.statusSink?.({ lastOutboundAt: Date.now() });
-              core.channel.activity.record({
-                channel: CHANNEL_ID,
-                accountId: account.accountId,
-                direction: "outbound",
-              });
+              try {
+                const { sendMessageMeshcore } = await import("./send.js");
+                await sendMessageMeshcore(target, text, {
+                  cfg,
+                  accountId: account.accountId,
+                  replyTo: replyToId,
+                  deviceHandle: handle,
+                });
+                rememberOutboundEcho(text);
+                opts.statusSink?.({ lastOutboundAt: Date.now() });
+                core.channel.activity.record({
+                  channel: CHANNEL_ID,
+                  accountId: account.accountId,
+                  direction: "outbound",
+                });
+              } catch (err) {
+                // A failed reply (e.g. a pairing challenge to a prefix-only sender whose
+                // full pubkey is not yet known) must not fail the inbound/pairing flow.
+                console.error(
+                  `[${account.accountId}] DM reply to ${target} failed (non-fatal): ${String(err)}`,
+                );
+              }
             },
             statusSink: opts.statusSink,
           });
@@ -344,13 +353,50 @@ export function monitorMeshcoreProvider(
       rejectMonitor?.(new Error("MeshCore device disconnected"));
     };
 
-    handle.connection.on("ContactMsgRecv", onContactMsgRecv);
-    handle.connection.on("ChannelMsgRecv", onChannelMsgRecv);
+    // meshcore.js emits response events by NUMERIC code (Constants.ResponseCodes):
+    // ContactMsgRecv = 7 (ContactMsgRecvV3 = 16 is normalised into 7 by the library),
+    // ChannelMsgRecv = 8 (ChannelMsgRecvV3 = 17 -> 8). Only connected/disconnected/error/rx/tx
+    // are emitted as strings. Registering on the friendly names never fires.
+    const EVENT_CONTACT_MSG_RECV = 7;
+    const EVENT_CHANNEL_MSG_RECV = 8;
+    handle.connection.on(EVENT_CONTACT_MSG_RECV, onContactMsgRecv);
+    handle.connection.on(EVENT_CHANNEL_MSG_RECV, onChannelMsgRecv);
     handle.connection.on("disconnected", onDisconnected);
 
-    unsubscribers.push(() => handle.connection.off("ContactMsgRecv", onContactMsgRecv));
-    unsubscribers.push(() => handle.connection.off("ChannelMsgRecv", onChannelMsgRecv));
+    unsubscribers.push(() => handle.connection.off(EVENT_CONTACT_MSG_RECV, onContactMsgRecv));
+    unsubscribers.push(() => handle.connection.off(EVENT_CHANNEL_MSG_RECV, onChannelMsgRecv));
     unsubscribers.push(() => handle.connection.off("disconnected", onDisconnected));
+
+    // Advert pushes carry full pubkeys (PushCodes.Advert = 0x80 in auto-add mode,
+    // PushCodes.NewAdvert = 0x8A in manual-add mode) — cache them so 6-byte DM
+    // prefixes become addressable reply targets.
+    const EVENT_ADVERT = 0x80;
+    const EVENT_NEW_ADVERT = 0x8a;
+    const onAdvert = (advert: Record<string, unknown>) => {
+      try {
+        const pk = advert.publicKey;
+        const bytes =
+          pk instanceof Uint8Array
+            ? pk
+            : Array.isArray(pk)
+              ? new Uint8Array(pk as number[])
+              : undefined;
+        if (bytes && bytes.length === 32) {
+          rememberAdvertContact(
+            bytes,
+            typeof advert.advName === "string" && advert.advName.trim()
+              ? advert.advName
+              : undefined,
+          );
+        }
+      } catch {
+        // best-effort cache
+      }
+    };
+    handle.connection.on(EVENT_ADVERT, onAdvert);
+    handle.connection.on(EVENT_NEW_ADVERT, onAdvert);
+    unsubscribers.push(() => handle.connection.off(EVENT_ADVERT, onAdvert));
+    unsubscribers.push(() => handle.connection.off(EVENT_NEW_ADVERT, onAdvert));
 
     // Periodically drain any queued messages (firmware may emit MsgWaiting push).
     const pollTimer = setInterval(() => {

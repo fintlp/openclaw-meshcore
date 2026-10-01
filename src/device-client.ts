@@ -105,6 +105,9 @@ function normalizeContact(raw: Record<string, unknown>): MeshcoreContact {
   };
 }
 
+// meshcore.js emits ChannelInfo by numeric code (Constants.ResponseCodes.ChannelInfo = 18).
+const EVENT_CHANNEL_INFO = 18;
+
 async function queryAllChannels(connection: TCPConnection): Promise<
   Array<{ index: number; name: string; secret: Uint8Array }>
 > {
@@ -125,9 +128,9 @@ async function queryAllChannels(connection: TCPConnection): Promise<
           resolve(value);
         };
         const cleanup = () => {
-          connection.off("ChannelInfo", handler);
+          connection.off(EVENT_CHANNEL_INFO, handler);
         };
-        connection.on("ChannelInfo", handler);
+        connection.on(EVENT_CHANNEL_INFO, handler);
         void connection.sendCommandGetChannel(i);
       })) as { channelIdx?: number; name?: string; secret?: Uint8Array | number[] };
       const secret = info.secret ? convertToUint8Array(info.secret) : new Uint8Array(16);
@@ -343,9 +346,39 @@ export function resolveContactByNodeId(
   });
 }
 
+// Advert-driven contact cache: Advert/NewAdvert pushes carry the full 32-byte
+// pubkey, letting us resolve 6-byte DM prefixes into addressable pubkeys even
+// when the node does not answer contact-sync queries.
+const advertContacts = new Map<string, { publicKey: Uint8Array; name?: string }>();
+
+export function rememberAdvertContact(publicKey: Uint8Array, name?: string): void {
+  const hex = bytesToHex(publicKey).toLowerCase();
+  if (hex.length !== 64) {
+    return;
+  }
+  const existing = advertContacts.get(hex);
+  advertContacts.set(hex, { publicKey, name: name ?? existing?.name });
+}
+
+export function resolveAdvertPubkeyByPrefix(prefixHex: string): Uint8Array | undefined {
+  const p = prefixHex.toLowerCase();
+  for (const [hex, entry] of advertContacts) {
+    if (hex.startsWith(p)) {
+      return entry.publicKey;
+    }
+  }
+  return undefined;
+}
+
 export function nodeIdToPubkey(nodeId: string): Uint8Array {
   const hex = normalizePubkeyHex(nodeId.replace(/^!/u, ""));
   if (!isValidPubkeyHex(hex)) {
+    if (hex) {
+      const resolved = resolveAdvertPubkeyByPrefix(hex);
+      if (resolved) {
+        return resolved;
+      }
+    }
     throw new Error(`invalid MeshCore node id: ${nodeId}`);
   }
   return hexToBytes(hex);
