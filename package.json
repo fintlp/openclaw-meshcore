@@ -1,0 +1,82 @@
+{
+  "name": "openclaw-meshcore",
+  "version": "2026.10.1",
+  "description": "OpenClaw channel plugin for MeshCore LoRa nodes via Companion Protocol over TCP",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fintlp/openclaw-meshcore.git"
+  },
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "dist/**",
+    "openclaw.plugin.json",
+    "npm-shrinkwrap.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "sync-manifest": "tsx scripts/sync-manifest.ts",
+    "prepack": "npm run sync-manifest && npm run build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@liamcottle/meshcore.js": "1.15.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "openclaw": "2026.9.6",
+    "tsdown": "0.22.0",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.7"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.26"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "setupEntry": "./setup-entry.ts",
+    "channel": {
+      "id": "meshcore",
+      "label": "MeshCore",
+      "selectionLabel": "MeshCore (TCP)",
+      "docsPath": "/channels/meshcore",
+      "docsLabel": "meshcore",
+      "blurb": "LoRa mesh messaging via MeshCore Companion Protocol over TCP.",
+      "order": 69,
+      "quickstartAllowFrom": true,
+      "cliAddOptions": [
+        {
+          "flags": "--host <host>",
+          "description": "MeshCore node host or IP (optionally host:5000)"
+        }
+      ]
+    },
+    "install": {
+      "npmSpec": "openclaw-meshcore",
+      "defaultChoice": "npm",
+      "minHostVersion": ">=2026.5.26"
+    },
+    "compat": {
+      "pluginApi": ">=2026.5.26"
+    },
+    "build": {
+      "openclawVersion": "2026.5.26"
+    },
+    "release": {
+      "publishToClawHub": true,
+      "publishToNpm": true
+    }
+  }
+}
