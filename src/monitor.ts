@@ -79,6 +79,17 @@ function messageIdFromChannelMessage(message: {
   return `mc-ch-${channel}-${timestamp}-${hash}`;
 }
 
+/**
+ * The pinned dependency does not skip the 4 signature bytes that precede the
+ * text in a SignedPlain (txtType === 2) contact message. Re-encode the parsed
+ * string, drop the first four bytes, and decode the remainder so the payload
+ * flows into the inbound handler without leading garbage.
+ */
+function stripSignedPlainPrefix(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  return new TextDecoder().decode(bytes.slice(4));
+}
+
 export function buildInboundMessage(params: {
   message: Record<string, unknown>;
   handle: MeshcoreDeviceHandle;
@@ -186,6 +197,8 @@ export function monitorMeshcoreProvider(
     const allowedChannels = new Set(account.config.channels ?? [0]);
     const unsubscribers: Array<() => void> = [];
     let settled = false;
+    let resolveMonitor: ((value: { stop: () => void }) => void) | null = null;
+    let rejectMonitor: ((reason: Error) => void) | null = null;
 
     const doCleanup = () => {
       if (settled) return;
@@ -204,6 +217,9 @@ export function monitorMeshcoreProvider(
       });
       void (async () => {
         try {
+          if (Number(message.txtType) === 2) {
+            message.text = stripSignedPlainPrefix(String(message.text ?? ""));
+          }
           const inbound = buildInboundMessage({ message, handle, isGroup: false });
           if (!inbound) {
             return;
@@ -323,7 +339,9 @@ export function monitorMeshcoreProvider(
         lastEventAt: Date.now(),
         lastTransportActivityAt: Date.now(),
       });
+      if (settled) return;
       doCleanup();
+      rejectMonitor?.(new Error("MeshCore device disconnected"));
     };
 
     handle.connection.on("ContactMsgRecv", onContactMsgRecv);
@@ -357,6 +375,9 @@ export function monitorMeshcoreProvider(
     );
 
     return new Promise<{ stop: () => void }>((resolve, reject) => {
+      resolveMonitor = resolve;
+      rejectMonitor = reject;
+
       const onAbort = () => {
         if (settled) return;
         doCleanup();

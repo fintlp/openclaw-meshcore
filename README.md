@@ -128,6 +128,14 @@ Live verification against the dedicated test node `192.168.1.226:5000`:
 - **DeviceInfo / Battery / Contacts / Channels:** unavailable on this node (companion protocol subset).
 - **Receive path:** listener active for 30 s; no traffic received during the window.
 
+## Known limitations / upstream issues
+
+- **`DeviceInfo` stale parsing.** The dependency returns `firmwareVer` as a signed 8-bit value and parses the remainder as a fixed-length `firmware_build_date` CString; some nodes return variable-length payloads that the library mis-aligns. Firmware/model fields are best-effort.
+- **`console.error` socket errors.** The dependency's TCP transport logs socket errors to `console.error` instead of routing them through the gateway logger. Errors are still surfaced via the `disconnected` event and the monitor promise rejection.
+- **SignedPlain DM workaround.** `@liamcottle/meshcore.js` v1.15.0 does not skip the 4 signature bytes before `readString()` for `txtType === 2` direct messages. The plugin strips the first 4 bytes of the decoded string before inbound handling, which is correct for valid UTF-8 signature prefixes. A durable fix belongs upstream in the dependency's frame parser.
+- **TCP-only framing.** Only the companion protocol over TCP is implemented; BLE and serial transports are not supported.
+- **No wire-input watchdog.** The dependency rebuilds its read buffer with array spread plus one-byte resync, which is O(n²) under a garbage-byte stream and has no byte cap or frame watchdog. A plugin-side fix would require invasive surgery on the internal `TCPConnection` socket handler; the proper fix is upstream in the dependency's framing loop.
+
 ## Limitations & follow-ups
 
 - **Companion protocol subset.** Some nodes do not respond to `DeviceQuery`, `GetBatteryVoltage`, or `GetContacts`; self-info and message events are the reliable baseline.
