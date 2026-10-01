@@ -132,12 +132,51 @@ describe("sendMessageMeshcore", () => {
     getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
 
     await sendMessageMeshcore(TEST_NODE_ID, "😀😀😀", {
-      cfg: createConfig({ textChunkLimit: 2 }),
+      cfg: createConfig({ textChunkLimit: 8 }),
     });
 
+    // 8-byte limit fits two 4-byte emoji per chunk; no surrogate pair is split.
     expect(sendTextMessage).toHaveBeenCalledTimes(2);
     expect(sendTextMessage).toHaveBeenNthCalledWith(1, expect.any(Uint8Array), "😀😀");
     expect(sendTextMessage).toHaveBeenNthCalledWith(2, expect.any(Uint8Array), "😀");
+  });
+
+  it("chunks by UTF-8 byte length so multibyte text is never truncated on air", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    const encoder = new TextEncoder();
+    // 40 code points but 80+ bytes thanks to em-dashes — must span several chunks.
+    const text = Array.from({ length: 10 }, () => "word — ").join("");
+    const limit = 30;
+
+    await sendMessageMeshcore(TEST_NODE_ID, text, {
+      cfg: createConfig({ textChunkLimit: limit }),
+    });
+
+    expect(sendTextMessage.mock.calls.length).toBeGreaterThan(1);
+    for (const call of sendTextMessage.mock.calls) {
+      const chunkText = call[1] as string;
+      expect(encoder.encode(chunkText).length).toBeLessThanOrEqual(limit);
+    }
+    // Nothing lost: concatenated chunks reproduce every word.
+    const reassembled = sendTextMessage.mock.calls.map((c) => c[1] as string).join(" ");
+    expect(reassembled.split(/\s+/).filter((w) => w === "word")).toHaveLength(10);
+    expect(reassembled.split(/\s+/).filter((w) => w === "—")).toHaveLength(10);
+  });
+
+  it("prefers whitespace boundaries when chunking", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    await sendMessageMeshcore(TEST_NODE_ID, "aaaa bbbb cccc", {
+      cfg: createConfig({ textChunkLimit: 6 }),
+    });
+
+    expect(sendTextMessage).toHaveBeenCalledTimes(3);
+    expect(sendTextMessage).toHaveBeenNthCalledWith(1, expect.any(Uint8Array), "aaaa");
+    expect(sendTextMessage).toHaveBeenNthCalledWith(2, expect.any(Uint8Array), "bbbb");
+    expect(sendTextMessage).toHaveBeenNthCalledWith(3, expect.any(Uint8Array), "cccc");
   });
 
   it("passes replyTo through the receipt", async () => {

@@ -46,19 +46,54 @@ function recordMeshcoreOutboundActivity(accountId: string): void {
   }
 }
 
+function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
 function chunkText(text: string, limit: number): string[] {
   const trimmed = text.trim();
   if (!trimmed) {
     return [];
   }
-  const chars = Array.from(trimmed);
-  if (chars.length <= limit) {
+  if (utf8ByteLength(trimmed) <= limit) {
     return [trimmed];
   }
+  // The wire frame limits BYTES, not characters: a code-point-sized chunk full
+  // of multibyte runes (em-dashes, emoji, umlauts) overflows the frame and its
+  // tail is truncated on air. Chunk by UTF-8 byte length, prefer whitespace
+  // boundaries, and never split inside a multibyte character.
   const chunks: string[] = [];
-  for (let cursor = 0; cursor < chars.length; cursor += limit) {
-    chunks.push(chars.slice(cursor, cursor + limit).join(""));
+  let current = "";
+  let currentBytes = 0;
+  const pushCurrent = () => {
+    const part = current.trim();
+    if (part) {
+      chunks.push(part);
+    }
+    current = "";
+    currentBytes = 0;
+  };
+  for (const piece of trimmed.split(/(\s+)/)) {
+    const pieceBytes = utf8ByteLength(piece);
+    if (currentBytes > 0 && currentBytes + pieceBytes > limit) {
+      pushCurrent();
+    }
+    if (pieceBytes > limit) {
+      // Single word longer than the limit: hard-split at a byte-safe boundary.
+      for (const ch of piece) {
+        const chBytes = utf8ByteLength(ch);
+        if (currentBytes > 0 && currentBytes + chBytes > limit) {
+          pushCurrent();
+        }
+        current += ch;
+        currentBytes += chBytes;
+      }
+    } else {
+      current += piece;
+      currentBytes += pieceBytes;
+    }
   }
+  pushCurrent();
   return chunks;
 }
 
