@@ -30,7 +30,9 @@ type SendMeshcoreResult = {
   receipt: MessageReceipt;
 };
 
-const DEFAULT_CHUNK_LIMIT = 133;
+// Empirical (issue #5): node firmware 1.16 truncates text frames at 127 bytes
+// on the wire; chunking larger silently loses each chunk's tail at the joins.
+const DEFAULT_CHUNK_LIMIT = 127;
 
 function recordMeshcoreOutboundActivity(accountId: string): void {
   try {

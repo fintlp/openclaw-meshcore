@@ -80,7 +80,7 @@ You can also set the environment variable `MESHCORE_HOST` for the default accoun
 | `groupAllowFrom` | array of strings/numbers | `[]` | Allowed group senders (same formats as `allowFrom`). |
 | `groups` | object | `{}` | Per-group config keyed by `channel:0` … `channel:7` or `"*"`. |
 | `channels` | array of 0–7 | `[0]` | Mesh channel indices to listen for broadcasts. |
-| `textChunkLimit` | number (40–500) | `133` | Max **UTF-8 bytes** per outbound text chunk (the wire frame limit is byte-based). Chunks split at word boundaries where possible and never inside a multibyte character. |
+| `textChunkLimit` | number (40–500) | `127` | Max **UTF-8 bytes** per outbound text chunk (the wire frame limit is byte-based). Chunks split at word boundaries where possible and never inside a multibyte character. Default 127 matches the observed wire cap — see Known Limitations. |
 | `logInboundMessageContent` | boolean | `false` | When `true`, inbound log lines include up to 80 chars of text. |
 
 ### Group config (`groups["channel:0"]`)
@@ -132,6 +132,8 @@ Live verification against a dedicated test node (companion server on TCP 5000):
 
 ## Known limitations / upstream issues
 
+- **Text frame wire cap: 127 bytes.** Observed on node fw 1.16 (issue #5, root-caused with a position-encoded payload test): text frames are truncated at 127 bytes on the wire. The default `textChunkLimit` is therefore 127 — raising it re-introduces silent tail loss (~6 bytes per chunk) at every message join.
+- **No airtime pacing between chunks.** Multi-chunk sends are fired back-to-back; the per-chunk `await` resolves on node command-acceptance, not over-the-air completion. Under burst load the node tx queue can drop tail frames (observed: the third chunk of a 3-chunk message never arrived). Tracked as issue #10.
 - **`DeviceInfo` stale parsing.** The dependency returns `firmwareVer` as a signed 8-bit value and parses the remainder as a fixed-length `firmware_build_date` CString; some nodes return variable-length payloads that the library mis-aligns. Firmware/model fields are best-effort.
 - **`console.error` socket errors.** The dependency's TCP transport logs socket errors to `console.error` instead of routing them through the gateway logger. Errors are still surfaced via the `disconnected` event and the monitor promise rejection.
 - **SignedPlain DM workaround.** `@liamcottle/meshcore.js` v1.15.0 does not skip the 4 signature bytes before `readString()` for `txtType === 2` direct messages. The plugin strips the first 4 bytes of the decoded string before inbound handling, which is correct for valid UTF-8 signature prefixes. A durable fix belongs upstream in the dependency's frame parser.

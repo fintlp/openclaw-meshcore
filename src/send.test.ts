@@ -165,6 +165,29 @@ describe("sendMessageMeshcore", () => {
     expect(reassembled.split(/\s+/).filter((w) => w === "—")).toHaveLength(10);
   });
 
+  it("defaults to a 127-byte chunk limit so frames survive the wire cap (issue #5)", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    // 300 single-byte chars, no spaces: exercises the hard-split path over 3 chunks.
+    const text = "0123456789".repeat(30);
+
+    await sendMessageMeshcore(TEST_NODE_ID, text, {
+      cfg: createConfig(), // no textChunkLimit -> default path
+    });
+
+    const encoder = new TextEncoder();
+    expect(sendTextMessage.mock.calls.length).toBeGreaterThanOrEqual(2);
+    let reassembled = "";
+    for (const call of sendTextMessage.mock.calls) {
+      const chunkText = call[1] as string;
+      expect(encoder.encode(chunkText).length).toBeLessThanOrEqual(127);
+      reassembled += chunkText;
+    }
+    // Hard-split path must be lossless: exact round-trip.
+    expect(reassembled).toBe(text);
+  });
+
   it("prefers whitespace boundaries when chunking", async () => {
     const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
     getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));

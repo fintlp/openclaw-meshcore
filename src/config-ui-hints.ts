@@ -31,7 +31,7 @@ export const meshcoreChannelConfigUiHints = {
   },
   textChunkLimit: {
     label: "MeshCore Text Chunk Limit",
-    help: "Maximum characters per outbound mesh text message. Long replies are split into chunks and sent as separate messages.",
+    help: "Maximum UTF-8 bytes per outbound mesh text message (default 127 — node firmware truncates frames at 127 bytes on the wire). Long replies are split into chunks and sent as separate messages.",
   },
   logInboundMessageContent: {
     label: "Log Inbound Message Content",
