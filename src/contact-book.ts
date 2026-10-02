@@ -35,11 +35,19 @@ export type ContactBookEntry = {
 const contacts = new Map<string, ContactBookEntry>();
 let cacheLoaded = false;
 
+let testContactBookPath: string | undefined;
+
 function getContactBookPath(): string {
   return (
+    testContactBookPath ??
     process.env.MESHCORE_ADVERT_CACHE_PATH ??
     `${process.env.HOME ?? "~"}/.openclaw/state/meshcore-advert-contacts.json`
   );
+}
+
+/** @internal Test-only path override; avoids env-var races across parallel test files. */
+export function setContactBookPathForTests(path: string | undefined): void {
+  testContactBookPath = path;
 }
 
 const EMPTY_PATH = new Uint8Array(64);
@@ -100,6 +108,8 @@ function isV1File(data: unknown): data is ContactBookFileV1 {
 }
 
 function isV2File(data: Record<string, unknown>): data is ContactBookFileV2 {
+  // Strict version check: any malformed version (non-number, != 2) is treated
+  // as unrecoverable rather than partially parsed.
   return data.version === 2 && Array.isArray(data.contacts);
 }
 
@@ -123,6 +133,18 @@ function migrateV1Row(row: { publicKeyHex?: string; name?: string }): ContactBoo
   };
 }
 
+function parseOutPathHex(outPathHex: unknown): Uint8Array {
+  if (typeof outPathHex !== "string" || !/^[0-9a-f]{128}$/iu.test(outPathHex)) {
+    return EMPTY_PATH;
+  }
+  try {
+    return normalizeOutPath(hexToBytes(outPathHex));
+  } catch (error) {
+    console.error(`[meshcore contact-book] discarding malformed outPathHex: ${String(error)}`);
+    return EMPTY_PATH;
+  }
+}
+
 function loadV2File(file: ContactBookFileV2): void {
   for (const row of file.contacts) {
     const hex =
@@ -136,17 +158,15 @@ function loadV2File(file: ContactBookFileV2): void {
         type: Number(row.type ?? 0),
         flags: Number(row.flags ?? 0),
         outPathLen: Number(row.outPathLen ?? 0),
-        outPath: normalizeOutPath(
-          typeof row.outPathHex === "string" ? hexToBytes(row.outPathHex) : EMPTY_PATH,
-        ),
+        outPath: parseOutPathHex(row.outPathHex),
         advName: String(row.advName ?? ""),
         lastAdvert: Number(row.lastAdvert ?? 0),
         advLat: Number(row.advLat ?? 0),
         advLon: Number(row.advLon ?? 0),
         lastMod: Number(row.lastMod ?? 0),
       });
-    } catch {
-      // Skip rows with unparseable data.
+    } catch (error) {
+      console.error(`[meshcore contact-book] skipping corrupt contact row ${hex}: ${String(error)}`);
     }
   }
 }

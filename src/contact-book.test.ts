@@ -10,25 +10,20 @@ import {
   resetContactBookForTests,
   resolveContactByPrefix,
   resolveContactPubkeyByPrefix,
+  setContactBookPathForTests,
 } from "./contact-book.js";
 import { bytesToHex, hexToBytes } from "./protocol.js";
 
 describe("contact book", () => {
-  const originalEnv = process.env.MESHCORE_ADVERT_CACHE_PATH;
-
   beforeEach(() => {
     const dir = mkdtempSync(join(tmpdir(), "meshcore-contact-book-"));
-    process.env.MESHCORE_ADVERT_CACHE_PATH = join(dir, "contacts.json");
+    setContactBookPathForTests(join(dir, "contacts.json"));
     resetContactBookForTests();
   });
 
   afterEach(() => {
     resetContactBookForTests();
-    if (originalEnv === undefined) {
-      delete process.env.MESHCORE_ADVERT_CACHE_PATH;
-    } else {
-      process.env.MESHCORE_ADVERT_CACHE_PATH = originalEnv;
-    }
+    setContactBookPathForTests(undefined);
   });
 
   const samplePublicKey = hexToBytes(
@@ -97,7 +92,8 @@ describe("contact book", () => {
   });
 
   it("loads a v1 file and migrates it to v2", () => {
-    const path = process.env.MESHCORE_ADVERT_CACHE_PATH!;
+    const path = join(tmpdir(), "meshcore-contact-book-migration.json");
+    setContactBookPathForTests(path);
     writeFileSync(
       path,
       JSON.stringify([
@@ -163,5 +159,72 @@ describe("contact book", () => {
   it("returns undefined for an unknown prefix", () => {
     rememberContact(makeFullAdvert());
     expect(resolveContactPubkeyByPrefix("000000000000")).toBeUndefined();
+  });
+
+  it("formats the 12-hex contact prefix", () => {
+    const entry = makeFullAdvert();
+    expect(formatContactPrefix(entry)).toBe(bytesToHex(samplePublicKey.slice(0, 6)).toLowerCase());
+  });
+
+  it("survives a v2 row with malformed outPathHex without losing the pubkey", () => {
+    const goodKey = hexToBytes(
+      "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    );
+    const badKey = hexToBytes(
+      "11223344556677889900aabbccddeeff00112233445566778899aabbccddeeff",
+    );
+    const goodOutPath = new Uint8Array(64);
+    goodOutPath[0] = 0xab;
+
+    const path = join(tmpdir(), "meshcore-contact-book-bad-outpath.json");
+    setContactBookPathForTests(path);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 2,
+        contacts: [
+          {
+            publicKeyHex: bytesToHex(goodKey),
+            type: 1,
+            flags: 2,
+            outPathLen: 1,
+            outPathHex: bytesToHex(goodOutPath),
+            advName: "GoodNode",
+            lastAdvert: 100,
+            advLat: 11111111,
+            advLon: 22222222,
+            lastMod: 99,
+          },
+          {
+            publicKeyHex: bytesToHex(badKey),
+            type: 1,
+            flags: 2,
+            outPathLen: 1,
+            outPathHex: "not-even-hex!", // malformed
+            advName: "BadPathNode",
+            lastAdvert: 200,
+            advLat: 33333333,
+            advLon: 44444444,
+            lastMod: 88,
+          },
+        ],
+      }),
+    );
+
+    resetContactBookForTests();
+
+    const entries = getContactBookEntries();
+    expect(entries).toHaveLength(2);
+
+    const goodEntry = resolveContactByPrefix(bytesToHex(goodKey.slice(0, 6)).toLowerCase())!;
+    expect(goodEntry.publicKey).toEqual(goodKey);
+    expect(goodEntry.outPath[0]).toBe(0xab);
+    expect(goodEntry.advName).toBe("GoodNode");
+
+    const badEntry = resolveContactByPrefix(bytesToHex(badKey.slice(0, 6)).toLowerCase())!;
+    expect(badEntry.publicKey).toEqual(badKey);
+    expect(badEntry.outPath).toEqual(new Uint8Array(64));
+    expect(badEntry.advName).toBe("BadPathNode");
+    expect(badEntry.advLat).toBe(33333333);
   });
 });
