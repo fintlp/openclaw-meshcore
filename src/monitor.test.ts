@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { monitorMeshcoreProvider } from "./monitor.js";
+import {
+  getContactBookEntries,
+  resetContactBookForTests,
+  setContactBookPathForTests,
+} from "./contact-book.js";
+import { bytesToHex, hexToBytes } from "./protocol.js";
 import type { CoreConfig } from "./types.js";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 
@@ -116,6 +125,9 @@ function createConnection() {
 describe("monitorMeshcoreProvider", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
+    const dir = mkdtempSync(join(tmpdir(), "meshcore-monitor-"));
+    setContactBookPathForTests(join(dir, "contacts.json"));
+    resetContactBookForTests();
     const { getMeshcoreRuntime } = await import("./runtime.js");
     getMeshcoreRuntime.mockReturnValue(createRuntime());
     resolveMeshcoreAccountMock.mockReturnValue(createResolvedAccount());
@@ -123,6 +135,8 @@ describe("monitorMeshcoreProvider", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    resetContactBookForTests();
+    setContactBookPathForTests(undefined);
   });
 
   it("rejects the monitor promise when the socket disconnects mid-session", async () => {
@@ -191,6 +205,109 @@ describe("monitorMeshcoreProvider", () => {
       }),
       handle,
     );
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("stores every NewAdvert (0x8A) field in the contact book", async () => {
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const publicKey = hexToBytes(
+      "aabbccdd11223344556677889900aabbccddeeff00112233445566778899aabb",
+    );
+    const outPath = new Uint8Array(64);
+    outPath[0] = 0x01;
+    outPath[1] = 0x02;
+
+    handle.connection.emit(0x8a, {
+      publicKey,
+      type: 1,
+      flags: 2,
+      outPathLen: 2,
+      outPath,
+      advName: "AdvertNode",
+      lastAdvert: 1234567890,
+      advLat: 48858900,
+      advLon: 2294500,
+      lastMod: 1234567000,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const entries = getContactBookEntries();
+    expect(entries).toHaveLength(1);
+    const entry = entries[0];
+    expect(entry.publicKey).toEqual(publicKey);
+    expect(entry.type).toBe(1);
+    expect(entry.flags).toBe(2);
+    expect(entry.outPathLen).toBe(2);
+    expect(bytesToHex(entry.outPath)).toBe("0102" + "00".repeat(62));
+    expect(entry.advName).toBe("AdvertNode");
+    expect(entry.lastAdvert).toBe(1234567890);
+    expect(entry.advLat).toBe(48858900);
+    expect(entry.advLon).toBe(2294500);
+    expect(entry.lastMod).toBe(1234567000);
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("merges a pubkey-only Advert (0x80) without zeroing richer NewAdvert fields", async () => {
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const publicKey = hexToBytes(
+      "aabbccdd11223344556677889900aabbccddeeff00112233445566778899aabb",
+    );
+    const outPath = new Uint8Array(64);
+    outPath[0] = 0x01;
+
+    handle.connection.emit(0x8a, {
+      publicKey,
+      type: 1,
+      flags: 2,
+      outPathLen: 1,
+      outPath,
+      advName: "RichNode",
+      lastAdvert: 1234567890,
+      advLat: 48858900,
+      advLon: 2294500,
+      lastMod: 1234567000,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    handle.connection.emit(0x80, { publicKey });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const entries = getContactBookEntries();
+    expect(entries).toHaveLength(1);
+    const entry = entries[0];
+    expect(entry.publicKey).toEqual(publicKey);
+    expect(entry.type).toBe(1);
+    expect(entry.flags).toBe(2);
+    expect(entry.outPathLen).toBe(1);
+    expect(bytesToHex(entry.outPath)).toBe("01" + "00".repeat(63));
+    expect(entry.advName).toBe("RichNode");
+    expect(entry.advLat).toBe(48858900);
+    expect(entry.advLon).toBe(2294500);
 
     handle.connection.emit("disconnected");
     await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
