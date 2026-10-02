@@ -2,11 +2,11 @@ import { resolveLoggerBackedRuntime } from "openclaw/plugin-sdk/extension-shared
 import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/status-helpers";
 import { resolveMeshcoreAccount } from "./accounts.js";
 import { createAccountStatusSink } from "./channel-api.js";
+import { rememberContact } from "./contact-book.js";
 import {
   connectMeshcoreDevice,
   disconnectMeshcoreDevice,
   getMeshcoreDevice,
-  rememberAdvertContact,
   resolveSenderNodeId,
   type MeshcoreDeviceHandle,
 } from "./device-client.js";
@@ -369,7 +369,9 @@ export function monitorMeshcoreProvider(
 
     // Advert pushes carry full pubkeys (PushCodes.Advert = 0x80 in auto-add mode,
     // PushCodes.NewAdvert = 0x8A in manual-add mode) — cache them so 6-byte DM
-    // prefixes become addressable reply targets.
+    // prefixes become addressable reply targets. NewAdvert carries the full
+    // contact metadata advertised by the peer; store every field in the contact
+    // book (issue #11).
     const EVENT_ADVERT = 0x80;
     const EVENT_NEW_ADVERT = 0x8a;
     const onAdvert = (advert: Record<string, unknown>) => {
@@ -381,14 +383,26 @@ export function monitorMeshcoreProvider(
             : Array.isArray(pk)
               ? new Uint8Array(pk as number[])
               : undefined;
-        if (bytes && bytes.length === 32) {
-          rememberAdvertContact(
-            bytes,
-            typeof advert.advName === "string" && advert.advName.trim()
-              ? advert.advName
-              : undefined,
-          );
+        if (!bytes || bytes.length !== 32) {
+          return;
         }
+        rememberContact({
+          publicKey: bytes,
+          type: typeof advert.type === "number" ? advert.type : undefined,
+          flags: typeof advert.flags === "number" ? advert.flags : undefined,
+          outPathLen: typeof advert.outPathLen === "number" ? advert.outPathLen : undefined,
+          outPath:
+            advert.outPath instanceof Uint8Array
+              ? advert.outPath
+              : Array.isArray(advert.outPath)
+                ? new Uint8Array(advert.outPath as number[])
+                : undefined,
+          advName: typeof advert.advName === "string" ? advert.advName : undefined,
+          lastAdvert: typeof advert.lastAdvert === "number" ? advert.lastAdvert : undefined,
+          advLat: typeof advert.advLat === "number" ? advert.advLat : undefined,
+          advLon: typeof advert.advLon === "number" ? advert.advLon : undefined,
+          lastMod: typeof advert.lastMod === "number" ? advert.lastMod : undefined,
+        });
       } catch {
         // best-effort cache
       }

@@ -1,6 +1,9 @@
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
 import { TCPConnection } from "@liamcottle/meshcore.js";
+import {
+  rememberContact,
+  rememberSelfInfo,
+  resolveContactPubkeyByPrefix,
+} from "./contact-book.js";
 import type { MeshcoreContact, MeshcoreDeviceInfo, MeshcoreSelfInfo } from "./types.js";
 import {
   bytesToHex,
@@ -213,6 +216,7 @@ export async function connectMeshcoreDevice(params: {
       handshakeTimeoutMs,
     )) as Record<string, unknown>;
     handle.selfInfo = normalizeSelfInfo(selfInfoRaw);
+    rememberSelfInfo(handle.selfInfo);
     await connection.sendCommandDeviceQuery(1);
     const deviceInfoRaw = await waitForEvent<Record<string, unknown>>(
       connection,
@@ -348,91 +352,21 @@ export function resolveContactByNodeId(
   });
 }
 
-// Advert-driven contact cache: Advert/NewAdvert pushes carry the full 32-byte
-// pubkey, letting us resolve 6-byte DM prefixes into addressable pubkeys even
-// when the node does not answer contact-sync queries. Persisted to disk so
-// addressability survives gateway restarts.
-const ADVERT_CACHE_PATH =
-  process.env.MESHCORE_ADVERT_CACHE_PATH ??
-  `${process.env.HOME ?? "~"}/.openclaw/state/meshcore-advert-contacts.json`;
-
-const advertContacts = new Map<string, { publicKey: Uint8Array; name?: string }>();
-let advertCacheLoaded = false;
-
-function loadAdvertContacts(): void {
-  try {
-    const rows = JSON.parse(readFileSync(ADVERT_CACHE_PATH, "utf8")) as Array<{
-      publicKeyHex?: string;
-      name?: string;
-    }>;
-    if (Array.isArray(rows)) {
-      for (const row of rows) {
-        const hex = typeof row?.publicKeyHex === "string" ? row.publicKeyHex.toLowerCase() : "";
-        if (/^[0-9a-f]{64}$/.test(hex)) {
-          advertContacts.set(hex, {
-            publicKey: hexToBytes(hex),
-            name: typeof row.name === "string" && row.name ? row.name : undefined,
-          });
-        }
-      }
-    }
-  } catch {
-    // Missing or unreadable cache file is fine — it refills from adverts.
-  }
-}
-
-function ensureAdvertCacheLoaded(): void {
-  if (advertCacheLoaded) {
-    return;
-  }
-  advertCacheLoaded = true;
-  loadAdvertContacts();
-}
-
-function persistAdvertContacts(): void {
-  try {
-    mkdirSync(dirname(ADVERT_CACHE_PATH), { recursive: true });
-    writeFileSync(
-      ADVERT_CACHE_PATH,
-      JSON.stringify(
-        Array.from(advertContacts.entries()).map(([publicKeyHex, entry]) => ({
-          publicKeyHex,
-          name: entry.name,
-        })),
-      ),
-    );
-  } catch {
-    // best-effort persistence
-  }
-}
-
+/**
+ * Legacy advert-cache helper kept for backward compatibility.
+ * New code should prefer {@link rememberContact} with the full advert payload.
+ */
 export function rememberAdvertContact(publicKey: Uint8Array, name?: string): void {
-  ensureAdvertCacheLoaded();
-  const hex = bytesToHex(publicKey).toLowerCase();
-  if (hex.length !== 64) {
-    return;
-  }
-  const existing = advertContacts.get(hex);
-  advertContacts.set(hex, { publicKey, name: name ?? existing?.name });
-  persistAdvertContacts();
+  rememberContact({ publicKey, advName: name });
 }
 
-export function resolveAdvertPubkeyByPrefix(prefixHex: string): Uint8Array | undefined {
-  ensureAdvertCacheLoaded();
-  const p = prefixHex.toLowerCase();
-  for (const [hex, entry] of advertContacts) {
-    if (hex.startsWith(p)) {
-      return entry.publicKey;
-    }
-  }
-  return undefined;
-}
+export { resolveContactPubkeyByPrefix as resolveAdvertPubkeyByPrefix };
 
 export function nodeIdToPubkey(nodeId: string): Uint8Array {
   const hex = normalizePubkeyHex(nodeId.replace(/^!/u, ""));
   if (!isValidPubkeyHex(hex)) {
     if (hex) {
-      const resolved = resolveAdvertPubkeyByPrefix(hex);
+      const resolved = resolveContactPubkeyByPrefix(hex);
       if (resolved) {
         return resolved;
       }

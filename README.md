@@ -35,9 +35,35 @@ Key source files:
 
 We use [`@liamcottle/meshcore.js`](https://github.com/liamcottle/meshcore.js) (v1.15.0) for the MeshCore Companion Protocol implementation. It is the reference JavaScript library for the protocol and handles framing, command encoding, and event parsing. Local TypeScript declarations live in `src/meshcore-js.d.ts` so the build stays strict.
 
-### Addressing & the advert contact cache
+### Addressing & the contact book
 
-MeshCore DM frames carry only the sender's 6-byte pubkey **prefix**, but sending a DM requires the full 32-byte pubkey — and many nodes do not answer contact-sync queries. The plugin therefore maintains an advert-driven contact cache: `Advert` (0x80) and `NewAdvert` (0x8A) pushes carry full pubkeys and are cached prefix → full key. The cache is persisted to `~/.openclaw/state/meshcore-advert-contacts.json` (override via `MESHCORE_ADVERT_CACHE_PATH`) so addressability survives gateway restarts. A DM sender becomes reply-addressable after their first advert; until then their messages still arrive, and a failed reply is logged as non-fatal instead of breaking the inbound/pairing flow.
+MeshCore DM frames carry only the sender's 6-byte pubkey **prefix**, but sending a DM requires the full 32-byte pubkey — and many nodes do not answer contact-sync queries. The plugin therefore maintains an advert-driven contact book: `Advert` (0x80) and `NewAdvert` (0x8A) pushes carry full pubkeys and are cached prefix → full key. The contact book is persisted to `~/.openclaw/state/meshcore-advert-contacts.json` (override via `MESHCORE_ADVERT_CACHE_PATH`) so addressability survives gateway restarts. A DM sender becomes reply-addressable after their first advert; until then their messages still arrive, and a failed reply is logged as non-fatal instead of breaking the inbound/pairing flow.
+
+Issue #11 extended the cache from a bare pubkey list into a full contact book. `NewAdvert` (0x8A) pushes are parsed by `@liamcottle/meshcore.js` and the following fields are stored per contact:
+
+- `publicKey` — 32-byte full public key (used to resolve the 6-byte/12-hex DM prefix).
+- `type` — advert type byte.
+- `flags` — advert flags byte.
+- `outPathLen` — signed 8-bit outbound path length.
+- `outPath` — 64-byte outbound path.
+- `advName` — advertised name (32-byte CString from the frame).
+- `lastAdvert` — `UInt32LE` seconds-since-epoch of the last advert.
+- `advLat` — `Int32LE` advertisement latitude (raw fixed-point value).
+- `advLon` — `Int32LE` advertisement longitude (raw fixed-point value).
+- `lastMod` — `UInt32LE` contact last-modified timestamp.
+
+The local node's own `SelfInfo` is also captured (name, `advLat`, `advLon`) so the contact book includes the gateway node itself; fields that do not exist in `SelfInfo` (`type`, `flags`, `outPath`, `lastAdvert`, `lastMod`) are stored as zero.
+
+#### Persistence format
+
+The file is schema-versioned:
+
+- **v1** was a plain array `[{ publicKeyHex, name? }, ...]`. v1 files still load cleanly; missing fields are defaulted to zero/empty and the file is rewritten as v2 on the next advert or SelfInfo.
+- **v2** is an object `{ version: 2, contacts: [...] }` containing every field listed above. `outPath` is hex-encoded in the JSON file.
+
+#### Latitude / longitude scaling
+
+The raw `advLat`/`advLon` values are stored as-is. Per the MeshCore Companion Protocol documentation, the wire values are 32-bit little-endian fixed-point coordinates scaled by `1e6` (i.e. `degrees = raw / 1e6`). The plugin does not convert them, so consumers should divide by `1e6` when displaying coordinates. See [MeshCore Companion Protocol — Device Config](https://docs.meshcore.io/companion_protocol/) (issue #11).
 
 ## Install
 
