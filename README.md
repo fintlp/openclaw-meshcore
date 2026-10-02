@@ -55,7 +55,7 @@ Minimal `channels.meshcore` config:
   "channels": {
     "meshcore": {
       "enabled": true,
-      "host": "192.168.1.226",
+      "host": "192.0.2.10",
       "port": 5000,
       "dmPolicy": "pairing",
       "groupPolicy": "disabled"
@@ -64,7 +64,7 @@ Minimal `channels.meshcore` config:
 }
 ```
 
-You can also use the environment variable `MESHCORE_HOST=192.168.1.226` for the default account.
+You can also set the environment variable `MESHCORE_HOST` for the default account. (`192.0.2.10` above is an RFC 5737 documentation placeholder — use your node's real LAN address.)
 
 ## Config reference
 
@@ -106,7 +106,7 @@ You can also use the environment variable `MESHCORE_HOST=192.168.1.226` for the 
 
 1. Ensure the MeshCore node is reachable:
    ```bash
-   nc -z 192.168.1.226 5000
+   nc -z 192.0.2.10 5000   # replace with your node's address
    ```
 2. Build and test:
    ```bash
@@ -122,14 +122,11 @@ You can also use the environment variable `MESHCORE_HOST=192.168.1.226` for the 
 
 ### Verified node example
 
-Live verification against the dedicated test node `192.168.1.226:5000`:
+Live verification against a dedicated test node (companion server on TCP 5000):
 
 - **Connected:** TCP established.
 - **App-start handshake:** completed.
-- **SelfInfo captured:**
-  - Pubkey: `!a434065914a39c98c9adb406d6258e230a630a15c7f090bc39d914b8e4ab58bb`
-  - Name: `AT-GU-Weinitzen`
-  - Type: `1`, TX power: `22`, Radio: `869.618 MHz / BW 62500 / SF 8 / CR 8`
+- **SelfInfo captured:** node pubkey (`!<64 hex chars>`), advert name, type `1`, TX power `22`, radio `869.618 MHz / BW 62500 / SF 8 / CR 8` (EU band example).
 - **DeviceInfo / Battery / Contacts / Channels:** unavailable on this node (companion protocol subset).
 - **Receive path:** proven live end-to-end (2026-10-01): DMs delivered to agent sessions with replies transmitted (two-way), and public-channel messages delivered for monitoring.
 

@@ -63,7 +63,7 @@ function createRuntimeEnv(): RuntimeEnv {
 function createRuntime() {
   return {
     config: {
-      current: () => ({ channels: { meshcore: { host: "192.168.1.226" } } }),
+      current: () => ({ channels: { meshcore: { host: "192.0.2.10" } } }),
     },
     logging: {
       getChildLogger: () => ({
@@ -85,7 +85,7 @@ function createResolvedAccount() {
     enabled: true,
     configured: true,
     transport: "tcp" as const,
-    host: "192.168.1.226",
+    host: "192.0.2.10",
     port: 5000,
     config: {
       dmPolicy: "pairing",
@@ -130,7 +130,7 @@ describe("monitorMeshcoreProvider", () => {
     connectMeshcoreDeviceMock.mockResolvedValue(handle);
 
     const monitorPromise = monitorMeshcoreProvider({
-      config: { channels: { meshcore: { host: "192.168.1.226" } } } as CoreConfig,
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
       runtime: createRuntimeEnv(),
     });
 
@@ -148,7 +148,7 @@ describe("monitorMeshcoreProvider", () => {
     const abortController = new AbortController();
 
     const monitorPromise = monitorMeshcoreProvider({
-      config: { channels: { meshcore: { host: "192.168.1.226" } } } as CoreConfig,
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
       runtime: createRuntimeEnv(),
       abortSignal: abortController.signal,
     });
@@ -165,7 +165,7 @@ describe("monitorMeshcoreProvider", () => {
     const onMessage = vi.fn();
 
     const monitorPromise = monitorMeshcoreProvider({
-      config: { channels: { meshcore: { host: "192.168.1.226" } } } as CoreConfig,
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
       runtime: createRuntimeEnv(),
       onMessage,
     });

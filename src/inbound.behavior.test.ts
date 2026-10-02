@@ -31,7 +31,7 @@ function createAccount(overrides?: Partial<ResolvedMeshcoreAccount>): ResolvedMe
     enabled: true,
     configured: true,
     transport: "tcp",
-    host: "192.168.1.226",
+    host: "192.0.2.10",
     port: 5000,
     config: {
       dmPolicy: "pairing",
@@ -77,7 +77,7 @@ function createBaseRuntime() {
       },
     },
     config: {
-      current: () => ({ channels: { meshcore: { host: "192.168.1.226" } } }),
+      current: () => ({ channels: { meshcore: { host: "192.0.2.10" } } }),
     },
     logging: {
       getChildLogger: () => ({
@@ -113,7 +113,7 @@ describe("meshcore inbound behavior", () => {
     await handleMeshcoreInbound({
       message: createMessage(),
       account: createAccount(),
-      config: { channels: { meshcore: { host: "192.168.1.226" } } } as CoreConfig,
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
       runtime: createRuntimeEnv(),
       sendReply,
     });
@@ -174,7 +174,7 @@ describe("meshcore inbound behavior", () => {
           channels: [0],
         },
       }),
-      config: { channels: { meshcore: { host: "192.168.1.226" } } } as CoreConfig,
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
       runtime: createRuntimeEnv(),
       sendReply,
     });
@@ -213,7 +213,7 @@ describe("meshcore inbound behavior", () => {
           channels: [0],
         },
       }),
-      config: { channels: { meshcore: { host: "192.168.1.226" } } } as CoreConfig,
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
       runtime,
       sendReply: vi.fn(async () => undefined),
     });
@@ -281,7 +281,7 @@ describe("meshcore inbound behavior", () => {
           },
         },
       }),
-      config: { channels: { meshcore: { host: "192.168.1.226" } } } as CoreConfig,
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
       runtime: createRuntimeEnv(),
       sendReply,
     });
@@ -317,7 +317,7 @@ describe("meshcore inbound behavior", () => {
           channels: [0],
         },
       }),
-      config: { channels: { meshcore: { host: "192.168.1.226" } } } as CoreConfig,
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
       runtime,
       sendReply: vi.fn(async () => undefined),
     });

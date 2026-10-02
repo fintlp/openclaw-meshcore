@@ -23,7 +23,7 @@ function createConfig(overrides?: Partial<CoreConfig["channels"]["meshcore"]>): 
   return {
     channels: {
       meshcore: {
-        host: "192.168.1.226",
+        host: "192.0.2.10",
         port: 5000,
         ...overrides,
       },
@@ -84,7 +84,7 @@ describe("sendMessageMeshcore", () => {
     expect(connectMeshcoreDeviceMock).toHaveBeenCalledWith(
       expect.objectContaining({
         accountId: "default",
-        host: "192.168.1.226",
+        host: "192.0.2.10",
         port: 5000,
       }),
     );
