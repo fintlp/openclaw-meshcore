@@ -29,6 +29,7 @@ export type ContactBookEntry = {
   advLat: number;
   advLon: number;
   lastMod: number;
+  lastHeardAt: number;
 };
 
 /** Contacts keyed by accountId, then by full 64-character pubkey hex. */
@@ -107,6 +108,7 @@ type PersistedContactV2 = {
   advLat: number;
   advLon: number;
   lastMod: number;
+  lastHeardAt: number;
 };
 
 type ContactBookFileV2 = {
@@ -146,6 +148,7 @@ function migrateV1Row(row: { publicKeyHex?: string; name?: string }): ContactBoo
     advLat: 0,
     advLon: 0,
     lastMod: 0,
+    lastHeardAt: 0,
   };
 }
 
@@ -179,6 +182,7 @@ function rowToEntry(row: PersistedContactV2): ContactBookEntry | undefined {
       advLat: Number(row.advLat ?? 0),
       advLon: Number(row.advLon ?? 0),
       lastMod: Number(row.lastMod ?? 0),
+      lastHeardAt: Number(row.lastHeardAt ?? 0),
     };
   } catch (error) {
     console.error(`[meshcore contact-book] skipping corrupt contact row ${hex}: ${String(error)}`);
@@ -272,6 +276,7 @@ function persistContacts(): void {
           advLat: entry.advLat,
           advLon: entry.advLon,
           lastMod: entry.lastMod,
+          lastHeardAt: entry.lastHeardAt,
         });
       }
     }
@@ -287,6 +292,7 @@ function persistContacts(): void {
         advLat: entry.advLat,
         advLon: entry.advLon,
         lastMod: entry.lastMod,
+        lastHeardAt: entry.lastHeardAt,
       });
     }
     writeFileSync(path, JSON.stringify(payload));
@@ -319,6 +325,10 @@ export function rememberContact(
     existingLastAdvert !== 0 &&
     incomingLastAdvert < existingLastAdvert;
 
+  // Liveness stamp: local gateway receive time, updated on every contact
+  // interaction regardless of whether the advert payload itself is fresh.
+  const nowSeconds = Math.floor(Date.now() / 1000);
+
   const merged: ContactBookEntry = {
     publicKey: entry.publicKey,
     type: entry.type ?? existing?.type ?? 0,
@@ -347,6 +357,7 @@ export function rememberContact(
     lastMod: stale
       ? existing!.lastMod
       : (entry.lastMod ?? existing?.lastMod ?? 0),
+    lastHeardAt: nowSeconds,
   };
 
   map.set(hex, merged);

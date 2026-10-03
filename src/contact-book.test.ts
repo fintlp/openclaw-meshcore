@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +23,7 @@ describe("contact book", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     resetContactBookForTests();
     setContactBookPathForTests(undefined);
   });
@@ -367,6 +368,106 @@ describe("contact book", () => {
   it("returns undefined for an unknown prefix", () => {
     rememberContact(makeFullAdvert(), accountId);
     expect(resolveContactPubkeyByPrefix("000000000000", accountId)).toBeUndefined();
+  });
+
+  it("sets lastHeardAt on a 0x80 push for a metadata-complete contact without changing metadata", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1000);
+
+    rememberContact(makeFullAdvert(), accountId);
+    vi.setSystemTime(2000);
+    rememberContact({ publicKey: samplePublicKey }, accountId);
+
+    const entry = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(entry.lastHeardAt).toBe(2);
+    expect(entry.lastAdvert).toBe(1234567890);
+    expect(entry.advName).toBe("TestNode");
+    expect(entry.advLat).toBe(48858900);
+    expect(entry.advLon).toBe(2294500);
+    expect(entry.type).toBe(1);
+    expect(entry.flags).toBe(2);
+    expect(entry.outPathLen).toBe(2);
+    expect(entry.outPath[0]).toBe(0x01);
+  });
+
+  it("advances lastHeardAt on a stale merge while preserving fresh fields", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1000);
+
+    rememberContact(makeFullAdvert(), accountId);
+    vi.setSystemTime(2000);
+    rememberContact(
+      {
+        publicKey: samplePublicKey,
+        advName: "OldNode",
+        lastAdvert: 1,
+        advLat: 0,
+        advLon: 0,
+      },
+      accountId,
+    );
+
+    const entry = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(entry.lastHeardAt).toBe(2);
+    // Freshness-dependent fields from the original, newer advert are preserved.
+    expect(entry.lastAdvert).toBe(1234567890);
+    expect(entry.advLat).toBe(48858900);
+    expect(entry.advLon).toBe(2294500);
+    expect(entry.outPathLen).toBe(2);
+    expect(entry.outPath[0]).toBe(0x01);
+    // Non-freshness fields still merge.
+    expect(entry.advName).toBe("OldNode");
+  });
+
+  it("round-trips lastHeardAt through persistence", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_234_567_001);
+
+    rememberContact(makeFullAdvert(), accountId);
+    vi.useRealTimers();
+
+    resetContactBookForTests();
+    const entries = getContactBookEntries(accountId);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].lastHeardAt).toBe(1_234_567);
+  });
+
+  it("loads a v2 row without lastHeardAt as 0 and advances it on next remember", () => {
+    const path = join(tmpdir(), "meshcore-contact-book-missing-last-heard.json");
+    setContactBookPathForTests(path);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 2,
+        contacts: [
+          {
+            publicKeyHex: bytesToHex(samplePublicKey),
+            type: 1,
+            flags: 2,
+            outPathLen: 2,
+            outPathHex: "00".repeat(64),
+            advName: "NoLastHeard",
+            lastAdvert: 100,
+            advLat: 11111111,
+            advLon: 22222222,
+            lastMod: 99,
+            // lastHeardAt deliberately omitted.
+          },
+        ],
+      }),
+    );
+
+    resetContactBookForTests();
+
+    const loaded = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(loaded.lastHeardAt).toBe(0);
+    expect(loaded.advName).toBe("NoLastHeard");
+
+    vi.useFakeTimers();
+    vi.setSystemTime(3000);
+    rememberContact({ publicKey: samplePublicKey }, accountId);
+
+    expect(getContactByPubkey(samplePublicKey, accountId)!.lastHeardAt).toBe(3);
   });
 
   it("formats the 12-hex contact prefix", () => {
