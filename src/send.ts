@@ -163,7 +163,7 @@ export async function sendMessageMeshcore(
   if (!nodeId) {
     throw new Error(`Invalid MeshCore DM target: ${target}`);
   }
-  const pubkey = nodeIdToPubkey(nodeId);
+  const pubkey = nodeIdToPubkey(nodeId, account.accountId);
 
   return await withPacedSend(
     account.accountId,

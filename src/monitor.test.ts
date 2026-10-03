@@ -18,11 +18,17 @@ const {
   disconnectMeshcoreDeviceMock,
   resolveMeshcoreAccountMock,
   createAccountStatusSinkMock,
+  contactSyncScheduleMock,
+  contactSyncDisposeMock,
+  syncContactsFromNodeMock,
 } = vi.hoisted(() => ({
   connectMeshcoreDeviceMock: vi.fn(),
   disconnectMeshcoreDeviceMock: vi.fn(),
   resolveMeshcoreAccountMock: vi.fn(),
   createAccountStatusSinkMock: vi.fn(() => vi.fn()),
+  contactSyncScheduleMock: vi.fn(),
+  contactSyncDisposeMock: vi.fn(),
+  syncContactsFromNodeMock: vi.fn(),
 }));
 
 vi.mock("./device-client.js", async (importOriginal) => {
@@ -60,6 +66,14 @@ vi.mock("./send.js", () => ({
 
 vi.mock("./runtime.js", () => ({
   getMeshcoreRuntime: vi.fn(),
+}));
+
+vi.mock("./contact-sync.js", () => ({
+  createThrottledContactSync: vi.fn(() => ({
+    schedule: contactSyncScheduleMock,
+    dispose: contactSyncDisposeMock,
+  })),
+  syncContactsFromNode: syncContactsFromNodeMock,
 }));
 
 function createRuntimeEnv(): RuntimeEnv {
@@ -125,6 +139,7 @@ function createConnection() {
 describe("monitorMeshcoreProvider", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
+    contactSyncScheduleMock.mockClear();
     const dir = mkdtempSync(join(tmpdir(), "meshcore-monitor-"));
     setContactBookPathForTests(join(dir, "contacts.json"));
     resetContactBookForTests();
@@ -308,6 +323,75 @@ describe("monitorMeshcoreProvider", () => {
     expect(entry.advName).toBe("RichNode");
     expect(entry.advLat).toBe(48858900);
     expect(entry.advLon).toBe(2294500);
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("0x80 push schedules a contact sync when stored metadata is missing", async () => {
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    contactSyncScheduleMock.mockClear();
+
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const publicKey = hexToBytes(
+      "aabbccdd11223344556677889900aabbccddeeff00112233445566778899aabb",
+    );
+
+    // A pubkey-only 0x80 push leaves metadata missing.
+    handle.connection.emit(0x80, { publicKey });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(contactSyncScheduleMock).toHaveBeenCalledTimes(1);
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("0x80 push does not schedule a contact sync when stored metadata is complete", async () => {
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    contactSyncScheduleMock.mockClear();
+
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const publicKey = hexToBytes(
+      "aabbccdd11223344556677889900aabbccddeeff00112233445566778899aabb",
+    );
+    const outPath = new Uint8Array(64);
+    outPath[0] = 0x01;
+
+    // First establish complete metadata via 0x8A.
+    handle.connection.emit(0x8a, {
+      publicKey,
+      type: 1,
+      flags: 2,
+      outPathLen: 1,
+      outPath,
+      advName: "RichNode",
+      lastAdvert: 1234567890,
+      advLat: 48858900,
+      advLon: 2294500,
+      lastMod: 1234567000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // A subsequent pubkey-only 0x80 push preserves metadata; no sync needed.
+    handle.connection.emit(0x80, { publicKey });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(contactSyncScheduleMock).not.toHaveBeenCalled();
 
     handle.connection.emit("disconnected");
     await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);

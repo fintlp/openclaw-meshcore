@@ -3,7 +3,15 @@ import { resolveLoggerBackedRuntime } from "openclaw/plugin-sdk/extension-shared
 import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/status-helpers";
 import { resolveMeshcoreAccount } from "./accounts.js";
 import { createAccountStatusSink } from "./channel-api.js";
-import { rememberContact } from "./contact-book.js";
+import {
+  contactHasMissingMetadata,
+  getContactByPubkey,
+  rememberContact,
+} from "./contact-book.js";
+import {
+  createThrottledContactSync,
+  syncContactsFromNode,
+} from "./contact-sync.js";
 import {
   connectMeshcoreDevice,
   disconnectMeshcoreDevice,
@@ -202,9 +210,23 @@ export function monitorMeshcoreProvider(
     let resolveMonitor: ((value: { stop: () => void }) => void) | null = null;
     let rejectMonitor: ((reason: Error) => void) | null = null;
 
+    const contactSync = createThrottledContactSync({
+      getContacts: async () => handle.connection.getContacts(),
+      rememberContact,
+      accountId: account.accountId,
+      log: (message) => logger.info(message),
+      debugLog: (message) => {
+        if (core.logging.shouldLogVerbose()) {
+          logger.debug?.(message);
+        }
+      },
+      throttleMs: 60_000,
+    });
+
     const doCleanup = () => {
       if (settled) return;
       settled = true;
+      contactSync.dispose();
       for (const unsubscribe of unsubscribers) {
         unsubscribe();
       }
@@ -387,31 +409,64 @@ export function monitorMeshcoreProvider(
         if (!bytes || bytes.length !== 32) {
           return;
         }
-        rememberContact({
-          publicKey: bytes,
-          type: typeof advert.type === "number" ? advert.type : undefined,
-          flags: typeof advert.flags === "number" ? advert.flags : undefined,
-          outPathLen: typeof advert.outPathLen === "number" ? advert.outPathLen : undefined,
-          outPath:
-            advert.outPath instanceof Uint8Array
-              ? advert.outPath
-              : Array.isArray(advert.outPath)
-                ? new Uint8Array(advert.outPath as number[])
-                : undefined,
-          advName: typeof advert.advName === "string" ? advert.advName : undefined,
-          lastAdvert: typeof advert.lastAdvert === "number" ? advert.lastAdvert : undefined,
-          advLat: typeof advert.advLat === "number" ? advert.advLat : undefined,
-          advLon: typeof advert.advLon === "number" ? advert.advLon : undefined,
-          lastMod: typeof advert.lastMod === "number" ? advert.lastMod : undefined,
-        });
+        rememberContact(
+          {
+            publicKey: bytes,
+            type: typeof advert.type === "number" ? advert.type : undefined,
+            flags: typeof advert.flags === "number" ? advert.flags : undefined,
+            outPathLen: typeof advert.outPathLen === "number" ? advert.outPathLen : undefined,
+            outPath:
+              advert.outPath instanceof Uint8Array
+                ? advert.outPath
+                : Array.isArray(advert.outPath)
+                  ? new Uint8Array(advert.outPath as number[])
+                  : undefined,
+            advName: typeof advert.advName === "string" ? advert.advName : undefined,
+            lastAdvert: typeof advert.lastAdvert === "number" ? advert.lastAdvert : undefined,
+            advLat: typeof advert.advLat === "number" ? advert.advLat : undefined,
+            advLon: typeof advert.advLon === "number" ? advert.advLon : undefined,
+            lastMod: typeof advert.lastMod === "number" ? advert.lastMod : undefined,
+          },
+          account.accountId,
+        );
       } catch {
         // best-effort cache
       }
     };
-    handle.connection.on(EVENT_ADVERT, onAdvert);
-    handle.connection.on(EVENT_NEW_ADVERT, onAdvert);
-    unsubscribers.push(() => handle.connection.off(EVENT_ADVERT, onAdvert));
-    unsubscribers.push(() => handle.connection.off(EVENT_NEW_ADVERT, onAdvert));
+    const onNewAdvert = (advert: Record<string, unknown>) => {
+      // 0x8A arrives with full metadata; store it directly.
+      onAdvert(advert);
+    };
+
+    const onLegacyAdvert = (advert: Record<string, unknown>) => {
+      // 0x80 only carries the pubkey for known contacts. Remember what we have,
+      // then schedule a debounced contact-list sync if the stored entry still
+      // lacks metadata.
+      onAdvert(advert);
+      try {
+        const pk = advert.publicKey;
+        const bytes =
+          pk instanceof Uint8Array
+            ? pk
+            : Array.isArray(pk)
+              ? new Uint8Array(pk as number[])
+              : undefined;
+        if (!bytes || bytes.length !== 32) {
+          return;
+        }
+        const stored = getContactByPubkey(bytes, account.accountId);
+        if (stored && contactHasMissingMetadata(stored)) {
+          contactSync.schedule();
+        }
+      } catch {
+        // best-effort scheduling
+      }
+    };
+
+    handle.connection.on(EVENT_ADVERT, onLegacyAdvert);
+    handle.connection.on(EVENT_NEW_ADVERT, onNewAdvert);
+    unsubscribers.push(() => handle.connection.off(EVENT_ADVERT, onLegacyAdvert));
+    unsubscribers.push(() => handle.connection.off(EVENT_NEW_ADVERT, onNewAdvert));
 
     // SendConfirmed pushes (0x82): update transport activity timestamp
     const onSendConfirmed = () => {
@@ -439,6 +494,20 @@ export function monitorMeshcoreProvider(
       lastConnectedAt: Date.now(),
       lastEventAt: Date.now(),
       lastTransportActivityAt: Date.now(),
+    });
+
+    // One-shot contact-list sync on connect: fetches full metadata for contacts
+    // the node already knows about (issue #11).
+    void syncContactsFromNode({
+      getContacts: async () => handle.connection.getContacts(),
+      rememberContact,
+      accountId: account.accountId,
+      log: (message) => logger.info(message),
+      debugLog: (message) => {
+        if (core.logging.shouldLogVerbose()) {
+          logger.debug?.(message);
+        }
+      },
     });
 
     logger.info(
