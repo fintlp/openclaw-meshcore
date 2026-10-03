@@ -718,7 +718,7 @@ describe("sendMessageMeshcore", () => {
       await promise;
     });
 
-    it("handles buffered SendConfirmed arriving before beforeFrame is invoked", async () => {
+    it("releases the pre-registered waiter when its confirm arrives before the next frame", async () => {
       const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
       const handle = createDeviceHandle(sendTextMessage, undefined, { emitSendConfirmed: true });
       getMeshcoreDeviceMock.mockReturnValue(handle);
@@ -737,6 +737,44 @@ describe("sendMessageMeshcore", () => {
       expect(sendTextMessage).toHaveBeenCalledTimes(2);
 
       await promise;
+    });
+
+    it("releases a pre-registered waiter when the confirm arrives before the next send is invoked", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      const handle = createDeviceHandle(sendTextMessage, {
+        radioSf: 7,
+        radioBw: 125_000,
+        radioCr: 5,
+      });
+      getMeshcoreDeviceMock.mockReturnValue(handle);
+
+      const cfg = createConfig({
+        textChunkLimit: 100,
+        sendPacing: { enabled: true, mode: "ack", ackTimeoutMs: 5000 },
+      });
+
+      // Frame A: a first, standalone send call.
+      const frameA = sendMessageMeshcore(TEST_NODE_ID, "frame A", { cfg });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+      await frameA;
+
+      // The confirm for frame A arrives BEFORE frame B (the next send call) is
+      // invoked. With a waiter registered lazily in beforeFrame, the confirm
+      // would be dropped and frame B would have to burn the full ackTimeoutMs.
+      handle.connection.emit(0x82, { ackCode: 1, roundTrip: 50 });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Frame B: a second, standalone send call.
+      const frameB = sendMessageMeshcore(TEST_NODE_ID, "frame B", { cfg });
+
+      // Fast path: the pre-registered waiter was already released by frame A’s
+      // confirm, so frame B must not wait the remaining ackTimeoutMs. A single
+      // millisecond is far below the 5000 ms timeout.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(2);
+
+      await frameB;
     });
 
     it("mode switch allows choosing time or ack mode", async () => {

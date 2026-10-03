@@ -3,7 +3,15 @@ import {
   resolveSendPacingConfig,
   type SendPacingConfig,
 } from "./airtime.js";
-import { waitForSendConfirmed } from "./device-client.js";
+import {
+  waitForSendConfirmed,
+  type SendConfirmedPayload,
+} from "./device-client.js";
+
+type PendingAckWait = {
+  ackCode: number;
+  promise: Promise<SendConfirmedPayload | { timeout: true }>;
+};
 
 type PacingState = {
   inFlight: Promise<unknown> | null;
@@ -13,6 +21,14 @@ type PacingState = {
   ackWaitPending: boolean;
   lastFrameAirtimeMs: number;
   lastFrameSentAt: number;
+  /**
+   * ACK waiter pre-registered in afterFrame for the most recently sent frame.
+   * Registering eagerly (rather than in the next beforeFrame) closes the race
+   * where a confirm arrives before the next frame is invoked, which would
+   * otherwise be dropped and force the next frame to burn the full
+   * ackTimeoutMs. Strict tag equality and fail-closed semantics are retained.
+   */
+  pendingAckWait: PendingAckWait | null;
 };
 
 const accountPacingStates = new Map<string, PacingState>();
@@ -28,6 +44,7 @@ function getOrCreateState(accountId: string): PacingState {
       ackWaitPending: false,
       lastFrameAirtimeMs: 0,
       lastFrameSentAt: 0,
+      pendingAckWait: null,
     };
     accountPacingStates.set(accountId, state);
   }
@@ -89,8 +106,6 @@ export async function withPacedSend<T>(
             Math.ceil(state.lastFrameAirtimeMs * pacing.airtimeMargin),
           ),
         );
-        const elapsed = Date.now() - state.lastFrameSentAt;
-
         // Ack correlation requires the previous frame's expected tag: without
         // one we cannot safely attribute a confirm, so we skip the wait and fall
         // through to the airtime floor (fail-closed). A failed previous frame
@@ -100,17 +115,20 @@ export async function withPacedSend<T>(
           !state.lastFrameFailed &&
           state.lastFrameAckCode !== undefined
         ) {
-          // If the timeout window has already elapsed since the previous send,
-          // do not wait again.
-          if (elapsed < pacing.ackTimeoutMs) {
+          // The waiter was pre-registered in afterFrame for the previous
+          // frame's exact tag. Await that existing pending wait instead of
+          // registering a new one here: a confirm that arrived before this frame
+          // was invoked has already resolved it (fast path), and the
+          // pre-started timeout still bounds the wait when none arrives.
+          const pending = state.pendingAckWait;
+          if (pending && pending.ackCode === state.lastFrameAckCode) {
             state.ackWaitPending = true;
-            const result = await waitForSendConfirmed({
-              accountId,
-              expectedAckCode: state.lastFrameAckCode,
-              timeoutMs: pacing.ackTimeoutMs - elapsed,
-            });
+            const result = await pending.promise;
             state.ackWaitPending = false;
-
+            // One waiter per frame: consume it so it cannot be reused.
+            if (state.pendingAckWait === pending) {
+              state.pendingAckWait = null;
+            }
             if (!("timeout" in result)) {
               return;
             }
@@ -138,6 +156,25 @@ export async function withPacedSend<T>(
         state.lastFrameAirtimeMs = calculateChunkAirtimeMs(frameBytes, radioParams, pacing);
         state.lastFrameSentAt = Date.now();
         state.lastFrameFailed = false;
+
+        // Pre-register this frame's ACK waiter now, while the tag is known, so a
+        // confirm that arrives before the next frame is invoked is not dropped.
+        // Only an exact tag match releases it (see dispatchSendConfirmed);
+        // unmatched confirms are still dropped, never buffered. When the frame
+        // sequence ends with no subsequent send, the waiter settles on its own
+        // via its timeout — no timer/promise leak and no unhandled rejection.
+        state.pendingAckWait = null;
+        if (pacing.mode === "ack" && expectedAckCode !== undefined) {
+          const promise = waitForSendConfirmed({
+            accountId,
+            expectedAckCode,
+            timeoutMs: pacing.ackTimeoutMs,
+          });
+          // The waiter never rejects (it resolves with { timeout: true }); the
+          // guard covers an unawaited pending wait whose send sequence ended.
+          promise.catch(() => {});
+          state.pendingAckWait = { ackCode: expectedAckCode, promise };
+        }
       },
     });
   })();
