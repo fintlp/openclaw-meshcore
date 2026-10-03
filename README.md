@@ -126,6 +126,10 @@ Long replies are split into multiple MeshCore text messages. Sending them back-t
 | `defaultBw` | integer (Hz) | `62500` | Fallback bandwidth when live radio params are unavailable. |
 | `defaultCr` | integer | `8` | Fallback coding-rate denominator (5–8) when live radio params are unavailable. MeshCore stores CR as the denominator (`8` = 4/8). |
 
+**How pacing works (design).** In `"ack"` mode (default), each frame of a multi-frame sequence awaits the node's `SendConfirmed` push (opcode `0x82`) before the next frame is sent. Matching is **per-frame**: the tag returned by the send call is compared against the incoming `ackCode`; a confirm that matches no pending frame is dropped, never credited to another frame (fail-closed). If no confirm arrives within `ackTimeoutMs`, pacing falls back to the time-based estimate (`airtime × airtimeMargin`, clamped to `[minDelayMs, maxDelayMs]`). Frames whose send resolved without a tag skip the ack wait and take the time-based floor.
+
+This design came out of issue #10, where the node's tx path waits on the over-the-air ACK before draining its queue: measured ACK round-trips at 868.6 MHz / SF8 / BW 62.5 kHz are **1.3–3.1 s**, far above the LoRa airtime alone (~1.2 s per 127-byte frame). An airtime-only gap of ~1.45 s therefore enqueued frame 3 while the node still held frames 1–2 awaiting ACK — the tail frame was silently dropped (reproduced twice). With per-frame ACK-gated pacing the same 300-byte payload (3 frames) delivers completely.
+
 ### Group config (`groups["channel:0"]`)
 
 | Field | Type | Description |
@@ -176,7 +180,6 @@ Live verification against a dedicated test node (companion server on TCP 5000):
 ## Known limitations / upstream issues
 
 - **Text frame wire cap: 127 bytes.** Observed on node fw 1.16 (issue #5, root-caused with a position-encoded payload test): text frames are truncated at 127 bytes on the wire. The default `textChunkLimit` is therefore 127 — raising it re-introduces silent tail loss (~6 bytes per chunk) at every message join.
-- **No airtime pacing between chunks.** Multi-chunk sends are fired back-to-back; the per-chunk `await` resolves on node command-acceptance, not over-the-air completion. Under burst load the node tx queue can drop tail frames (observed: the third chunk of a 3-chunk message never arrived). Tracked as issue #10.
 - **`DeviceInfo` stale parsing.** The dependency returns `firmwareVer` as a signed 8-bit value and parses the remainder as a fixed-length `firmware_build_date` CString; some nodes return variable-length payloads that the library mis-aligns. Firmware/model fields are best-effort.
 - **`console.error` socket errors.** The dependency's TCP transport logs socket errors to `console.error` instead of routing them through the gateway logger. Errors are still surfaced via the `disconnected` event and the monitor promise rejection.
 - **SignedPlain DM workaround.** `@liamcottle/meshcore.js` v1.15.0 does not skip the 4 signature bytes before `readString()` for `txtType === 2` direct messages. The plugin strips the first 4 bytes of the decoded string before inbound handling, which is correct for valid UTF-8 signature prefixes. A durable fix belongs upstream in the dependency's frame parser.
