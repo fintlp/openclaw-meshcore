@@ -32,6 +32,7 @@ export type SendConfirmedPayload = {
 };
 
 type PendingSendConfirmed = {
+  expectedAckCode?: number;
   resolve: (value: SendConfirmedPayload | { timeout: true }) => void;
   timer: ReturnType<typeof setTimeout> | null;
 };
@@ -42,15 +43,23 @@ const connectionsWithSendConfirmedHandler = new WeakSet<TCPConnection>();
 
 function dispatchSendConfirmed(accountId: string, payload: SendConfirmedPayload): void {
   const queue = pendingSendConfirmedResolvers.get(accountId);
-  const next = queue?.shift();
-  if (next) {
-    if (next.timer) {
-      clearTimeout(next.timer);
-      next.timer = null;
+  if (queue) {
+    const matchIndex = queue.findIndex(
+      (w) => w.expectedAckCode === undefined || w.expectedAckCode === payload.ackCode,
+    );
+    if (matchIndex >= 0) {
+      const [matched] = queue.splice(matchIndex, 1);
+      if (matched.timer) {
+        clearTimeout(matched.timer);
+        matched.timer = null;
+      }
+      matched.resolve(payload);
+      return;
     }
-    next.resolve(payload);
-    return;
   }
+
+  // No pending waiter matches this ackCode. Buffer it in unconsumedConfirms so
+  // a future waiter expecting this tag can claim it.
   let unconsumed = unconsumedConfirms.get(accountId);
   if (!unconsumed) {
     unconsumed = [];
@@ -71,20 +80,29 @@ export function attachSendConfirmedHandler(connection: TCPConnection, accountId:
 
 /**
  * Wait for the next SendConfirmed (0x82) push for the given account.
+ * If `expectedAckCode` is specified, only a confirm whose `ackCode` matches
+ * will release this waiter; unmatched confirms are kept in buffer.
  * Resolves with the payload on confirm, or `{ timeout: true }` if no confirm
- * arrives within `timeoutMs`.  Multiple waiters are served FIFO.
+ * arrives within `timeoutMs`.
  */
 export function waitForSendConfirmed(params: {
   accountId: string;
+  expectedAckCode?: number;
   timeoutMs: number;
 }): Promise<SendConfirmedPayload | { timeout: true }> {
   const accountId = params.accountId;
+  const expectedAckCode = params.expectedAckCode;
   const timeoutMs = params.timeoutMs;
 
   const unconsumed = unconsumedConfirms.get(accountId);
   if (unconsumed && unconsumed.length > 0) {
-    const payload = unconsumed.shift()!;
-    return Promise.resolve(payload);
+    const matchIndex = unconsumed.findIndex(
+      (c) => expectedAckCode === undefined || c.ackCode === expectedAckCode,
+    );
+    if (matchIndex >= 0) {
+      const [matched] = unconsumed.splice(matchIndex, 1);
+      return Promise.resolve(matched);
+    }
   }
 
   if (timeoutMs <= 0) {
@@ -99,6 +117,7 @@ export function waitForSendConfirmed(params: {
     }
 
     const entry: PendingSendConfirmed = {
+      expectedAckCode,
       resolve,
       timer: null,
     };

@@ -585,19 +585,50 @@ describe("sendMessageMeshcore", () => {
         cfg: createConfig({ textChunkLimit: 100, sendPacing: { enabled: true, mode: "ack" } }),
       });
 
+      // Frame 1 sends immediately and returns expectedAckCrc: 1.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      // Confirm frame 1 with matching tag 1 -> frame 2 sends (returns expectedAckCrc: 2).
+      handle.connection.emit(0x82, { ackCode: 1, roundTrip: 1200 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(2);
+
+      // Confirm frame 2 with matching tag 2 -> frame 3 sends.
+      handle.connection.emit(0x82, { ackCode: 2, roundTrip: 1400 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(3);
+
+      await promise;
+    });
+
+    it("withholds frame N+1 when an unmatched ackCode is received; only matching expectedAckCrc releases the waiter", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 42 }));
+      const handle = createDeviceHandle(sendTextMessage);
+      getMeshcoreDeviceMock.mockReturnValue(handle);
+
+      const text = "a".repeat(200);
+      const promise = sendMessageMeshcore(TEST_NODE_ID, text, {
+        cfg: createConfig({ textChunkLimit: 100, sendPacing: { enabled: true, mode: "ack" } }),
+      });
+
       // Frame 1 sends immediately.
       await vi.advanceTimersByTimeAsync(0);
       expect(sendTextMessage).toHaveBeenCalledTimes(1);
 
-      // Confirm frame 1 -> frame 2 sends.
-      handle.connection.emit(0x82, { ackCode: 101, roundTrip: 1200 });
+      // Emit confirm with WRONG ackCode (e.g. from an evicted/timed-out frame).
+      handle.connection.emit(0x82, { ackCode: 999, roundTrip: 500 });
       await vi.advanceTimersByTimeAsync(0);
-      expect(sendTextMessage).toHaveBeenCalledTimes(2);
 
-      // Confirm frame 2 -> frame 3 sends.
-      handle.connection.emit(0x82, { ackCode: 102, roundTrip: 1400 });
+      // Frame 2 must STILL be withheld!
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      // Emit confirm with MATCHING ackCode (42).
+      handle.connection.emit(0x82, { ackCode: 42, roundTrip: 500 });
       await vi.advanceTimersByTimeAsync(0);
-      expect(sendTextMessage).toHaveBeenCalledTimes(3);
+
+      // Frame 2 is now released.
+      expect(sendTextMessage).toHaveBeenCalledTimes(2);
 
       await promise;
     });
@@ -787,6 +818,9 @@ describe("sendMessageMeshcore", () => {
 
       await expect(failedPromise).rejects.toThrow(/device disconnected/);
 
+      // Advance past the airtime gap of frame 1
+      await vi.advanceTimersByTimeAsync(5000);
+
       // Next send proceeds without delay and succeeds
       const okSend = vi.fn(async () => ({ expectedAckCrc: 2 }));
       getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(okSend));
@@ -799,6 +833,63 @@ describe("sendMessageMeshcore", () => {
         expect.objectContaining({ messageId: "2", target: TEST_NODE_ID }),
       );
       expect(okSend).toHaveBeenCalledTimes(1);
+    });
+
+    it("applies airtime pacing floor after a chunk-send failure in ack mode before allowing the next send", async () => {
+      const failingSend = vi
+        .fn()
+        .mockResolvedValueOnce({ expectedAckCrc: 1 })
+        .mockRejectedValueOnce(new Error("node rejected second chunk"));
+      getMeshcoreDeviceMock.mockReturnValue(
+        createDeviceHandle(failingSend, {
+          radioSf: 8,
+          radioBw: 62_500,
+          radioCr: 8,
+        }),
+      );
+
+      const failedPromise = sendMessageMeshcore(TEST_NODE_ID, "a".repeat(250), {
+        cfg: createConfig({
+          textChunkLimit: 100,
+          sendPacing: { enabled: true, mode: "ack" },
+        }),
+      });
+      failedPromise.catch(() => {});
+
+      // Frame 1 sends immediately.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(failingSend).toHaveBeenCalledTimes(1);
+
+      // Emit confirm for frame 1 -> frame 2 runs and throws immediately.
+      getMeshcoreDeviceMock().connection.emit(0x82, { ackCode: 1, roundTrip: 100 });
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(failedPromise).rejects.toThrow(/node rejected second chunk/);
+
+      const pacing = resolveSendPacingConfig({ mode: "ack" });
+      const expectedDelay = estimateChunkAirtimeMs(
+        100,
+        { radioSf: 8, radioBw: 62_500, radioCr: 8 },
+        pacing,
+      );
+
+      // Immediately initiate next send.
+      const okSend = vi.fn(async () => ({ expectedAckCrc: 2 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(okSend));
+
+      const nextPromise = sendMessageMeshcore(TEST_NODE_ID, "ok", {
+        cfg: createConfig({ sendPacing: { enabled: true, mode: "ack" } }),
+      });
+
+      // Because frame 1 was transmitted, the radio channel still needs the airtime gap.
+      // At expectedDelay - 1 ms, next send must be withheld.
+      await vi.advanceTimersByTimeAsync(expectedDelay - 1);
+      expect(okSend).toHaveBeenCalledTimes(0);
+
+      // At expectedDelay ms, next send transmits.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(okSend).toHaveBeenCalledTimes(1);
+
+      await nextPromise;
     });
   });
 });

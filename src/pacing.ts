@@ -9,6 +9,7 @@ type PacingState = {
   inFlight: Promise<unknown> | null;
   hasSentFrame: boolean;
   lastFrameFailed: boolean;
+  lastFrameAckCode?: number;
   ackWaitPending: boolean;
   lastFrameAirtimeMs: number;
   lastFrameSentAt: number;
@@ -23,6 +24,7 @@ function getOrCreateState(accountId: string): PacingState {
       inFlight: null,
       hasSentFrame: false,
       lastFrameFailed: false,
+      lastFrameAckCode: undefined,
       ackWaitPending: false,
       lastFrameAirtimeMs: 0,
       lastFrameSentAt: 0,
@@ -44,9 +46,10 @@ export type PacingFrameContext = {
   beforeFrame: (frameBytes: number) => Promise<void>;
   /**
    * Record the frame that was just sent so the next outbound send can pace
-   * relative to it. Call immediately after a successful transmission.
+   * relative to it. Optionally accepts the expected ACK tag from the node.
+   * Call immediately after a successful transmission.
    */
-  afterFrame: (frameBytes: number) => void;
+  afterFrame: (frameBytes: number, expectedAckCode?: number) => void;
 };
 
 /**
@@ -88,50 +91,40 @@ export async function withPacedSend<T>(
         );
         const elapsed = Date.now() - state.lastFrameSentAt;
 
-        if (pacing.mode === "ack") {
-          // In ack mode each subsequent frame waits for the previous frame's
-          // SendConfirmed push (FIFO). If the previous send failed, there will
-          // be no confirm; recover immediately so the next send is not blocked.
-          if (state.lastFrameFailed) {
-            state.lastFrameFailed = false;
-            return;
-          }
-
+        if (pacing.mode === "ack" && !state.lastFrameFailed) {
           // If the timeout window has already elapsed since the previous send,
           // do not wait again.
-          if (elapsed >= pacing.ackTimeoutMs) {
-            return;
-          }
+          if (elapsed < pacing.ackTimeoutMs) {
+            state.ackWaitPending = true;
+            const result = await waitForSendConfirmed({
+              accountId,
+              expectedAckCode: state.lastFrameAckCode,
+              timeoutMs: pacing.ackTimeoutMs - elapsed,
+            });
+            state.ackWaitPending = false;
 
-          state.ackWaitPending = true;
-          const result = await waitForSendConfirmed({
-            accountId,
-            timeoutMs: pacing.ackTimeoutMs - elapsed,
-          });
-          state.ackWaitPending = false;
-
-          if ("timeout" in result) {
-            // Confirm never arrived: fall back to the airtime-based gap since
-            // the last send, but do not wait longer than we already have.
-            const totalElapsed = Date.now() - state.lastFrameSentAt;
-            const remaining = Math.max(0, gapNeeded - totalElapsed);
-            if (remaining > 0) {
-              await sleep(remaining);
+            if (!("timeout" in result)) {
+              return;
             }
+            // Confirm timed out: fall through to enforce the airtime gapNeeded floor.
           }
-          return;
         }
 
-        const delay = Math.max(0, gapNeeded - elapsed);
+        // Apply time-mode gap floor (used in "time" mode, upon ACK timeout,
+        // or after a failed previous frame where no ACK will arrive).
+        state.lastFrameFailed = false;
+        const totalElapsed = Date.now() - state.lastFrameSentAt;
+        const delay = Math.max(0, gapNeeded - totalElapsed);
         if (delay > 0) {
           await sleep(delay);
         }
       },
-      afterFrame: (frameBytes) => {
+      afterFrame: (frameBytes, expectedAckCode) => {
         if (!pacing.enabled) {
           return;
         }
         state.hasSentFrame = true;
+        state.lastFrameAckCode = expectedAckCode;
         // Store the base (pre-margin) airtime; the margin is reapplied when
         // computing the next inter-frame gap so it is not double-applied.
         state.lastFrameAirtimeMs = calculateChunkAirtimeMs(frameBytes, radioParams, pacing);
@@ -150,7 +143,8 @@ export async function withPacedSend<T>(
     })
     .catch(() => {
       state.lastFrameFailed = true;
-      state.hasSentFrame = false;
+      // Note: do not reset hasSentFrame to false. If a frame was sent before
+      // the failure, the radio channel still needs the airtime gap floor.
     });
   return await current;
 }

@@ -182,18 +182,27 @@ describe("meshcore config schema", () => {
 
   // Drift-guard: assert every key of the zod channel config schema also exists in the manifest JSON schema.
   // FAILS if either schema is missing fields from the other (e.g. issue #16 where sendPacing was missing).
+  // Checks BOTH copies in openclaw.plugin.json: root channel config and per-account config.
   it("manifest schema drift guard: every zod field exists in manifest", () => {
     const fs = require("fs");
     const manifest = JSON.parse(fs.readFileSync("./openclaw.plugin.json", "utf8"));
     const manifestProperties = manifest.channelConfigs.meshcore.schema.properties;
-    const manifestPacing = manifestProperties.sendPacing.properties;
+    const rootPacing = manifestProperties.sendPacing;
+    const accountPacing = manifestProperties.accounts?.additionalProperties?.properties?.sendPacing;
 
     // 1. Top-level channel config keys: every key in zod schema must exist in manifest
     const zodTopLevelKeys = Object.keys(MeshcoreConfigSchema.shape);
     const missingTopLevel = zodTopLevelKeys.filter((k) => !manifestProperties.hasOwnProperty(k));
     expect(missingTopLevel).toEqual([]);
 
-    // 2. sendPacing keys and defaults
+    // 2. Both manifest copies must exist and be defined
+    expect(rootPacing).toBeDefined();
+    expect(accountPacing).toBeDefined();
+
+    // 3. Both manifest copies must be identical to each other
+    expect(rootPacing).toEqual(accountPacing);
+
+    // 4. sendPacing keys and defaults across both copies
     const zodKeys = [
       "enabled",
       "mode",
@@ -206,15 +215,7 @@ describe("meshcore config schema", () => {
       "defaultCr",
     ];
 
-    const missingInManifest = zodKeys.filter((k) => !manifestPacing.hasOwnProperty(k));
-    const extraInManifest = Object.keys(manifestPacing).filter((k) => !zodKeys.includes(k));
-
-    expect(missingInManifest).toEqual([]);
-    expect(extraInManifest).toEqual([]);
-
-    // Check defaults match
-    const manifestDefaults = manifest.channelConfigs.meshcore.schema.properties.sendPacing.default;
-    expect(manifestDefaults).toEqual({
+    const expectedDefaults = {
       enabled: true,
       mode: "ack",
       minDelayMs: 200,
@@ -224,6 +225,17 @@ describe("meshcore config schema", () => {
       defaultSf: 8,
       defaultBw: 62500,
       defaultCr: 8,
-    });
+    };
+
+    for (const [copyName, pacingObj] of [
+      ["root sendPacing", rootPacing],
+      ["account sendPacing", accountPacing],
+    ] as const) {
+      const missing = zodKeys.filter((k) => !pacingObj.properties.hasOwnProperty(k));
+      const extra = Object.keys(pacingObj.properties).filter((k) => !zodKeys.includes(k));
+      expect(missing, `${copyName} is missing keys`).toEqual([]);
+      expect(extra, `${copyName} has unexpected extra keys`).toEqual([]);
+      expect(pacingObj.default, `${copyName} defaults mismatch`).toEqual(expectedDefaults);
+    }
   });
 });

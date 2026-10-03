@@ -177,7 +177,7 @@ export async function sendMessageMeshcore(
         rememberOutboundEcho(chunk);
         const response = await handle.connection.sendTextMessage(pubkey, chunk);
         lastMessageId = String(response.expectedAckCrc ?? response.estTimeout ?? Date.now());
-        ctx.afterFrame(chunkBytes);
+        ctx.afterFrame(chunkBytes, response.expectedAckCrc);
       }
 
       recordMeshcoreOutboundActivity(account.accountId);
