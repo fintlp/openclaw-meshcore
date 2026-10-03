@@ -107,7 +107,22 @@ You can also set the environment variable `MESHCORE_HOST` for the default accoun
 | `groups` | object | `{}` | Per-group config keyed by `channel:0` … `channel:7` or `"*"`. |
 | `channels` | array of 0–7 | `[0]` | Mesh channel indices to listen for broadcasts. |
 | `textChunkLimit` | number (40–500) | `127` | Max **UTF-8 bytes** per outbound text chunk (the wire frame limit is byte-based). Chunks split at word boundaries where possible and never inside a multibyte character. Default 127 matches the observed wire cap — see Known Limitations. |
+| `sendPacing` | object | see below | Outbound airtime pacing for multi-chunk sends. |
 | `logInboundMessageContent` | boolean | `false` | When `true`, inbound log lines include up to 80 chars of text. |
+
+#### `sendPacing`
+
+Long replies are split into multiple MeshCore text messages. Sending them back-to-back can saturate the node tx queue and drop tail frames (issue #10). Pacing delays each chunk by the estimated LoRa frame airtime plus a margin. Single-chunk sends are never delayed.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Enable inter-chunk pacing. |
+| `minDelayMs` | number | `200` | Minimum delay between chunks, even if the airtime estimate is smaller. |
+| `maxDelayMs` | number | `5000` | Maximum delay between chunks, even if the airtime estimate is larger. |
+| `airtimeMargin` | number ≥ 1.0 | `1.25` | Multiplier applied to the raw LoRa airtime estimate. |
+| `defaultSf` | integer 6–12 | `8` | Fallback spreading factor when the node does not report live radio params. |
+| `defaultBw` | integer (Hz) | `62500` | Fallback bandwidth when live radio params are unavailable. |
+| `defaultCr` | integer | `8` | Fallback coding-rate denominator (5–8) when live radio params are unavailable. MeshCore stores CR as the denominator (`8` = 4/8). |
 
 ### Group config (`groups["channel:0"]`)
 

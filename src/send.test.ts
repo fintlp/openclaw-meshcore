@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { estimateChunkAirtimeMs, resolveSendPacingConfig } from "./airtime.js";
 import { clearOutboundEchoCache, isOutboundEcho } from "./echo-dedupe.js";
 import { sendMessageMeshcore } from "./send.js";
 import type { CoreConfig } from "./types.js";
@@ -25,13 +26,16 @@ function createConfig(overrides?: Partial<CoreConfig["channels"]["meshcore"]>): 
       meshcore: {
         host: "192.0.2.10",
         port: 5000,
+        // Most existing tests exercise chunking logic, not pacing. Disable
+        // pacing by default so they stay fast; pacing tests opt-in explicitly.
+        sendPacing: { enabled: false },
         ...overrides,
       },
     },
   } as CoreConfig;
 }
 
-function createDeviceHandle(sendTextMessage: ReturnType<typeof vi.fn>) {
+function createDeviceHandle(sendTextMessage: ReturnType<typeof vi.fn>, selfInfo?: object) {
   return {
     accountId: "default",
     connection: {
@@ -40,6 +44,7 @@ function createDeviceHandle(sendTextMessage: ReturnType<typeof vi.fn>) {
     connected: true,
     contacts: [],
     channels: [],
+    ...(selfInfo ? { selfInfo } : {}),
   };
 }
 
@@ -220,5 +225,113 @@ describe("sendMessageMeshcore", () => {
         cfg: { channels: { meshcore: {} } } as CoreConfig,
       }),
     ).rejects.toThrow(/not configured/);
+  });
+
+  describe("send pacing", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("does not delay single-chunk sends", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+      const promise = sendMessageMeshcore(TEST_NODE_ID, "short", {
+        cfg: createConfig(),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const result = await promise;
+
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+      expect(result.messageId).toBe("1");
+    });
+
+    it("waits at least the estimated airtime between chunks", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(
+        createDeviceHandle(sendTextMessage, {
+          radioSf: 8,
+          radioBw: 62_500,
+          radioCr: 8,
+        }),
+      );
+
+      // Two chunks, each exactly 100 single-byte chars.
+      const text = "a".repeat(200);
+      const promise = sendMessageMeshcore(TEST_NODE_ID, text, {
+        cfg: createConfig({ textChunkLimit: 100, sendPacing: { enabled: true } }),
+      });
+
+      // First chunk fires immediately.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      const pacing = resolveSendPacingConfig({});
+      const expectedDelay = estimateChunkAirtimeMs(100, { radioSf: 8, radioBw: 62_500, radioCr: 8 }, pacing);
+
+      // Just before the airtime estimate: second chunk must not yet be sent.
+      await vi.advanceTimersByTimeAsync(expectedDelay - 1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      // At the airtime estimate: second chunk is sent.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(2);
+
+      await promise;
+    });
+
+    it("uses configured radio defaults when SelfInfo is missing", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+      const text = "a".repeat(200);
+      const promise = sendMessageMeshcore(TEST_NODE_ID, text, {
+        cfg: createConfig({
+          textChunkLimit: 100,
+          sendPacing: { defaultSf: 7, defaultBw: 125_000, defaultCr: 5 },
+        }),
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      const pacing = resolveSendPacingConfig({
+        defaultSf: 7,
+        defaultBw: 125_000,
+        defaultCr: 5,
+      });
+      const expectedDelay = estimateChunkAirtimeMs(100, undefined, pacing);
+
+      await vi.advanceTimersByTimeAsync(expectedDelay - 1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(2);
+
+      await promise;
+    });
+
+    it("can be disabled via config", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+      const text = "a".repeat(200);
+      const promise = sendMessageMeshcore(TEST_NODE_ID, text, {
+        cfg: createConfig({
+          textChunkLimit: 100,
+          sendPacing: { enabled: false },
+        }),
+      });
+
+      // With pacing disabled both chunks should fire without any timer delay.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(2);
+
+      await promise;
+    });
   });
 });

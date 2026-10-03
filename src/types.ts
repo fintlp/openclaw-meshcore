@@ -20,6 +20,16 @@ export type MeshcoreGroupConfig = {
   systemPrompt?: string;
 };
 
+export type MeshcoreSendPacingConfig = {
+  enabled?: boolean;
+  minDelayMs?: number;
+  maxDelayMs?: number;
+  airtimeMargin?: number;
+  defaultSf?: number;
+  defaultBw?: number;
+  defaultCr?: number;
+};
+
 export type MeshcoreAccountConfig = {
   name?: string;
   enabled?: boolean;
@@ -43,6 +53,7 @@ export type MeshcoreAccountConfig = {
   blockStreaming?: boolean;
   blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
   responsePrefix?: string;
+  sendPacing?: MeshcoreSendPacingConfig;
   /** When true, inbound info logs include up to 80 characters of message text (default: metadata only). */
   logInboundMessageContent?: boolean;
 };

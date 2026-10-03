@@ -4,7 +4,12 @@ import {
 } from "openclaw/plugin-sdk/channel-message";
 import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { resolveMeshcoreAccount } from "./accounts.js";
-import { connectMeshcoreDevice, getMeshcoreDevice, nodeIdToPubkey, type MeshcoreDeviceHandle } from "./device-client.js";
+import {
+  connectMeshcoreDevice,
+  getMeshcoreDevice,
+  nodeIdToPubkey,
+  type MeshcoreDeviceHandle,
+} from "./device-client.js";
 import { rememberOutboundEcho } from "./echo-dedupe.js";
 import {
   formatMeshcoreNodeId,
@@ -15,6 +20,7 @@ import {
 } from "./normalize.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig } from "./types.js";
+import { estimateChunkAirtimeMs, resolveSendPacingConfig } from "./airtime.js";
 
 type SendMeshcoreOptions = {
   cfg: CoreConfig;
@@ -156,11 +162,25 @@ export async function sendMessageMeshcore(
   }
   const pubkey = nodeIdToPubkey(nodeId);
 
+  const pacing = resolveSendPacingConfig(account.config.sendPacing as Record<string, unknown> | undefined);
+  const radioParams = handle.selfInfo;
+
   let lastMessageId = "";
-  for (const chunk of chunks) {
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
     rememberOutboundEcho(chunk);
     const response = await handle.connection.sendTextMessage(pubkey, chunk);
     lastMessageId = String(response.expectedAckCrc ?? response.estTimeout ?? Date.now());
+
+    // Pacing: only between chunks, never after the final one. Single-chunk
+    // sends skip this entirely. We delay by the estimated LoRa frame airtime
+    // plus a safety margin so the node can drain its tx queue before the next
+    // frame is enqueued (issue #10).
+    if (pacing.enabled && i < chunks.length - 1) {
+      const chunkBytes = utf8ByteLength(chunk);
+      const delayMs = estimateChunkAirtimeMs(chunkBytes, radioParams, pacing);
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    }
   }
 
   recordMeshcoreOutboundActivity(account.accountId);

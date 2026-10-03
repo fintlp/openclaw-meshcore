@@ -91,4 +91,75 @@ describe("meshcore config schema", () => {
     );
     expect(issues.some((issue) => issue.path.includes("transport"))).toBe(true);
   });
+
+  it("applies sendPacing defaults", () => {
+    const config = expectValidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+      }),
+    );
+
+    expect(config.sendPacing).toEqual({
+      enabled: true,
+      minDelayMs: 200,
+      maxDelayMs: 5000,
+      airtimeMargin: 1.25,
+      defaultSf: 8,
+      defaultBw: 62_500,
+      defaultCr: 8,
+    });
+  });
+
+  it("accepts sendPacing overrides", () => {
+    const config = expectValidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        sendPacing: {
+          enabled: false,
+          minDelayMs: 500,
+          maxDelayMs: 3000,
+          airtimeMargin: 2.0,
+          defaultSf: 10,
+          defaultBw: 125_000,
+          defaultCr: 5,
+        },
+      }),
+    );
+
+    expect(config.sendPacing).toEqual({
+      enabled: false,
+      minDelayMs: 500,
+      maxDelayMs: 3000,
+      airtimeMargin: 2.0,
+      defaultSf: 10,
+      defaultBw: 125_000,
+      defaultCr: 5,
+    });
+  });
+
+  it("rejects sendPacing with sub-1.0 airtime margin", () => {
+    const issues = expectInvalidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        sendPacing: {
+          airtimeMargin: 0.5,
+        },
+      }),
+    );
+
+    expect(issues.some((issue) => issue.path.join(".") === "sendPacing.airtimeMargin")).toBe(true);
+  });
+
+  it("rejects sendPacing with out-of-range spreading factor", () => {
+    const issues = expectInvalidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        sendPacing: {
+          defaultSf: 13,
+        },
+      }),
+    );
+
+    expect(issues.some((issue) => issue.path.join(".").startsWith("sendPacing.defaultSf"))).toBe(true);
+  });
 });
