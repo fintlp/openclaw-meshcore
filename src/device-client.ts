@@ -336,7 +336,7 @@ export async function connectMeshcoreDevice(params: {
       handshakeTimeoutMs,
     )) as Record<string, unknown>;
     handle.selfInfo = normalizeSelfInfo(selfInfoRaw);
-    rememberSelfInfo(handle.selfInfo);
+    rememberSelfInfo(handle.selfInfo, handle.accountId);
     await connection.sendCommandDeviceQuery(1);
     const deviceInfoRaw = await waitForEvent<Record<string, unknown>>(
       connection,
@@ -476,17 +476,24 @@ export function resolveContactByNodeId(
  * Legacy advert-cache helper kept for backward compatibility.
  * New code should prefer {@link rememberContact} with the full advert payload.
  */
-export function rememberAdvertContact(publicKey: Uint8Array, name?: string): void {
-  rememberContact({ publicKey, advName: name });
+export function rememberAdvertContact(
+  publicKey: Uint8Array,
+  name: string | undefined,
+  accountId: string,
+): void {
+  rememberContact({ publicKey, advName: name }, accountId);
 }
 
 export { resolveContactPubkeyByPrefix as resolveAdvertPubkeyByPrefix };
 
-export function nodeIdToPubkey(nodeId: string): Uint8Array {
+export function nodeIdToPubkey(
+  nodeId: string,
+  accountId: string | undefined = undefined,
+): Uint8Array {
   const hex = normalizePubkeyHex(nodeId.replace(/^!/u, ""));
   if (!isValidPubkeyHex(hex)) {
-    if (hex) {
-      const resolved = resolveContactPubkeyByPrefix(hex);
+    if (hex && accountId) {
+      const resolved = resolveContactPubkeyByPrefix(hex, accountId);
       if (resolved) {
         return resolved;
       }

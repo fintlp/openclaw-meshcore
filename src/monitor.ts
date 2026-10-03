@@ -9,7 +9,7 @@ import {
   rememberContact,
 } from "./contact-book.js";
 import {
-  createDebouncedContactSync,
+  createThrottledContactSync,
   syncContactsFromNode,
 } from "./contact-sync.js";
 import {
@@ -210,15 +210,17 @@ export function monitorMeshcoreProvider(
     let resolveMonitor: ((value: { stop: () => void }) => void) | null = null;
     let rejectMonitor: ((reason: Error) => void) | null = null;
 
-    const contactSync = createDebouncedContactSync({
+    const contactSync = createThrottledContactSync({
       getContacts: async () => handle.connection.getContacts(),
       rememberContact,
+      accountId: account.accountId,
+      log: (message) => logger.info(message),
       debugLog: (message) => {
         if (core.logging.shouldLogVerbose()) {
           logger.debug?.(message);
         }
       },
-      debounceMs: 60_000,
+      throttleMs: 60_000,
     });
 
     const doCleanup = () => {
@@ -407,23 +409,26 @@ export function monitorMeshcoreProvider(
         if (!bytes || bytes.length !== 32) {
           return;
         }
-        rememberContact({
-          publicKey: bytes,
-          type: typeof advert.type === "number" ? advert.type : undefined,
-          flags: typeof advert.flags === "number" ? advert.flags : undefined,
-          outPathLen: typeof advert.outPathLen === "number" ? advert.outPathLen : undefined,
-          outPath:
-            advert.outPath instanceof Uint8Array
-              ? advert.outPath
-              : Array.isArray(advert.outPath)
-                ? new Uint8Array(advert.outPath as number[])
-                : undefined,
-          advName: typeof advert.advName === "string" ? advert.advName : undefined,
-          lastAdvert: typeof advert.lastAdvert === "number" ? advert.lastAdvert : undefined,
-          advLat: typeof advert.advLat === "number" ? advert.advLat : undefined,
-          advLon: typeof advert.advLon === "number" ? advert.advLon : undefined,
-          lastMod: typeof advert.lastMod === "number" ? advert.lastMod : undefined,
-        });
+        rememberContact(
+          {
+            publicKey: bytes,
+            type: typeof advert.type === "number" ? advert.type : undefined,
+            flags: typeof advert.flags === "number" ? advert.flags : undefined,
+            outPathLen: typeof advert.outPathLen === "number" ? advert.outPathLen : undefined,
+            outPath:
+              advert.outPath instanceof Uint8Array
+                ? advert.outPath
+                : Array.isArray(advert.outPath)
+                  ? new Uint8Array(advert.outPath as number[])
+                  : undefined,
+            advName: typeof advert.advName === "string" ? advert.advName : undefined,
+            lastAdvert: typeof advert.lastAdvert === "number" ? advert.lastAdvert : undefined,
+            advLat: typeof advert.advLat === "number" ? advert.advLat : undefined,
+            advLon: typeof advert.advLon === "number" ? advert.advLon : undefined,
+            lastMod: typeof advert.lastMod === "number" ? advert.lastMod : undefined,
+          },
+          account.accountId,
+        );
       } catch {
         // best-effort cache
       }
@@ -449,7 +454,7 @@ export function monitorMeshcoreProvider(
         if (!bytes || bytes.length !== 32) {
           return;
         }
-        const stored = getContactByPubkey(bytes);
+        const stored = getContactByPubkey(bytes, account.accountId);
         if (stored && contactHasMissingMetadata(stored)) {
           contactSync.schedule();
         }
@@ -496,6 +501,8 @@ export function monitorMeshcoreProvider(
     void syncContactsFromNode({
       getContacts: async () => handle.connection.getContacts(),
       rememberContact,
+      accountId: account.accountId,
+      log: (message) => logger.info(message),
       debugLog: (message) => {
         if (core.logging.shouldLogVerbose()) {
           logger.debug?.(message);

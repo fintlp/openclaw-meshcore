@@ -31,11 +31,26 @@ export type ContactBookEntry = {
   lastMod: number;
 };
 
-/** In-memory contact book, keyed by full 64-character pubkey hex. */
-const contacts = new Map<string, ContactBookEntry>();
+/** Contacts keyed by accountId, then by full 64-character pubkey hex. */
+const contactBooks = new Map<string, Map<string, ContactBookEntry>>();
+/**
+ * Legacy rows loaded from pre-accountId state files. They are adopted by the
+ * first account that looks them up or remembers them, so a single-account
+ * production file migrates seamlessly into the per-account model.
+ */
+const legacyContacts = new Map<string, ContactBookEntry>();
 let cacheLoaded = false;
 
 let testContactBookPath: string | undefined;
+
+function getAccountMap(accountId: string): Map<string, ContactBookEntry> {
+  let map = contactBooks.get(accountId);
+  if (!map) {
+    map = new Map();
+    contactBooks.set(accountId, map);
+  }
+  return map;
+}
 
 function getContactBookPath(): string {
   return (
@@ -82,6 +97,7 @@ function publicKeyHexFromBytes(publicKey: Uint8Array): string | undefined {
 
 type PersistedContactV2 = {
   publicKeyHex: string;
+  accountId?: string;
   type: number;
   flags: number;
   outPathLen: number;
@@ -145,30 +161,63 @@ function parseOutPathHex(outPathHex: unknown): Uint8Array {
   }
 }
 
+function rowToEntry(row: PersistedContactV2): ContactBookEntry | undefined {
+  const hex =
+    typeof row?.publicKeyHex === "string" ? row.publicKeyHex.toLowerCase() : "";
+  if (!/^[0-9a-f]{64}$/.test(hex)) {
+    return undefined;
+  }
+  try {
+    return {
+      publicKey: hexToBytes(hex),
+      type: Number(row.type ?? 0),
+      flags: Number(row.flags ?? 0),
+      outPathLen: Number(row.outPathLen ?? 0),
+      outPath: parseOutPathHex(row.outPathHex),
+      advName: String(row.advName ?? ""),
+      lastAdvert: Number(row.lastAdvert ?? 0),
+      advLat: Number(row.advLat ?? 0),
+      advLon: Number(row.advLon ?? 0),
+      lastMod: Number(row.lastMod ?? 0),
+    };
+  } catch (error) {
+    console.error(`[meshcore contact-book] skipping corrupt contact row ${hex}: ${String(error)}`);
+    return undefined;
+  }
+}
+
 function loadV2File(file: ContactBookFileV2): void {
   for (const row of file.contacts) {
-    const hex =
-      typeof row?.publicKeyHex === "string" ? row.publicKeyHex.toLowerCase() : "";
-    if (!/^[0-9a-f]{64}$/.test(hex)) {
+    const entry = rowToEntry(row);
+    if (!entry) {
       continue;
     }
-    try {
-      contacts.set(hex, {
-        publicKey: hexToBytes(hex),
-        type: Number(row.type ?? 0),
-        flags: Number(row.flags ?? 0),
-        outPathLen: Number(row.outPathLen ?? 0),
-        outPath: parseOutPathHex(row.outPathHex),
-        advName: String(row.advName ?? ""),
-        lastAdvert: Number(row.lastAdvert ?? 0),
-        advLat: Number(row.advLat ?? 0),
-        advLon: Number(row.advLon ?? 0),
-        lastMod: Number(row.lastMod ?? 0),
-      });
-    } catch (error) {
-      console.error(`[meshcore contact-book] skipping corrupt contact row ${hex}: ${String(error)}`);
+    const hex = bytesToHex(entry.publicKey).toLowerCase();
+    if (typeof row.accountId === "string" && row.accountId !== "") {
+      getAccountMap(row.accountId).set(hex, entry);
+    } else {
+      // Rows without an accountId belong to the legacy bucket and will be
+      // adopted by the first account that touches them.
+      legacyContacts.set(hex, entry);
     }
   }
+}
+
+/**
+ * Move a legacy entry into the given account's contact book. This is the lazy
+ * migration path for pre-accountId state files.
+ */
+function adoptLegacyEntry(
+  hex: string,
+  accountId: string,
+): ContactBookEntry | undefined {
+  const legacy = legacyContacts.get(hex);
+  if (!legacy) {
+    return undefined;
+  }
+  legacyContacts.delete(hex);
+  getAccountMap(accountId).set(hex, legacy);
+  return legacy;
 }
 
 function loadContacts(): void {
@@ -178,7 +227,7 @@ function loadContacts(): void {
       for (const row of data) {
         const entry = migrateV1Row(row);
         if (entry) {
-          contacts.set(bytesToHex(entry.publicKey).toLowerCase(), entry);
+          legacyContacts.set(bytesToHex(entry.publicKey).toLowerCase(), entry);
         }
       }
       // Persist the migrated data immediately so we don't re-migrate next run.
@@ -207,7 +256,27 @@ function persistContacts(): void {
     mkdirSync(dirname(path), { recursive: true });
     const payload: ContactBookFileV2 = {
       version: 2,
-      contacts: Array.from(contacts.entries()).map(([, entry]) => ({
+      contacts: [],
+    };
+    for (const [accountId, map] of contactBooks) {
+      for (const [, entry] of map) {
+        payload.contacts.push({
+          publicKeyHex: bytesToHex(entry.publicKey).toLowerCase(),
+          accountId,
+          type: entry.type,
+          flags: entry.flags,
+          outPathLen: entry.outPathLen,
+          outPathHex: bytesToHex(entry.outPath).toLowerCase(),
+          advName: entry.advName,
+          lastAdvert: entry.lastAdvert,
+          advLat: entry.advLat,
+          advLon: entry.advLon,
+          lastMod: entry.lastMod,
+        });
+      }
+    }
+    for (const [, entry] of legacyContacts) {
+      payload.contacts.push({
         publicKeyHex: bytesToHex(entry.publicKey).toLowerCase(),
         type: entry.type,
         flags: entry.flags,
@@ -218,8 +287,8 @@ function persistContacts(): void {
         advLat: entry.advLat,
         advLon: entry.advLon,
         lastMod: entry.lastMod,
-      })),
-    };
+      });
+    }
     writeFileSync(path, JSON.stringify(payload));
   } catch {
     // best-effort persistence
@@ -228,30 +297,59 @@ function persistContacts(): void {
 
 export function rememberContact(
   entry: Partial<Omit<ContactBookEntry, "publicKey">> & { publicKey: Uint8Array },
+  accountId: string,
 ): void {
   ensureLoaded();
   const hex = publicKeyHexFromBytes(entry.publicKey);
   if (!hex) {
     return;
   }
-  const existing = contacts.get(hex);
-  contacts.set(hex, {
+
+  const map = getAccountMap(accountId);
+  // Lazy migration: a legacy row belongs to the first account that touches it.
+  let existing = map.get(hex) ?? adoptLegacyEntry(hex, accountId);
+
+  const incomingLastAdvert = entry.lastAdvert;
+  const existingLastAdvert = existing?.lastAdvert ?? 0;
+
+  // lastAdvert is the freshness clock. An incoming advert that is older than
+  // the stored one must not downgrade the freshness-dependent fields.
+  const stale =
+    incomingLastAdvert !== undefined &&
+    existingLastAdvert !== 0 &&
+    incomingLastAdvert < existingLastAdvert;
+
+  const merged: ContactBookEntry = {
     publicKey: entry.publicKey,
     type: entry.type ?? existing?.type ?? 0,
     flags: entry.flags ?? existing?.flags ?? 0,
-    outPathLen: entry.outPathLen ?? existing?.outPathLen ?? 0,
-    outPath: entry.outPath
-      ? normalizeOutPath(entry.outPath)
-      : existing?.outPath ?? new Uint8Array(64),
+    outPathLen: stale
+      ? existing!.outPathLen
+      : (entry.outPathLen ?? existing?.outPathLen ?? 0),
+    outPath: stale
+      ? existing!.outPath
+      : entry.outPath
+        ? normalizeOutPath(entry.outPath)
+        : existing?.outPath ?? new Uint8Array(64),
     advName:
       entry.advName !== undefined && entry.advName !== ""
         ? entry.advName
         : existing?.advName ?? "",
-    lastAdvert: entry.lastAdvert ?? existing?.lastAdvert ?? 0,
-    advLat: entry.advLat ?? existing?.advLat ?? 0,
-    advLon: entry.advLon ?? existing?.advLon ?? 0,
-    lastMod: entry.lastMod ?? existing?.lastMod ?? 0,
-  });
+    lastAdvert: stale
+      ? existing!.lastAdvert
+      : (entry.lastAdvert ?? existing?.lastAdvert ?? 0),
+    advLat: stale
+      ? existing!.advLat
+      : (entry.advLat ?? existing?.advLat ?? 0),
+    advLon: stale
+      ? existing!.advLon
+      : (entry.advLon ?? existing?.advLon ?? 0),
+    lastMod: stale
+      ? existing!.lastMod
+      : (entry.lastMod ?? existing?.lastMod ?? 0),
+  };
+
+  map.set(hex, merged);
   persistContacts();
 }
 
@@ -261,24 +359,41 @@ export function rememberContact(
  * at zero; the important piece is that the node's own lat/lon/name are in the
  * contact book alongside remote adverts.
  */
-export function rememberSelfInfo(selfInfo: {
-  publicKey: Uint8Array;
-  name?: string;
-  advLat: number;
-  advLon: number;
-}): void {
-  rememberContact({
-    publicKey: selfInfo.publicKey,
-    advName: selfInfo.name,
-    advLat: selfInfo.advLat,
-    advLon: selfInfo.advLon,
-  });
+export function rememberSelfInfo(
+  selfInfo: {
+    publicKey: Uint8Array;
+    name?: string;
+    advLat: number;
+    advLon: number;
+  },
+  accountId: string,
+): void {
+  rememberContact(
+    {
+      publicKey: selfInfo.publicKey,
+      advName: selfInfo.name,
+      advLat: selfInfo.advLat,
+      advLon: selfInfo.advLon,
+    },
+    accountId,
+  );
 }
 
-export function resolveContactByPrefix(prefixHex: string): ContactBookEntry | undefined {
+export function resolveContactByPrefix(
+  prefixHex: string,
+  accountId: string,
+): ContactBookEntry | undefined {
   ensureLoaded();
   const p = prefixHex.toLowerCase();
-  for (const [hex, entry] of contacts) {
+  const map = getAccountMap(accountId);
+  for (const [hex, entry] of map) {
+    if (hex.startsWith(p)) {
+      return entry;
+    }
+  }
+  // A legacy row may be addressable by prefix even before it has been adopted
+  // by a remember call.
+  for (const [hex, entry] of legacyContacts) {
     if (hex.startsWith(p)) {
       return entry;
     }
@@ -286,8 +401,11 @@ export function resolveContactByPrefix(prefixHex: string): ContactBookEntry | un
   return undefined;
 }
 
-export function resolveContactPubkeyByPrefix(prefixHex: string): Uint8Array | undefined {
-  return resolveContactByPrefix(prefixHex)?.publicKey;
+export function resolveContactPubkeyByPrefix(
+  prefixHex: string,
+  accountId: string,
+): Uint8Array | undefined {
+  return resolveContactByPrefix(prefixHex, accountId)?.publicKey;
 }
 
 /**
@@ -298,16 +416,34 @@ export function formatContactPrefix(entry: ContactBookEntry): string {
   return bytesToHex(entry.publicKey.slice(0, MESHCORE_PUBKEY_PREFIX_LENGTH)).toLowerCase();
 }
 
-export function getContactBookEntries(): ContactBookEntry[] {
+/**
+ * Return all entries for a specific account, or all entries across every
+ * account (and any not-yet-adopted legacy rows) when no accountId is given.
+ * The no-argument form is intended for tests/debugging only.
+ */
+export function getContactBookEntries(accountId?: string): ContactBookEntry[] {
   ensureLoaded();
-  return Array.from(contacts.values());
+  if (accountId) {
+    return Array.from(getAccountMap(accountId).values());
+  }
+  const all: ContactBookEntry[] = Array.from(legacyContacts.values());
+  for (const map of contactBooks.values()) {
+    all.push(...map.values());
+  }
+  return all;
 }
 
 /** Retrieve a stored contact by full 32-byte public key, or undefined if unknown. */
-export function getContactByPubkey(publicKey: Uint8Array): ContactBookEntry | undefined {
+export function getContactByPubkey(
+  publicKey: Uint8Array,
+  accountId: string,
+): ContactBookEntry | undefined {
   ensureLoaded();
   const hex = publicKeyHexFromBytes(publicKey);
-  return hex ? contacts.get(hex) : undefined;
+  if (!hex) {
+    return undefined;
+  }
+  return getAccountMap(accountId).get(hex) ?? adoptLegacyEntry(hex, accountId);
 }
 
 /**
@@ -321,6 +457,7 @@ export function contactHasMissingMetadata(entry: ContactBookEntry): boolean {
 
 /** @internal Reset function for tests only. Does not delete the persisted file. */
 export function resetContactBookForTests(): void {
-  contacts.clear();
+  contactBooks.clear();
+  legacyContacts.clear();
   cacheLoaded = false;
 }
