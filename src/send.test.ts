@@ -429,5 +429,71 @@ describe("sendMessageMeshcore", () => {
       // No pending timers should remain.
       expect(vi.getTimerCount()).toBe(0);
     });
+
+    it("rejects cleanly when a chunk fails mid-sequence with pacing enabled", async () => {
+      const sendTextMessage = vi
+        .fn()
+        .mockResolvedValueOnce({ expectedAckCrc: 1 })
+        .mockRejectedValueOnce(new Error("node rejected second chunk"));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+      const promise = sendMessageMeshcore(TEST_NODE_ID, "a".repeat(250), {
+        cfg: createConfig({
+          textChunkLimit: 100,
+          sendPacing: { enabled: true },
+        }),
+      });
+      // Attach a no-op handler so the delayed rejection is never briefly
+      // observed as unhandled while fake timers are advancing.
+      promise.catch(() => {});
+
+      // First chunk sends immediately.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      // Pacing delay before the second chunk expires, then sendTextMessage throws.
+      await vi.advanceTimersByTimeAsync(5000);
+      await expect(promise).rejects.toThrow(/node rejected second chunk/);
+      expect(sendTextMessage).toHaveBeenCalledTimes(2);
+
+      // No pending timers should remain after the mid-sequence failure.
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("recovers pacing queue after a mid-sequence disconnect and lets the next send proceed", async () => {
+      const failingSend = vi
+        .fn()
+        .mockResolvedValueOnce({ expectedAckCrc: 1 })
+        .mockRejectedValueOnce(new Error("device disconnected"));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(failingSend));
+
+      const failedPromise = sendMessageMeshcore(TEST_NODE_ID, "a".repeat(250), {
+        cfg: createConfig({
+          textChunkLimit: 100,
+          sendPacing: { enabled: true },
+        }),
+      });
+      // Attach a no-op handler so the delayed rejection is never briefly
+      // observed as unhandled while fake timers are advancing.
+      failedPromise.catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(5000);
+      await expect(failedPromise).rejects.toThrow(/device disconnected/);
+      expect(vi.getTimerCount()).toBe(0);
+
+      // A subsequent send must not be blocked by the failed in-flight queue entry.
+      const okSend = vi.fn(async () => ({ expectedAckCrc: 2 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(okSend));
+
+      const nextPromise = sendMessageMeshcore(TEST_NODE_ID, "ok", {
+        cfg: createConfig({ sendPacing: { enabled: true } }),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(nextPromise).resolves.toEqual(
+        expect.objectContaining({ messageId: "2", target: TEST_NODE_ID }),
+      );
+      expect(okSend).toHaveBeenCalledTimes(1);
+    });
   });
 });
