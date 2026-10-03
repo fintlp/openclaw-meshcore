@@ -1,3 +1,4 @@
+import { Constants } from "@liamcottle/meshcore.js";
 import { resolveLoggerBackedRuntime } from "openclaw/plugin-sdk/extension-shared";
 import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/status-helpers";
 import { resolveMeshcoreAccount } from "./accounts.js";
@@ -411,6 +412,16 @@ export function monitorMeshcoreProvider(
     handle.connection.on(EVENT_NEW_ADVERT, onAdvert);
     unsubscribers.push(() => handle.connection.off(EVENT_ADVERT, onAdvert));
     unsubscribers.push(() => handle.connection.off(EVENT_NEW_ADVERT, onAdvert));
+
+    // SendConfirmed pushes (0x82): update transport activity timestamp
+    const onSendConfirmed = () => {
+      opts.statusSink?.({
+        lastEventAt: Date.now(),
+        lastTransportActivityAt: Date.now(),
+      });
+    };
+    handle.connection.on(Constants.PushCodes.SendConfirmed, onSendConfirmed);
+    unsubscribers.push(() => handle.connection.off(Constants.PushCodes.SendConfirmed, onSendConfirmed));
 
     // Periodically drain any queued messages (firmware may emit MsgWaiting push).
     const pollTimer = setInterval(() => {

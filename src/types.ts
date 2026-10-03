@@ -22,9 +22,11 @@ export type MeshcoreGroupConfig = {
 
 export type MeshcoreSendPacingConfig = {
   enabled?: boolean;
+  mode?: "ack" | "time";
   minDelayMs?: number;
   maxDelayMs?: number;
   airtimeMargin?: number;
+  ackTimeoutMs?: number;
   defaultSf?: number;
   defaultBw?: number;
   defaultCr?: number;

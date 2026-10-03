@@ -101,9 +101,11 @@ describe("meshcore config schema", () => {
 
     expect(config.sendPacing).toEqual({
       enabled: true,
+      mode: "ack",
       minDelayMs: 200,
       maxDelayMs: 5000,
       airtimeMargin: 1.25,
+      ackTimeoutMs: 6000,
       defaultSf: 8,
       defaultBw: 62_500,
       defaultCr: 8,
@@ -128,9 +130,11 @@ describe("meshcore config schema", () => {
 
     expect(config.sendPacing).toEqual({
       enabled: false,
+      mode: "ack",
       minDelayMs: 500,
       maxDelayMs: 3000,
       airtimeMargin: 2.0,
+      ackTimeoutMs: 6000,
       defaultSf: 10,
       defaultBw: 125_000,
       defaultCr: 5,
@@ -174,5 +178,64 @@ describe("meshcore config schema", () => {
     );
 
     expect(issues.some((issue) => issue.path.join(".").startsWith("sendPacing.defaultCr"))).toBe(true);
+  });
+
+  // Drift-guard: assert every key of the zod channel config schema also exists in the manifest JSON schema.
+  // FAILS if either schema is missing fields from the other (e.g. issue #16 where sendPacing was missing).
+  // Checks BOTH copies in openclaw.plugin.json: root channel config and per-account config.
+  it("manifest schema drift guard: every zod field exists in manifest", () => {
+    const fs = require("fs");
+    const manifest = JSON.parse(fs.readFileSync("./openclaw.plugin.json", "utf8"));
+    const manifestProperties = manifest.channelConfigs.meshcore.schema.properties;
+    const rootPacing = manifestProperties.sendPacing;
+    const accountPacing = manifestProperties.accounts?.additionalProperties?.properties?.sendPacing;
+
+    // 1. Top-level channel config keys: every key in zod schema must exist in manifest
+    const zodTopLevelKeys = Object.keys(MeshcoreConfigSchema.shape);
+    const missingTopLevel = zodTopLevelKeys.filter((k) => !manifestProperties.hasOwnProperty(k));
+    expect(missingTopLevel).toEqual([]);
+
+    // 2. Both manifest copies must exist and be defined
+    expect(rootPacing).toBeDefined();
+    expect(accountPacing).toBeDefined();
+
+    // 3. Both manifest copies must be identical to each other
+    expect(rootPacing).toEqual(accountPacing);
+
+    // 4. sendPacing keys and defaults across both copies
+    const zodKeys = [
+      "enabled",
+      "mode",
+      "minDelayMs",
+      "maxDelayMs",
+      "airtimeMargin",
+      "ackTimeoutMs",
+      "defaultSf",
+      "defaultBw",
+      "defaultCr",
+    ];
+
+    const expectedDefaults = {
+      enabled: true,
+      mode: "ack",
+      minDelayMs: 200,
+      maxDelayMs: 5000,
+      airtimeMargin: 1.25,
+      ackTimeoutMs: 6000,
+      defaultSf: 8,
+      defaultBw: 62500,
+      defaultCr: 8,
+    };
+
+    for (const [copyName, pacingObj] of [
+      ["root sendPacing", rootPacing],
+      ["account sendPacing", accountPacing],
+    ] as const) {
+      const missing = zodKeys.filter((k) => !pacingObj.properties.hasOwnProperty(k));
+      const extra = Object.keys(pacingObj.properties).filter((k) => !zodKeys.includes(k));
+      expect(missing, `${copyName} is missing keys`).toEqual([]);
+      expect(extra, `${copyName} has unexpected extra keys`).toEqual([]);
+      expect(pacingObj.default, `${copyName} defaults mismatch`).toEqual(expectedDefaults);
+    }
   });
 });

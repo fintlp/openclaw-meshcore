@@ -5,6 +5,7 @@ import {
 import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { resolveMeshcoreAccount } from "./accounts.js";
 import {
+  attachSendConfirmedHandler,
   connectMeshcoreDevice,
   getMeshcoreDevice,
   nodeIdToPubkey,
@@ -150,6 +151,8 @@ export async function sendMessageMeshcore(
       port: account.port,
     }));
 
+  attachSendConfirmedHandler(handle.connection, account.accountId);
+
   if (isMeshcoreGroupTarget(target)) {
     throw new Error(
       `MeshCore group sends are disabled: ${target} is receive-only (LoRa airtime rule)`,
@@ -174,7 +177,7 @@ export async function sendMessageMeshcore(
         rememberOutboundEcho(chunk);
         const response = await handle.connection.sendTextMessage(pubkey, chunk);
         lastMessageId = String(response.expectedAckCrc ?? response.estTimeout ?? Date.now());
-        ctx.afterFrame(chunkBytes);
+        ctx.afterFrame(chunkBytes, response.expectedAckCrc);
       }
 
       recordMeshcoreOutboundActivity(account.accountId);

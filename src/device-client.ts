@@ -1,4 +1,4 @@
-import { TCPConnection } from "@liamcottle/meshcore.js";
+import { Constants, TCPConnection } from "@liamcottle/meshcore.js";
 import {
   rememberContact,
   rememberSelfInfo,
@@ -25,6 +25,123 @@ export type MeshcoreDeviceHandle = {
 };
 
 const devices = new Map<string, MeshcoreDeviceHandle>();
+
+export type SendConfirmedPayload = {
+  ackCode: number;
+  roundTrip: number;
+};
+
+type PendingSendConfirmed = {
+  expectedAckCode?: number;
+  resolve: (value: SendConfirmedPayload | { timeout: true }) => void;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+const pendingSendConfirmedResolvers = new Map<string, PendingSendConfirmed[]>();
+const connectionsWithSendConfirmedHandler = new WeakSet<TCPConnection>();
+
+function dispatchSendConfirmed(accountId: string, payload: SendConfirmedPayload): void {
+  const queue = pendingSendConfirmedResolvers.get(accountId);
+  if (!queue || queue.length === 0) {
+    return;
+  }
+
+  // Per-frame correlation (must-fix #1): only the waiter whose expected ack tag
+  // equals this payload's ackCode is released. A waiter without an expected tag
+  // is never satisfied by an arbitrary confirm, and a confirm that matches no
+  // pending waiter (e.g. a late push for a frame whose waiter already timed out)
+  // is dropped here — it is never buffered or credited to a different frame.
+  const matchIndex = queue.findIndex(
+    (w) => w.expectedAckCode !== undefined && w.expectedAckCode === payload.ackCode,
+  );
+  if (matchIndex < 0) {
+    return;
+  }
+
+  const [matched] = queue.splice(matchIndex, 1);
+  if (matched.timer) {
+    clearTimeout(matched.timer);
+    matched.timer = null;
+  }
+  matched.resolve(payload);
+}
+
+export function attachSendConfirmedHandler(connection: TCPConnection, accountId: string): void {
+  if (connectionsWithSendConfirmedHandler.has(connection)) {
+    return;
+  }
+  connectionsWithSendConfirmedHandler.add(connection);
+  connection.on(Constants.PushCodes.SendConfirmed, (payload: SendConfirmedPayload) => {
+    dispatchSendConfirmed(accountId, payload);
+  });
+}
+
+/**
+ * Wait for the next SendConfirmed (0x82) push for the given account.
+ * Only a confirm whose `ackCode` exactly equals `expectedAckCode` releases this
+ * waiter; unmatched confirms are ignored (never credited to another frame).
+ * Resolves with the payload on confirm, or `{ timeout: true }` if no confirm
+ * arrives within `timeoutMs`.
+ */
+export function waitForSendConfirmed(params: {
+  accountId: string;
+  expectedAckCode?: number;
+  timeoutMs: number;
+}): Promise<SendConfirmedPayload | { timeout: true }> {
+  const accountId = params.accountId;
+  const expectedAckCode = params.expectedAckCode;
+  const timeoutMs = params.timeoutMs;
+
+  if (timeoutMs <= 0) {
+    return Promise.resolve({ timeout: true });
+  }
+
+  return new Promise<SendConfirmedPayload | { timeout: true }>((resolve) => {
+    let queue = pendingSendConfirmedResolvers.get(accountId);
+    if (!queue) {
+      queue = [];
+      pendingSendConfirmedResolvers.set(accountId, queue);
+    }
+
+    const entry: PendingSendConfirmed = {
+      expectedAckCode,
+      resolve,
+      timer: null,
+    };
+
+    // Ensure the connection is wired even if pacing starts after the monitor.
+    const handle = devices.get(accountId);
+    if (handle) {
+      attachSendConfirmedHandler(handle.connection, accountId);
+    }
+
+    entry.timer = setTimeout(() => {
+      const currentQueue = pendingSendConfirmedResolvers.get(accountId);
+      if (currentQueue) {
+        const index = currentQueue.indexOf(entry);
+        if (index >= 0) {
+          currentQueue.splice(index, 1);
+        }
+      }
+      entry.resolve({ timeout: true });
+    }, timeoutMs);
+
+    queue.push(entry);
+  });
+}
+
+/** Clear pending SendConfirmed waiters.  Intended for tests only. */
+export function clearSendConfirmedStateForTests(): void {
+  for (const queue of pendingSendConfirmedResolvers.values()) {
+    for (const entry of queue) {
+      if (entry.timer) {
+        clearTimeout(entry.timer);
+      }
+      entry.resolve({ timeout: true });
+    }
+  }
+  pendingSendConfirmedResolvers.clear();
+}
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -185,6 +302,9 @@ export async function connectMeshcoreDevice(params: {
       clearTimeout(timer);
       cleanup();
       handle.connected = true;
+      // Fan-out SendConfirmed pushes to any pacing gate waiting on this account
+      // without interfering with other listeners (advert/DM handlers, etc.).
+      attachSendConfirmedHandler(connection, params.accountId);
       resolve();
     };
     const onError = (error: unknown) => {

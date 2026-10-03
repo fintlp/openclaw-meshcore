@@ -3,10 +3,14 @@ import {
   resolveSendPacingConfig,
   type SendPacingConfig,
 } from "./airtime.js";
+import { waitForSendConfirmed } from "./device-client.js";
 
 type PacingState = {
   inFlight: Promise<unknown> | null;
   hasSentFrame: boolean;
+  lastFrameFailed: boolean;
+  lastFrameAckCode?: number;
+  ackWaitPending: boolean;
   lastFrameAirtimeMs: number;
   lastFrameSentAt: number;
 };
@@ -19,6 +23,9 @@ function getOrCreateState(accountId: string): PacingState {
     state = {
       inFlight: null,
       hasSentFrame: false,
+      lastFrameFailed: false,
+      lastFrameAckCode: undefined,
+      ackWaitPending: false,
       lastFrameAirtimeMs: 0,
       lastFrameSentAt: 0,
     };
@@ -39,9 +46,10 @@ export type PacingFrameContext = {
   beforeFrame: (frameBytes: number) => Promise<void>;
   /**
    * Record the frame that was just sent so the next outbound send can pace
-   * relative to it. Call immediately after a successful transmission.
+   * relative to it. Optionally accepts the expected ACK tag from the node.
+   * Call immediately after a successful transmission.
    */
-  afterFrame: (frameBytes: number) => void;
+  afterFrame: (frameBytes: number, expectedAckCode?: number) => void;
 };
 
 /**
@@ -82,27 +90,70 @@ export async function withPacedSend<T>(
           ),
         );
         const elapsed = Date.now() - state.lastFrameSentAt;
-        const delay = Math.max(0, gapNeeded - elapsed);
+
+        // Ack correlation requires the previous frame's expected tag: without
+        // one we cannot safely attribute a confirm, so we skip the wait and fall
+        // through to the airtime floor (fail-closed). A failed previous frame
+        // also skips the wait — no confirm will arrive for it.
+        if (
+          pacing.mode === "ack" &&
+          !state.lastFrameFailed &&
+          state.lastFrameAckCode !== undefined
+        ) {
+          // If the timeout window has already elapsed since the previous send,
+          // do not wait again.
+          if (elapsed < pacing.ackTimeoutMs) {
+            state.ackWaitPending = true;
+            const result = await waitForSendConfirmed({
+              accountId,
+              expectedAckCode: state.lastFrameAckCode,
+              timeoutMs: pacing.ackTimeoutMs - elapsed,
+            });
+            state.ackWaitPending = false;
+
+            if (!("timeout" in result)) {
+              return;
+            }
+            // Confirm timed out: fall through to enforce the airtime gapNeeded floor.
+          }
+        }
+
+        // Apply time-mode gap floor (used in "time" mode, upon ACK timeout,
+        // or after a failed previous frame where no ACK will arrive).
+        state.lastFrameFailed = false;
+        const totalElapsed = Date.now() - state.lastFrameSentAt;
+        const delay = Math.max(0, gapNeeded - totalElapsed);
         if (delay > 0) {
           await sleep(delay);
         }
       },
-      afterFrame: (frameBytes) => {
+      afterFrame: (frameBytes, expectedAckCode) => {
         if (!pacing.enabled) {
           return;
         }
         state.hasSentFrame = true;
+        state.lastFrameAckCode = expectedAckCode;
         // Store the base (pre-margin) airtime; the margin is reapplied when
         // computing the next inter-frame gap so it is not double-applied.
         state.lastFrameAirtimeMs = calculateChunkAirtimeMs(frameBytes, radioParams, pacing);
         state.lastFrameSentAt = Date.now();
+        state.lastFrameFailed = false;
       },
     });
   })();
 
   // Keep the queue alive even if this send throws; the next send should not be
-  // blocked by a previous failure.
-  state.inFlight = current.catch(() => undefined);
+  // blocked by a previous failure. Catching the error here prevents unhandled
+  // promise rejections on the internal in-flight promise.
+  state.inFlight = current
+    .then(() => {
+      state.lastFrameFailed = false;
+    })
+    .catch(() => {
+      state.lastFrameFailed = true;
+      // Note: do not reset hasSentFrame to false. If a frame was sent before
+      // the failure, the radio channel still needs the airtime gap floor.
+    });
   return await current;
 }
 
