@@ -18,9 +18,9 @@ import {
   parseMeshcoreChannelIndex,
   parseMeshcoreNodeId,
 } from "./normalize.js";
+import { withPacedSend } from "./pacing.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig } from "./types.js";
-import { estimateChunkAirtimeMs, resolveSendPacingConfig } from "./airtime.js";
 
 type SendMeshcoreOptions = {
   cfg: CoreConfig;
@@ -162,42 +162,38 @@ export async function sendMessageMeshcore(
   }
   const pubkey = nodeIdToPubkey(nodeId);
 
-  const pacing = resolveSendPacingConfig(account.config.sendPacing as Record<string, unknown> | undefined);
-  const radioParams = handle.selfInfo;
+  return await withPacedSend(
+    account.accountId,
+    account.config.sendPacing as Record<string, unknown> | undefined,
+    handle.selfInfo,
+    async (ctx) => {
+      let lastMessageId = "";
+      for (const chunk of chunks) {
+        const chunkBytes = utf8ByteLength(chunk);
+        await ctx.beforeFrame(chunkBytes);
+        rememberOutboundEcho(chunk);
+        const response = await handle.connection.sendTextMessage(pubkey, chunk);
+        lastMessageId = String(response.expectedAckCrc ?? response.estTimeout ?? Date.now());
+        ctx.afterFrame(chunkBytes);
+      }
 
-  let lastMessageId = "";
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i];
-    rememberOutboundEcho(chunk);
-    const response = await handle.connection.sendTextMessage(pubkey, chunk);
-    lastMessageId = String(response.expectedAckCrc ?? response.estTimeout ?? Date.now());
+      recordMeshcoreOutboundActivity(account.accountId);
 
-    // Pacing: only between chunks, never after the final one. Single-chunk
-    // sends skip this entirely. We delay by the estimated LoRa frame airtime
-    // plus a safety margin so the node can drain its tx queue before the next
-    // frame is enqueued (issue #10).
-    if (pacing.enabled && i < chunks.length - 1) {
-      const chunkBytes = utf8ByteLength(chunk);
-      const delayMs = estimateChunkAirtimeMs(chunkBytes, radioParams, pacing);
-      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
-    }
-  }
-
-  recordMeshcoreOutboundActivity(account.accountId);
-
-  return {
-    messageId: lastMessageId,
-    target,
-    receipt: createMessageReceiptFromOutboundResults({
-      results: [
-        {
-          channel: "meshcore",
-          messageId: lastMessageId,
-          conversationId: target,
-        },
-      ],
-      kind: "text",
-      ...(opts.replyTo ? { replyToId: opts.replyTo } : {}),
-    }),
-  };
+      return {
+        messageId: lastMessageId,
+        target,
+        receipt: createMessageReceiptFromOutboundResults({
+          results: [
+            {
+              channel: "meshcore",
+              messageId: lastMessageId,
+              conversationId: target,
+            },
+          ],
+          kind: "text",
+          ...(opts.replyTo ? { replyToId: opts.replyTo } : {}),
+        }),
+      };
+    },
+  );
 }

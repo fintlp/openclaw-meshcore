@@ -162,4 +162,17 @@ describe("meshcore config schema", () => {
 
     expect(issues.some((issue) => issue.path.join(".").startsWith("sendPacing.defaultSf"))).toBe(true);
   });
+
+  it("rejects sendPacing with coding rate outside 1-8", () => {
+    const issues = expectInvalidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        sendPacing: {
+          defaultCr: 9,
+        },
+      }),
+    );
+
+    expect(issues.some((issue) => issue.path.join(".").startsWith("sendPacing.defaultCr"))).toBe(true);
+  });
 });

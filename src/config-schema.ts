@@ -60,7 +60,7 @@ const MeshcoreAccountSchemaBase = z
         airtimeMargin: z.number().min(1.0).optional().default(1.25),
         defaultSf: z.number().int().min(6).max(12).optional().default(8),
         defaultBw: z.number().int().min(1).optional().default(62_500),
-        defaultCr: z.number().int().min(1).optional().default(8),
+        defaultCr: z.number().int().min(1).max(8).optional().default(8),
       })
       .optional()
       .default({
