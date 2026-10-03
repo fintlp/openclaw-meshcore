@@ -38,34 +38,32 @@ type PendingSendConfirmed = {
 };
 
 const pendingSendConfirmedResolvers = new Map<string, PendingSendConfirmed[]>();
-const unconsumedConfirms = new Map<string, SendConfirmedPayload[]>();
 const connectionsWithSendConfirmedHandler = new WeakSet<TCPConnection>();
 
 function dispatchSendConfirmed(accountId: string, payload: SendConfirmedPayload): void {
   const queue = pendingSendConfirmedResolvers.get(accountId);
-  if (queue) {
-    const matchIndex = queue.findIndex(
-      (w) => w.expectedAckCode === undefined || w.expectedAckCode === payload.ackCode,
-    );
-    if (matchIndex >= 0) {
-      const [matched] = queue.splice(matchIndex, 1);
-      if (matched.timer) {
-        clearTimeout(matched.timer);
-        matched.timer = null;
-      }
-      matched.resolve(payload);
-      return;
-    }
+  if (!queue || queue.length === 0) {
+    return;
   }
 
-  // No pending waiter matches this ackCode. Buffer it in unconsumedConfirms so
-  // a future waiter expecting this tag can claim it.
-  let unconsumed = unconsumedConfirms.get(accountId);
-  if (!unconsumed) {
-    unconsumed = [];
-    unconsumedConfirms.set(accountId, unconsumed);
+  // Per-frame correlation (must-fix #1): only the waiter whose expected ack tag
+  // equals this payload's ackCode is released. A waiter without an expected tag
+  // is never satisfied by an arbitrary confirm, and a confirm that matches no
+  // pending waiter (e.g. a late push for a frame whose waiter already timed out)
+  // is dropped here — it is never buffered or credited to a different frame.
+  const matchIndex = queue.findIndex(
+    (w) => w.expectedAckCode !== undefined && w.expectedAckCode === payload.ackCode,
+  );
+  if (matchIndex < 0) {
+    return;
   }
-  unconsumed.push(payload);
+
+  const [matched] = queue.splice(matchIndex, 1);
+  if (matched.timer) {
+    clearTimeout(matched.timer);
+    matched.timer = null;
+  }
+  matched.resolve(payload);
 }
 
 export function attachSendConfirmedHandler(connection: TCPConnection, accountId: string): void {
@@ -80,8 +78,8 @@ export function attachSendConfirmedHandler(connection: TCPConnection, accountId:
 
 /**
  * Wait for the next SendConfirmed (0x82) push for the given account.
- * If `expectedAckCode` is specified, only a confirm whose `ackCode` matches
- * will release this waiter; unmatched confirms are kept in buffer.
+ * Only a confirm whose `ackCode` exactly equals `expectedAckCode` releases this
+ * waiter; unmatched confirms are ignored (never credited to another frame).
  * Resolves with the payload on confirm, or `{ timeout: true }` if no confirm
  * arrives within `timeoutMs`.
  */
@@ -93,17 +91,6 @@ export function waitForSendConfirmed(params: {
   const accountId = params.accountId;
   const expectedAckCode = params.expectedAckCode;
   const timeoutMs = params.timeoutMs;
-
-  const unconsumed = unconsumedConfirms.get(accountId);
-  if (unconsumed && unconsumed.length > 0) {
-    const matchIndex = unconsumed.findIndex(
-      (c) => expectedAckCode === undefined || c.ackCode === expectedAckCode,
-    );
-    if (matchIndex >= 0) {
-      const [matched] = unconsumed.splice(matchIndex, 1);
-      return Promise.resolve(matched);
-    }
-  }
 
   if (timeoutMs <= 0) {
     return Promise.resolve({ timeout: true });
@@ -154,7 +141,6 @@ export function clearSendConfirmedStateForTests(): void {
     }
   }
   pendingSendConfirmedResolvers.clear();
-  unconsumedConfirms.clear();
 }
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;

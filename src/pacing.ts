@@ -91,7 +91,15 @@ export async function withPacedSend<T>(
         );
         const elapsed = Date.now() - state.lastFrameSentAt;
 
-        if (pacing.mode === "ack" && !state.lastFrameFailed) {
+        // Ack correlation requires the previous frame's expected tag: without
+        // one we cannot safely attribute a confirm, so we skip the wait and fall
+        // through to the airtime floor (fail-closed). A failed previous frame
+        // also skips the wait — no confirm will arrive for it.
+        if (
+          pacing.mode === "ack" &&
+          !state.lastFrameFailed &&
+          state.lastFrameAckCode !== undefined
+        ) {
           // If the timeout window has already elapsed since the previous send,
           // do not wait again.
           if (elapsed < pacing.ackTimeoutMs) {
