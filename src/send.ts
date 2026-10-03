@@ -4,7 +4,12 @@ import {
 } from "openclaw/plugin-sdk/channel-message";
 import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { resolveMeshcoreAccount } from "./accounts.js";
-import { connectMeshcoreDevice, getMeshcoreDevice, nodeIdToPubkey, type MeshcoreDeviceHandle } from "./device-client.js";
+import {
+  connectMeshcoreDevice,
+  getMeshcoreDevice,
+  nodeIdToPubkey,
+  type MeshcoreDeviceHandle,
+} from "./device-client.js";
 import { rememberOutboundEcho } from "./echo-dedupe.js";
 import {
   formatMeshcoreNodeId,
@@ -13,6 +18,7 @@ import {
   parseMeshcoreChannelIndex,
   parseMeshcoreNodeId,
 } from "./normalize.js";
+import { withPacedSend } from "./pacing.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig } from "./types.js";
 
@@ -156,28 +162,38 @@ export async function sendMessageMeshcore(
   }
   const pubkey = nodeIdToPubkey(nodeId);
 
-  let lastMessageId = "";
-  for (const chunk of chunks) {
-    rememberOutboundEcho(chunk);
-    const response = await handle.connection.sendTextMessage(pubkey, chunk);
-    lastMessageId = String(response.expectedAckCrc ?? response.estTimeout ?? Date.now());
-  }
+  return await withPacedSend(
+    account.accountId,
+    account.config.sendPacing as Record<string, unknown> | undefined,
+    handle.selfInfo,
+    async (ctx) => {
+      let lastMessageId = "";
+      for (const chunk of chunks) {
+        const chunkBytes = utf8ByteLength(chunk);
+        await ctx.beforeFrame(chunkBytes);
+        rememberOutboundEcho(chunk);
+        const response = await handle.connection.sendTextMessage(pubkey, chunk);
+        lastMessageId = String(response.expectedAckCrc ?? response.estTimeout ?? Date.now());
+        ctx.afterFrame(chunkBytes);
+      }
 
-  recordMeshcoreOutboundActivity(account.accountId);
+      recordMeshcoreOutboundActivity(account.accountId);
 
-  return {
-    messageId: lastMessageId,
-    target,
-    receipt: createMessageReceiptFromOutboundResults({
-      results: [
-        {
-          channel: "meshcore",
-          messageId: lastMessageId,
-          conversationId: target,
-        },
-      ],
-      kind: "text",
-      ...(opts.replyTo ? { replyToId: opts.replyTo } : {}),
-    }),
-  };
+      return {
+        messageId: lastMessageId,
+        target,
+        receipt: createMessageReceiptFromOutboundResults({
+          results: [
+            {
+              channel: "meshcore",
+              messageId: lastMessageId,
+              conversationId: target,
+            },
+          ],
+          kind: "text",
+          ...(opts.replyTo ? { replyToId: opts.replyTo } : {}),
+        }),
+      };
+    },
+  );
 }

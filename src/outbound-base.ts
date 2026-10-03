@@ -5,6 +5,6 @@ export const meshcoreOutboundBaseAdapter = {
   deliveryMode: "direct" as const,
   chunker: chunkTextForOutbound,
   chunkerMode: "text" as const,
-  textChunkLimit: 133,
+  textChunkLimit: 127,
   sanitizeText: ({ text }: { text: string }) => sanitizeForPlainText(text),
 };

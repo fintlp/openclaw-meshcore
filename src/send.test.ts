@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { estimateChunkAirtimeMs, resolveSendPacingConfig } from "./airtime.js";
 import { clearOutboundEchoCache, isOutboundEcho } from "./echo-dedupe.js";
+import { clearPacingStateForTests } from "./pacing.js";
 import { sendMessageMeshcore } from "./send.js";
 import type { CoreConfig } from "./types.js";
 
@@ -25,13 +27,16 @@ function createConfig(overrides?: Partial<CoreConfig["channels"]["meshcore"]>): 
       meshcore: {
         host: "192.0.2.10",
         port: 5000,
+        // Most existing tests exercise chunking logic, not pacing. Disable
+        // pacing by default so they stay fast; pacing tests opt-in explicitly.
+        sendPacing: { enabled: false },
         ...overrides,
       },
     },
   } as CoreConfig;
 }
 
-function createDeviceHandle(sendTextMessage: ReturnType<typeof vi.fn>) {
+function createDeviceHandle(sendTextMessage: ReturnType<typeof vi.fn>, selfInfo?: object) {
   return {
     accountId: "default",
     connection: {
@@ -40,6 +45,7 @@ function createDeviceHandle(sendTextMessage: ReturnType<typeof vi.fn>) {
     connected: true,
     contacts: [],
     channels: [],
+    ...(selfInfo ? { selfInfo } : {}),
   };
 }
 
@@ -47,11 +53,13 @@ describe("sendMessageMeshcore", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     clearOutboundEchoCache();
+    clearPacingStateForTests();
   });
 
   afterEach(() => {
     clearOutboundEchoCache();
     vi.clearAllMocks();
+    clearPacingStateForTests();
   });
 
   it("sends a DM and returns a receipt", async () => {
@@ -220,5 +228,272 @@ describe("sendMessageMeshcore", () => {
         cfg: { channels: { meshcore: {} } } as CoreConfig,
       }),
     ).rejects.toThrow(/not configured/);
+  });
+
+  describe("send pacing gate", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("does not delay single-chunk sends", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+      const promise = sendMessageMeshcore(TEST_NODE_ID, "short", {
+        cfg: createConfig({ sendPacing: { enabled: true } }),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const result = await promise;
+
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+      expect(result.messageId).toBe("1");
+    });
+
+    it("paces a 300-char reply into 3 sends with ≥airtime gaps between EACH", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(
+        createDeviceHandle(sendTextMessage, {
+          radioSf: 8,
+          radioBw: 62_500,
+          radioCr: 8,
+        }),
+      );
+
+      const text = "a".repeat(300);
+      const promise = sendMessageMeshcore(TEST_NODE_ID, text, {
+        cfg: createConfig({ textChunkLimit: 100, sendPacing: { enabled: true } }),
+      });
+
+      const pacing = resolveSendPacingConfig({});
+      const expectedDelay = estimateChunkAirtimeMs(
+        100,
+        { radioSf: 8, radioBw: 62_500, radioCr: 8 },
+        pacing,
+      );
+
+      // First chunk fires immediately.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      // Gap 1: second chunk must wait the airtime of the first chunk.
+      const start1 = Date.now();
+      await vi.advanceTimersByTimeAsync(expectedDelay - 1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(2);
+      expect(Date.now() - start1).toBeGreaterThanOrEqual(expectedDelay);
+
+      // Gap 2: third chunk must wait the airtime of the second chunk.
+      const start2 = Date.now();
+      await vi.advanceTimersByTimeAsync(expectedDelay - 1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(3);
+      expect(Date.now() - start2).toBeGreaterThanOrEqual(expectedDelay);
+
+      // No trailing delay: promise resolves without further timer advancement.
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(promise).resolves.toEqual(
+        expect.objectContaining({ messageId: "1", target: TEST_NODE_ID }),
+      );
+    });
+
+    it("paces separate sendMessageMeshcore calls (SDK-chunked pieces)", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(
+        createDeviceHandle(sendTextMessage, {
+          radioSf: 8,
+          radioBw: 62_500,
+          radioCr: 8,
+        }),
+      );
+
+      const cfg = createConfig({ sendPacing: { enabled: true } });
+      const pacing = resolveSendPacingConfig({});
+      const expectedDelay = estimateChunkAirtimeMs(
+        100,
+        { radioSf: 8, radioBw: 62_500, radioCr: 8 },
+        pacing,
+      );
+
+      // Simulate the SDK passing three ≤100-byte pieces with zero inter-piece delay.
+      const piece1 = sendMessageMeshcore(TEST_NODE_ID, "a".repeat(100), { cfg });
+      const piece2 = sendMessageMeshcore(TEST_NODE_ID, "b".repeat(100), { cfg });
+      const piece3 = sendMessageMeshcore(TEST_NODE_ID, "c".repeat(100), { cfg });
+
+      // First piece sends immediately.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      // Second piece waits for airtime of first.
+      await vi.advanceTimersByTimeAsync(expectedDelay - 1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(2);
+
+      // Third piece waits for airtime of second.
+      await vi.advanceTimersByTimeAsync(expectedDelay - 1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(3);
+
+      await Promise.all([piece1, piece2, piece3]);
+    });
+
+    it("uses configured radio defaults when SelfInfo is missing", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+      const text = "a".repeat(200);
+      const promise = sendMessageMeshcore(TEST_NODE_ID, text, {
+        cfg: createConfig({
+          textChunkLimit: 100,
+          sendPacing: { enabled: true, defaultSf: 7, defaultBw: 125_000, defaultCr: 5 },
+        }),
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      const pacing = resolveSendPacingConfig({
+        defaultSf: 7,
+        defaultBw: 125_000,
+        defaultCr: 5,
+      });
+      const expectedDelay = estimateChunkAirtimeMs(100, undefined, pacing);
+
+      await vi.advanceTimersByTimeAsync(expectedDelay - 1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sendTextMessage).toHaveBeenCalledTimes(2);
+
+      await promise;
+    });
+
+    it("can be disabled via config", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+      const text = "a".repeat(200);
+      const promise = sendMessageMeshcore(TEST_NODE_ID, text, {
+        cfg: createConfig({
+          textChunkLimit: 100,
+          sendPacing: { enabled: false },
+        }),
+      });
+
+      // With pacing disabled both chunks should fire without any timer delay.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(2);
+
+      await promise;
+    });
+
+    it("propagates chunk-send rejection cleanly", async () => {
+      const sendTextMessage = vi.fn(async () => {
+        throw new Error("node rejected send");
+      });
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+      const promise = sendMessageMeshcore(TEST_NODE_ID, "a".repeat(200), {
+        cfg: createConfig({
+          textChunkLimit: 100,
+          sendPacing: { enabled: true },
+        }),
+      });
+
+      await expect(promise).rejects.toThrow(/node rejected send/);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not leave timers pending after a chunk-send failure", async () => {
+      const sendTextMessage = vi.fn(async () => {
+        throw new Error("node rejected send");
+      });
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+      await expect(
+        sendMessageMeshcore(TEST_NODE_ID, "a".repeat(200), {
+          cfg: createConfig({
+            textChunkLimit: 100,
+            sendPacing: { enabled: true },
+          }),
+        }),
+      ).rejects.toThrow(/node rejected send/);
+
+      // No pending timers should remain.
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("rejects cleanly when a chunk fails mid-sequence with pacing enabled", async () => {
+      const sendTextMessage = vi
+        .fn()
+        .mockResolvedValueOnce({ expectedAckCrc: 1 })
+        .mockRejectedValueOnce(new Error("node rejected second chunk"));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+      const promise = sendMessageMeshcore(TEST_NODE_ID, "a".repeat(250), {
+        cfg: createConfig({
+          textChunkLimit: 100,
+          sendPacing: { enabled: true },
+        }),
+      });
+      // Attach a no-op handler so the delayed rejection is never briefly
+      // observed as unhandled while fake timers are advancing.
+      promise.catch(() => {});
+
+      // First chunk sends immediately.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      // Pacing delay before the second chunk expires, then sendTextMessage throws.
+      await vi.advanceTimersByTimeAsync(5000);
+      await expect(promise).rejects.toThrow(/node rejected second chunk/);
+      expect(sendTextMessage).toHaveBeenCalledTimes(2);
+
+      // No pending timers should remain after the mid-sequence failure.
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("recovers pacing queue after a mid-sequence disconnect and lets the next send proceed", async () => {
+      const failingSend = vi
+        .fn()
+        .mockResolvedValueOnce({ expectedAckCrc: 1 })
+        .mockRejectedValueOnce(new Error("device disconnected"));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(failingSend));
+
+      const failedPromise = sendMessageMeshcore(TEST_NODE_ID, "a".repeat(250), {
+        cfg: createConfig({
+          textChunkLimit: 100,
+          sendPacing: { enabled: true },
+        }),
+      });
+      // Attach a no-op handler so the delayed rejection is never briefly
+      // observed as unhandled while fake timers are advancing.
+      failedPromise.catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(5000);
+      await expect(failedPromise).rejects.toThrow(/device disconnected/);
+      expect(vi.getTimerCount()).toBe(0);
+
+      // A subsequent send must not be blocked by the failed in-flight queue entry.
+      const okSend = vi.fn(async () => ({ expectedAckCrc: 2 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(okSend));
+
+      const nextPromise = sendMessageMeshcore(TEST_NODE_ID, "ok", {
+        cfg: createConfig({ sendPacing: { enabled: true } }),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(nextPromise).resolves.toEqual(
+        expect.objectContaining({ messageId: "2", target: TEST_NODE_ID }),
+      );
+      expect(okSend).toHaveBeenCalledTimes(1);
+    });
   });
 });

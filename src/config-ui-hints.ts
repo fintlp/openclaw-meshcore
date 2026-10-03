@@ -33,6 +33,10 @@ export const meshcoreChannelConfigUiHints = {
     label: "MeshCore Text Chunk Limit",
     help: "Maximum UTF-8 bytes per outbound mesh text message (default 127 — node firmware truncates frames at 127 bytes on the wire). Long replies are split into chunks and sent as separate messages.",
   },
+  sendPacing: {
+    label: "Send Pacing",
+    help: "Outbound chunk pacing: delays between multi-chunk sends by the estimated LoRa frame airtime plus a safety margin, so the node can drain its tx queue. Default enabled; single-chunk sends are unaffected.",
+  },
   logInboundMessageContent: {
     label: "Log Inbound Message Content",
     help: "When true, Gateway logs include up to 80 characters of inbound mesh text. Default is false (metadata only: sender, target, message id, length).",

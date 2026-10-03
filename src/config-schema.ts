@@ -52,6 +52,26 @@ const MeshcoreAccountSchemaBase = z
       })
       .optional(),
     responsePrefix: z.string().optional(),
+    sendPacing: z
+      .object({
+        enabled: z.boolean().optional().default(true),
+        minDelayMs: z.number().int().min(0).optional().default(200),
+        maxDelayMs: z.number().int().min(0).optional().default(5000),
+        airtimeMargin: z.number().min(1.0).optional().default(1.25),
+        defaultSf: z.number().int().min(6).max(12).optional().default(8),
+        defaultBw: z.number().int().min(1).optional().default(62_500),
+        defaultCr: z.number().int().min(1).max(8).optional().default(8),
+      })
+      .optional()
+      .default({
+        enabled: true,
+        minDelayMs: 200,
+        maxDelayMs: 5000,
+        airtimeMargin: 1.25,
+        defaultSf: 8,
+        defaultBw: 62_500,
+        defaultCr: 8,
+      }),
     logInboundMessageContent: z.boolean().optional(),
   })
   .strict();
