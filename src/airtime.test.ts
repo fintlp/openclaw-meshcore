@@ -164,9 +164,11 @@ describe("resolveSendPacingConfig", () => {
     const cfg = resolveSendPacingConfig(undefined);
 
     expect(cfg.enabled).toBe(true);
+    expect(cfg.mode).toBe("ack");
     expect(cfg.minDelayMs).toBe(200);
     expect(cfg.maxDelayMs).toBe(5000);
     expect(cfg.airtimeMargin).toBe(1.25);
+    expect(cfg.ackTimeoutMs).toBe(6000);
     expect(cfg.defaultSf).toBe(8);
     expect(cfg.defaultBw).toBe(62_500);
     expect(cfg.defaultCr).toBe(8);
@@ -175,18 +177,22 @@ describe("resolveSendPacingConfig", () => {
   it("preserves explicit overrides", () => {
     const cfg = resolveSendPacingConfig({
       enabled: false,
+      mode: "time",
       minDelayMs: 500,
       maxDelayMs: 10_000,
       airtimeMargin: 2.0,
+      ackTimeoutMs: 3000,
       defaultSf: 10,
       defaultBw: 125_000,
       defaultCr: 5,
     });
 
     expect(cfg.enabled).toBe(false);
+    expect(cfg.mode).toBe("time");
     expect(cfg.minDelayMs).toBe(500);
     expect(cfg.maxDelayMs).toBe(10_000);
     expect(cfg.airtimeMargin).toBe(2.0);
+    expect(cfg.ackTimeoutMs).toBe(3000);
     expect(cfg.defaultSf).toBe(10);
     expect(cfg.defaultBw).toBe(125_000);
     expect(cfg.defaultCr).toBe(5);

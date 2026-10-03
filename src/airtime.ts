@@ -87,11 +87,15 @@ export function calculateLoraAirtimeMs(params: LoraAirtimeParams): number {
   return preambleDurationMs + payloadDurationMs;
 }
 
+export type SendPacingMode = "ack" | "time";
+
 export type SendPacingConfig = {
   enabled: boolean;
+  mode: SendPacingMode;
   minDelayMs: number;
   maxDelayMs: number;
   airtimeMargin: number;
+  ackTimeoutMs: number;
   defaultSf: number;
   defaultBw: number;
   defaultCr: number;
@@ -101,14 +105,19 @@ export function resolveSendPacingConfig(
   raw: Record<string, unknown> | undefined,
 ): SendPacingConfig {
   const pacing = raw ?? {};
+  const mode: SendPacingMode =
+    pacing.mode === "ack" || pacing.mode === "time" ? pacing.mode : "ack";
   return {
     enabled: typeof pacing.enabled === "boolean" ? pacing.enabled : true,
+    mode,
     minDelayMs: typeof pacing.minDelayMs === "number" ? Math.max(0, pacing.minDelayMs) : 200,
     maxDelayMs: typeof pacing.maxDelayMs === "number" ? Math.max(0, pacing.maxDelayMs) : 5000,
     airtimeMargin:
       typeof pacing.airtimeMargin === "number" && pacing.airtimeMargin >= 1
         ? pacing.airtimeMargin
         : 1.25,
+    ackTimeoutMs:
+      typeof pacing.ackTimeoutMs === "number" ? Math.max(0, pacing.ackTimeoutMs) : 6000,
     defaultSf: typeof pacing.defaultSf === "number" ? Math.max(6, Math.min(12, pacing.defaultSf)) : 8,
     defaultBw: typeof pacing.defaultBw === "number" ? Math.max(1, pacing.defaultBw) : 62_500,
     defaultCr: typeof pacing.defaultCr === "number" ? pacing.defaultCr : 8,

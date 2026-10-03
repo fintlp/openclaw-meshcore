@@ -1,4 +1,4 @@
-import { TCPConnection } from "@liamcottle/meshcore.js";
+import { Constants, TCPConnection } from "@liamcottle/meshcore.js";
 import {
   rememberContact,
   rememberSelfInfo,
@@ -25,6 +25,118 @@ export type MeshcoreDeviceHandle = {
 };
 
 const devices = new Map<string, MeshcoreDeviceHandle>();
+
+export type SendConfirmedPayload = {
+  ackCode: number;
+  roundTrip: number;
+};
+
+type PendingSendConfirmed = {
+  resolve: (value: SendConfirmedPayload | { timeout: true }) => void;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+const pendingSendConfirmedResolvers = new Map<string, PendingSendConfirmed[]>();
+const unconsumedConfirms = new Map<string, SendConfirmedPayload[]>();
+const connectionsWithSendConfirmedHandler = new WeakSet<TCPConnection>();
+
+function dispatchSendConfirmed(accountId: string, payload: SendConfirmedPayload): void {
+  const queue = pendingSendConfirmedResolvers.get(accountId);
+  const next = queue?.shift();
+  if (next) {
+    if (next.timer) {
+      clearTimeout(next.timer);
+      next.timer = null;
+    }
+    next.resolve(payload);
+    return;
+  }
+  let unconsumed = unconsumedConfirms.get(accountId);
+  if (!unconsumed) {
+    unconsumed = [];
+    unconsumedConfirms.set(accountId, unconsumed);
+  }
+  unconsumed.push(payload);
+}
+
+export function attachSendConfirmedHandler(connection: TCPConnection, accountId: string): void {
+  if (connectionsWithSendConfirmedHandler.has(connection)) {
+    return;
+  }
+  connectionsWithSendConfirmedHandler.add(connection);
+  connection.on(Constants.PushCodes.SendConfirmed, (payload: SendConfirmedPayload) => {
+    dispatchSendConfirmed(accountId, payload);
+  });
+}
+
+/**
+ * Wait for the next SendConfirmed (0x82) push for the given account.
+ * Resolves with the payload on confirm, or `{ timeout: true }` if no confirm
+ * arrives within `timeoutMs`.  Multiple waiters are served FIFO.
+ */
+export function waitForSendConfirmed(params: {
+  accountId: string;
+  timeoutMs: number;
+}): Promise<SendConfirmedPayload | { timeout: true }> {
+  const accountId = params.accountId;
+  const timeoutMs = params.timeoutMs;
+
+  const unconsumed = unconsumedConfirms.get(accountId);
+  if (unconsumed && unconsumed.length > 0) {
+    const payload = unconsumed.shift()!;
+    return Promise.resolve(payload);
+  }
+
+  if (timeoutMs <= 0) {
+    return Promise.resolve({ timeout: true });
+  }
+
+  return new Promise<SendConfirmedPayload | { timeout: true }>((resolve) => {
+    let queue = pendingSendConfirmedResolvers.get(accountId);
+    if (!queue) {
+      queue = [];
+      pendingSendConfirmedResolvers.set(accountId, queue);
+    }
+
+    const entry: PendingSendConfirmed = {
+      resolve,
+      timer: null,
+    };
+
+    // Ensure the connection is wired even if pacing starts after the monitor.
+    const handle = devices.get(accountId);
+    if (handle) {
+      attachSendConfirmedHandler(handle.connection, accountId);
+    }
+
+    entry.timer = setTimeout(() => {
+      const currentQueue = pendingSendConfirmedResolvers.get(accountId);
+      if (currentQueue) {
+        const index = currentQueue.indexOf(entry);
+        if (index >= 0) {
+          currentQueue.splice(index, 1);
+        }
+      }
+      entry.resolve({ timeout: true });
+    }, timeoutMs);
+
+    queue.push(entry);
+  });
+}
+
+/** Clear pending SendConfirmed waiters.  Intended for tests only. */
+export function clearSendConfirmedStateForTests(): void {
+  for (const queue of pendingSendConfirmedResolvers.values()) {
+    for (const entry of queue) {
+      if (entry.timer) {
+        clearTimeout(entry.timer);
+      }
+      entry.resolve({ timeout: true });
+    }
+  }
+  pendingSendConfirmedResolvers.clear();
+  unconsumedConfirms.clear();
+}
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -185,6 +297,9 @@ export async function connectMeshcoreDevice(params: {
       clearTimeout(timer);
       cleanup();
       handle.connected = true;
+      // Fan-out SendConfirmed pushes to any pacing gate waiting on this account
+      // without interfering with other listeners (advert/DM handlers, etc.).
+      attachSendConfirmedHandler(connection, params.accountId);
       resolve();
     };
     const onError = (error: unknown) => {

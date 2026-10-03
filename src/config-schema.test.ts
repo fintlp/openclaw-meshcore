@@ -101,9 +101,11 @@ describe("meshcore config schema", () => {
 
     expect(config.sendPacing).toEqual({
       enabled: true,
+      mode: "ack",
       minDelayMs: 200,
       maxDelayMs: 5000,
       airtimeMargin: 1.25,
+      ackTimeoutMs: 6000,
       defaultSf: 8,
       defaultBw: 62_500,
       defaultCr: 8,
@@ -128,9 +130,11 @@ describe("meshcore config schema", () => {
 
     expect(config.sendPacing).toEqual({
       enabled: false,
+      mode: "ack",
       minDelayMs: 500,
       maxDelayMs: 3000,
       airtimeMargin: 2.0,
+      ackTimeoutMs: 6000,
       defaultSf: 10,
       defaultBw: 125_000,
       defaultCr: 5,
@@ -174,5 +178,52 @@ describe("meshcore config schema", () => {
     );
 
     expect(issues.some((issue) => issue.path.join(".").startsWith("sendPacing.defaultCr"))).toBe(true);
+  });
+
+  // Drift-guard: assert every key of the zod channel config schema also exists in the manifest JSON schema.
+  // FAILS if either schema is missing fields from the other (e.g. issue #16 where sendPacing was missing).
+  it("manifest schema drift guard: every zod field exists in manifest", () => {
+    const fs = require("fs");
+    const manifest = JSON.parse(fs.readFileSync("./openclaw.plugin.json", "utf8"));
+    const manifestProperties = manifest.channelConfigs.meshcore.schema.properties;
+    const manifestPacing = manifestProperties.sendPacing.properties;
+
+    // 1. Top-level channel config keys: every key in zod schema must exist in manifest
+    const zodTopLevelKeys = Object.keys(MeshcoreConfigSchema.shape);
+    const missingTopLevel = zodTopLevelKeys.filter((k) => !manifestProperties.hasOwnProperty(k));
+    expect(missingTopLevel).toEqual([]);
+
+    // 2. sendPacing keys and defaults
+    const zodKeys = [
+      "enabled",
+      "mode",
+      "minDelayMs",
+      "maxDelayMs",
+      "airtimeMargin",
+      "ackTimeoutMs",
+      "defaultSf",
+      "defaultBw",
+      "defaultCr",
+    ];
+
+    const missingInManifest = zodKeys.filter((k) => !manifestPacing.hasOwnProperty(k));
+    const extraInManifest = Object.keys(manifestPacing).filter((k) => !zodKeys.includes(k));
+
+    expect(missingInManifest).toEqual([]);
+    expect(extraInManifest).toEqual([]);
+
+    // Check defaults match
+    const manifestDefaults = manifest.channelConfigs.meshcore.schema.properties.sendPacing.default;
+    expect(manifestDefaults).toEqual({
+      enabled: true,
+      mode: "ack",
+      minDelayMs: 200,
+      maxDelayMs: 5000,
+      airtimeMargin: 1.25,
+      ackTimeoutMs: 6000,
+      defaultSf: 8,
+      defaultBw: 62500,
+      defaultCr: 8,
+    });
   });
 });

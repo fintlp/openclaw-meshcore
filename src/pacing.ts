@@ -3,10 +3,13 @@ import {
   resolveSendPacingConfig,
   type SendPacingConfig,
 } from "./airtime.js";
+import { waitForSendConfirmed } from "./device-client.js";
 
 type PacingState = {
   inFlight: Promise<unknown> | null;
   hasSentFrame: boolean;
+  lastFrameFailed: boolean;
+  ackWaitPending: boolean;
   lastFrameAirtimeMs: number;
   lastFrameSentAt: number;
 };
@@ -19,6 +22,8 @@ function getOrCreateState(accountId: string): PacingState {
     state = {
       inFlight: null,
       hasSentFrame: false,
+      lastFrameFailed: false,
+      ackWaitPending: false,
       lastFrameAirtimeMs: 0,
       lastFrameSentAt: 0,
     };
@@ -82,6 +87,41 @@ export async function withPacedSend<T>(
           ),
         );
         const elapsed = Date.now() - state.lastFrameSentAt;
+
+        if (pacing.mode === "ack") {
+          // In ack mode each subsequent frame waits for the previous frame's
+          // SendConfirmed push (FIFO). If the previous send failed, there will
+          // be no confirm; recover immediately so the next send is not blocked.
+          if (state.lastFrameFailed) {
+            state.lastFrameFailed = false;
+            return;
+          }
+
+          // If the timeout window has already elapsed since the previous send,
+          // do not wait again.
+          if (elapsed >= pacing.ackTimeoutMs) {
+            return;
+          }
+
+          state.ackWaitPending = true;
+          const result = await waitForSendConfirmed({
+            accountId,
+            timeoutMs: pacing.ackTimeoutMs - elapsed,
+          });
+          state.ackWaitPending = false;
+
+          if ("timeout" in result) {
+            // Confirm never arrived: fall back to the airtime-based gap since
+            // the last send, but do not wait longer than we already have.
+            const totalElapsed = Date.now() - state.lastFrameSentAt;
+            const remaining = Math.max(0, gapNeeded - totalElapsed);
+            if (remaining > 0) {
+              await sleep(remaining);
+            }
+          }
+          return;
+        }
+
         const delay = Math.max(0, gapNeeded - elapsed);
         if (delay > 0) {
           await sleep(delay);
@@ -96,13 +136,22 @@ export async function withPacedSend<T>(
         // computing the next inter-frame gap so it is not double-applied.
         state.lastFrameAirtimeMs = calculateChunkAirtimeMs(frameBytes, radioParams, pacing);
         state.lastFrameSentAt = Date.now();
+        state.lastFrameFailed = false;
       },
     });
   })();
 
   // Keep the queue alive even if this send throws; the next send should not be
-  // blocked by a previous failure.
-  state.inFlight = current.catch(() => undefined);
+  // blocked by a previous failure. Catching the error here prevents unhandled
+  // promise rejections on the internal in-flight promise.
+  state.inFlight = current
+    .then(() => {
+      state.lastFrameFailed = false;
+    })
+    .catch(() => {
+      state.lastFrameFailed = true;
+      state.hasSentFrame = false;
+    });
   return await current;
 }
 

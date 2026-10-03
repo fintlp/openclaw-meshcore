@@ -5,6 +5,7 @@ import {
 import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { resolveMeshcoreAccount } from "./accounts.js";
 import {
+  attachSendConfirmedHandler,
   connectMeshcoreDevice,
   getMeshcoreDevice,
   nodeIdToPubkey,
@@ -149,6 +150,8 @@ export async function sendMessageMeshcore(
       host: account.host,
       port: account.port,
     }));
+
+  attachSendConfirmedHandler(handle.connection, account.accountId);
 
   if (isMeshcoreGroupTarget(target)) {
     throw new Error(

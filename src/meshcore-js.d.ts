@@ -1,6 +1,16 @@
 declare module "@liamcottle/meshcore.js" {
   import type { EventEmitter } from "node:events";
 
+  export const Constants: {
+    PushCodes: {
+      SendConfirmed: 0x82;
+      Advert: 0x80;
+      NewAdvert: 0x8a;
+      // other push codes may be added as needed
+    };
+    // other constant groups may be added as needed
+  };
+
   export type TCPConnectionEventMap = {
     connected: () => void;
     disconnected: () => void;

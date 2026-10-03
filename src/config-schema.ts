@@ -55,9 +55,11 @@ const MeshcoreAccountSchemaBase = z
     sendPacing: z
       .object({
         enabled: z.boolean().optional().default(true),
+        mode: z.enum(["ack", "time"]).optional().default("ack"),
         minDelayMs: z.number().int().min(0).optional().default(200),
         maxDelayMs: z.number().int().min(0).optional().default(5000),
         airtimeMargin: z.number().min(1.0).optional().default(1.25),
+        ackTimeoutMs: z.number().int().min(0).optional().default(6000),
         defaultSf: z.number().int().min(6).max(12).optional().default(8),
         defaultBw: z.number().int().min(1).optional().default(62_500),
         defaultCr: z.number().int().min(1).max(8).optional().default(8),
@@ -65,9 +67,11 @@ const MeshcoreAccountSchemaBase = z
       .optional()
       .default({
         enabled: true,
+        mode: "ack",
         minDelayMs: 200,
         maxDelayMs: 5000,
         airtimeMargin: 1.25,
+        ackTimeoutMs: 6000,
         defaultSf: 8,
         defaultBw: 62_500,
         defaultCr: 8,
