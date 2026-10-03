@@ -303,6 +303,22 @@ export function getContactBookEntries(): ContactBookEntry[] {
   return Array.from(contacts.values());
 }
 
+/** Retrieve a stored contact by full 32-byte public key, or undefined if unknown. */
+export function getContactByPubkey(publicKey: Uint8Array): ContactBookEntry | undefined {
+  ensureLoaded();
+  const hex = publicKeyHexFromBytes(publicKey);
+  return hex ? contacts.get(hex) : undefined;
+}
+
+/**
+ * True when a contact entry has no advert metadata yet. This happens when the
+ * entry was created from an Advert push (0x80) for a known contact, which only
+ * carries the pubkey; the full metadata must then be fetched from the node.
+ */
+export function contactHasMissingMetadata(entry: ContactBookEntry): boolean {
+  return entry.advName === "" && entry.lastAdvert === 0;
+}
+
 /** @internal Reset function for tests only. Does not delete the persisted file. */
 export function resetContactBookForTests(): void {
   contacts.clear();
