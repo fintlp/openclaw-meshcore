@@ -8,7 +8,31 @@ declare module "@liamcottle/meshcore.js" {
       NewAdvert: 0x8a;
       // other push codes may be added as needed
     };
-    // other constant groups may be added as needed
+    ResponseCodes: {
+      Ok: 0;
+      Err: 1;
+      ContactsStart: 2;
+      Contact: 3;
+      EndOfContacts: 4;
+      SelfInfo: 5;
+      Sent: 6;
+      ContactMsgRecv: 7;
+      ChannelMsgRecv: 8;
+      CurrTime: 9;
+      NoMoreMessages: 10;
+      ExportContact: 11;
+      BatteryVoltage: 12;
+      DeviceInfo: 13;
+      PrivateKey: 14;
+      Disabled: 15;
+      ContactMsgRecvV3: 16;
+      ChannelMsgRecvV3: 17;
+      ChannelInfo: 18;
+      SignStart: 19;
+      Signature: 20;
+      Stats: 24;
+      ChannelDataRecv: 27;
+    };
   };
 
   export type TCPConnectionEventMap = {
