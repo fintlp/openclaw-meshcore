@@ -160,7 +160,10 @@ describe("contact-list sync", () => {
     expect(getContactBookEntries(accountId)).toHaveLength(0);
   });
 
-  it("normalizes undefined advName to empty string", async () => {
+  it("normalizes a non-string advName so an existing name is preserved (issue #18)", async () => {
+    // Seed an entry with a real name.
+    rememberContact(makeContact(key1, { advName: "ExistingName" }), accountId);
+
     const getContacts = vi.fn().mockResolvedValue([
       {
         publicKey: key1,
@@ -170,7 +173,7 @@ describe("contact-list sync", () => {
         outPath: new Uint8Array(64),
         // Simulates readCString(32) returning undefined for a maximal-length name.
         advName: undefined,
-        lastAdvert: 100,
+        lastAdvert: 200,
         advLat: 0,
         advLon: 0,
         lastMod: 0,
@@ -180,7 +183,10 @@ describe("contact-list sync", () => {
     await syncContactsFromNode(makeDeps({ getContacts }));
 
     const entry = getContactByPubkey(key1, accountId)!;
-    expect(entry.advName).toBe("");
+    // Normalization must turn undefined into "", and rememberContact must then
+    // preserve the existing name. If the sync layer instead passed the string
+    // "undefined" down, the existing name would be overwritten.
+    expect(entry.advName).toBe("ExistingName");
   });
 
   it("0x80 push for a new contact schedules a throttled sync because metadata is missing", () => {

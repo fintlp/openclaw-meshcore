@@ -328,15 +328,25 @@ export async function connectMeshcoreDevice(params: {
     void connection.connect();
   });
 
-  // Device query handshake (firmware v1+ sends DeviceInfo on connect; explicitly request SelfInfo).
+  // Each connect-time fetch has its own fault-isolated try/catch + timeout so a
+  // lost response never forfeits a sibling fetch (issue #20). All failures are
+  // best-effort: the TCP connection stays up and the handle is returned.
+
+  // SelfInfo is emitted automatically after connect on firmware v1+.
   try {
-    const selfInfoRaw = (await waitForEvent<Record<string, unknown>>(
+    const selfInfoRaw = await waitForEvent<Record<string, unknown>>(
       connection,
       Constants.ResponseCodes.SelfInfo,
       handshakeTimeoutMs,
-    )) as Record<string, unknown>;
+    );
     handle.selfInfo = normalizeSelfInfo(selfInfoRaw);
     rememberSelfInfo(handle.selfInfo, handle.accountId);
+  } catch {
+    // SelfInfo is optional for messaging; keep the connection.
+  }
+
+  // DeviceInfo must be explicitly requested.
+  try {
     await connection.sendCommandDeviceQuery(1);
     const deviceInfoRaw = await waitForEvent<Record<string, unknown>>(
       connection,
@@ -344,8 +354,8 @@ export async function connectMeshcoreDevice(params: {
       handshakeTimeoutMs,
     );
     handle.deviceInfo = normalizeDeviceInfo(deviceInfoRaw);
-  } catch (error) {
-    // SelfInfo/DeviceInfo are best-effort for the handshake; keep the connection.
+  } catch {
+    // DeviceInfo is optional for messaging; keep the connection.
   }
 
   // Sync contacts.

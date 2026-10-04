@@ -70,6 +70,11 @@ export async function syncContactsFromNode(deps: ContactSyncDeps): Promise<void>
       // no NUL terminator. Normalize to "" here so downstream code only sees a
       // string. Issue #11: maximal-length names without a NUL remain a known
       // limitation and are intentionally NOT treated as missing metadata.
+      //
+      // This normalization is defensive: rememberContact already collapses
+      // undefined and "" to the existing name, but the sync layer must not pass
+      // a non-string value (e.g. "undefined") that would overwrite an existing
+      // name. Issue #18 item 2.
       const advName =
         typeof contact.advName === "string"
           ? contact.advName

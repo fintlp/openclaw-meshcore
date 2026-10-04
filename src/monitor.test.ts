@@ -3,9 +3,11 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { monitorMeshcoreProvider } from "./monitor.js";
+import { monitorMeshcoreProvider, resetPositionResyncStateForTests } from "./monitor.js";
 import {
   getContactBookEntries,
+  POSITION_RESYNC_AFTER_MS,
+  rememberContact,
   resetContactBookForTests,
   setContactBookPathForTests,
 } from "./contact-book.js";
@@ -140,6 +142,7 @@ describe("monitorMeshcoreProvider", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     contactSyncScheduleMock.mockClear();
+    resetPositionResyncStateForTests();
     const dir = mkdtempSync(join(tmpdir(), "meshcore-monitor-"));
     setContactBookPathForTests(join(dir, "contacts.json"));
     resetContactBookForTests();
@@ -355,6 +358,10 @@ describe("monitorMeshcoreProvider", () => {
   });
 
   it("0x80 push does not schedule a contact sync when stored metadata is complete", async () => {
+    vi.useFakeTimers();
+    const nowSeconds = 2_000_000_000;
+    vi.setSystemTime(nowSeconds * 1000);
+
     const handle = createConnection();
     connectMeshcoreDeviceMock.mockResolvedValue(handle);
     contactSyncScheduleMock.mockClear();
@@ -364,7 +371,7 @@ describe("monitorMeshcoreProvider", () => {
       runtime: createRuntimeEnv(),
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.advanceTimersByTimeAsync(0);
 
     const publicKey = hexToBytes(
       "aabbccdd11223344556677889900aabbccddeeff00112233445566778899aabb",
@@ -372,7 +379,7 @@ describe("monitorMeshcoreProvider", () => {
     const outPath = new Uint8Array(64);
     outPath[0] = 0x01;
 
-    // First establish complete metadata via 0x8A.
+    // First establish complete, fresh metadata via 0x8A.
     handle.connection.emit(0x8a, {
       publicKey,
       type: 1,
@@ -380,20 +387,143 @@ describe("monitorMeshcoreProvider", () => {
       outPathLen: 1,
       outPath,
       advName: "RichNode",
-      lastAdvert: 1234567890,
+      lastAdvert: nowSeconds - 60,
       advLat: 48858900,
       advLon: 2294500,
-      lastMod: 1234567000,
+      lastMod: nowSeconds - 120,
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.advanceTimersByTimeAsync(0);
 
     // A subsequent pubkey-only 0x80 push preserves metadata; no sync needed.
     handle.connection.emit(0x80, { publicKey });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(contactSyncScheduleMock).not.toHaveBeenCalled();
 
     handle.connection.emit("disconnected");
+    vi.useRealTimers();
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("0x80 push schedules a re-sync when the stored lastAdvert is older than POSITION_RESYNC_AFTER_MS (issue #18)", async () => {
+    vi.useFakeTimers();
+    const nowSeconds = 2_000_000_000;
+    vi.setSystemTime(nowSeconds * 1000);
+
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    contactSyncScheduleMock.mockClear();
+
+    const publicKey = hexToBytes(
+      "aabbccdd11223344556677889900aabbccddeeff00112233445566778899aabb",
+    );
+    rememberContact(
+      {
+        publicKey,
+        advName: "OldNode",
+        lastAdvert: nowSeconds - Math.floor(POSITION_RESYNC_AFTER_MS / 1000) - 3600,
+        advLat: 48858900,
+        advLon: 2294500,
+      },
+      "default",
+    );
+
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    handle.connection.emit(0x80, { publicKey });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(contactSyncScheduleMock).toHaveBeenCalledTimes(1);
+
+    handle.connection.emit("disconnected");
+    vi.useRealTimers();
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("0x80 push does not schedule a re-sync when the stored lastAdvert is fresh", async () => {
+    vi.useFakeTimers();
+    const nowSeconds = 2_000_000_000;
+    vi.setSystemTime(nowSeconds * 1000);
+
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    contactSyncScheduleMock.mockClear();
+
+    const publicKey = hexToBytes(
+      "aabbccdd11223344556677889900aabbccddeeff00112233445566778899aabb",
+    );
+    rememberContact(
+      {
+        publicKey,
+        advName: "FreshNode",
+        lastAdvert: nowSeconds - 3600,
+        advLat: 48858900,
+        advLon: 2294500,
+      },
+      "default",
+    );
+
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    handle.connection.emit(0x80, { publicKey });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(contactSyncScheduleMock).not.toHaveBeenCalled();
+
+    handle.connection.emit("disconnected");
+    vi.useRealTimers();
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("0x80 push re-sync is throttled to once per contact per POSITION_RESYNC_AFTER_MS window (issue #18)", async () => {
+    vi.useFakeTimers();
+    const nowSeconds = 2_000_000_000;
+    vi.setSystemTime(nowSeconds * 1000);
+
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    contactSyncScheduleMock.mockClear();
+
+    const publicKey = hexToBytes(
+      "aabbccdd11223344556677889900aabbccddeeff00112233445566778899aabb",
+    );
+    rememberContact(
+      {
+        publicKey,
+        advName: "OldNode",
+        lastAdvert: nowSeconds - Math.floor(POSITION_RESYNC_AFTER_MS / 1000) - 3600,
+        advLat: 48858900,
+        advLon: 2294500,
+      },
+      "default",
+    );
+
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    handle.connection.emit(0x80, { publicKey });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(contactSyncScheduleMock).toHaveBeenCalledTimes(1);
+
+    // A second push inside the same window must not schedule again.
+    contactSyncScheduleMock.mockClear();
+    handle.connection.emit(0x80, { publicKey });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(contactSyncScheduleMock).not.toHaveBeenCalled();
+
+    handle.connection.emit("disconnected");
+    vi.useRealTimers();
     await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
   });
 });
