@@ -80,7 +80,7 @@ const MeshcoreAccountSchemaBase = z
   })
   .strict();
 
-const MeshcoreAccountSchema = MeshcoreAccountSchemaBase.superRefine((value, ctx) => {
+export const MeshcoreAccountSchema = MeshcoreAccountSchemaBase.superRefine((value, ctx) => {
   requireOpenAllowFrom({
     policy: value.dmPolicy,
     allowFrom: value.allowFrom,
