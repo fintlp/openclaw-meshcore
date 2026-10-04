@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { buildManifest } from "../scripts/sync-manifest.js";
+import fs from "node:fs";
+import { buildManifest } from "../scripts/manifest-builder.js";
 import { MeshcoreAccountSchema, MeshcoreConfigSchema } from "./config-schema.js";
+import { meshcoreChannelConfigUiHints } from "./config-ui-hints.js";
 
 function expectValidConfig(result: ReturnType<typeof MeshcoreConfigSchema.safeParse>) {
   expect(result.success).toBe(true);
@@ -20,6 +22,138 @@ function expectInvalidConfig(result: ReturnType<typeof MeshcoreConfigSchema.safe
 
 function sortedKeys(obj: Record<string, unknown>): string[] {
   return Object.keys(obj).sort();
+}
+
+const expectedSendPacingDefaults = {
+  enabled: true,
+  mode: "ack",
+  minDelayMs: 200,
+  maxDelayMs: 5000,
+  airtimeMargin: 1.25,
+  ackTimeoutMs: 6000,
+  defaultSf: 8,
+  defaultBw: 62500,
+  defaultCr: 8,
+};
+
+const expectedSendPacingKeys = Object.keys(expectedSendPacingDefaults);
+
+function getSendPacingCopies(manifest: Record<string, unknown>) {
+  const manifestProperties = (manifest.channelConfigs as Record<string, Record<string, unknown>>)
+    ?.meshcore?.schema?.properties as Record<string, unknown> | undefined;
+  if (!manifestProperties) return { root: undefined, account: undefined };
+  const rootPacing = manifestProperties.sendPacing as Record<string, unknown> | undefined;
+  const accountPacing = (manifestProperties.accounts as Record<string, unknown> | undefined)
+    ?.additionalProperties?.properties?.sendPacing as Record<string, unknown> | undefined;
+  return { root: rootPacing, account: accountPacing };
+}
+
+/**
+ * Drift-guard helper: returns a list of human-readable issues when the
+ * committed/generated manifest diverges from the zod/canonical source of truth.
+ * Never writes to disk.
+ */
+function checkManifestDrift(manifest: Record<string, unknown>): string[] {
+  const issues: string[] = [];
+
+  const meshcore = (manifest.channelConfigs as Record<string, Record<string, unknown> | undefined>)
+    ?.meshcore;
+  if (!meshcore) {
+    return ["missing channelConfigs.meshcore"];
+  }
+
+  const manifestProperties = meshcore.schema?.properties as Record<string, unknown> | undefined;
+  if (!manifestProperties) {
+    return ["missing channelConfigs.meshcore.schema.properties"];
+  }
+
+  const accountProperties = (manifestProperties.accounts as Record<string, unknown> | undefined)
+    ?.additionalProperties?.properties as Record<string, unknown> | undefined;
+  if (!accountProperties) {
+    return ["missing channelConfigs.meshcore.schema.properties.accounts.additionalProperties.properties"];
+  }
+
+  // 1. Zod and manifest must agree on root keys.
+  const zodRootKeys = sortedKeys(MeshcoreConfigSchema.shape);
+  const manifestRootKeys = sortedKeys(manifestProperties);
+  const missingRootKeys = zodRootKeys.filter((k) => !manifestProperties.hasOwnProperty(k));
+  const extraRootKeys = manifestRootKeys.filter((k) => !zodRootKeys.includes(k));
+  if (missingRootKeys.length > 0) {
+    issues.push(`manifest root missing keys: ${missingRootKeys.join(", ")}`);
+  }
+  if (extraRootKeys.length > 0) {
+    issues.push(`manifest root unexpected extra keys: ${extraRootKeys.join(", ")}`);
+  }
+
+  // 2. Zod and manifest must agree on account keys.
+  const zodAccountKeys = sortedKeys(MeshcoreAccountSchema.shape);
+  const manifestAccountKeys = sortedKeys(accountProperties);
+  const missingAccountKeys = zodAccountKeys.filter((k) => !accountProperties.hasOwnProperty(k));
+  const extraAccountKeys = manifestAccountKeys.filter((k) => !zodAccountKeys.includes(k));
+  if (missingAccountKeys.length > 0) {
+    issues.push(`manifest account missing keys: ${missingAccountKeys.join(", ")}`);
+  }
+  if (extraAccountKeys.length > 0) {
+    issues.push(`manifest account unexpected extra keys: ${extraAccountKeys.join(", ")}`);
+  }
+
+  // 3. Both manifest copies must be identical for the shared fields.
+  const sharedRootKeys = manifestRootKeys.filter((k) => k !== "accounts" && k !== "defaultAccount");
+  if (JSON.stringify(sharedRootKeys) !== JSON.stringify(manifestAccountKeys)) {
+    issues.push("manifest root/account shared keys mismatch");
+  }
+
+  // 4. sendPacing shape and defaults across both copies.
+  const { root: rootPacing, account: accountPacing } = getSendPacingCopies(manifest);
+  if (!rootPacing) {
+    issues.push("missing root sendPacing");
+  }
+  if (!accountPacing) {
+    issues.push("missing account sendPacing");
+  }
+  if (!rootPacing || !accountPacing) {
+    return issues;
+  }
+  if (JSON.stringify(rootPacing) !== JSON.stringify(accountPacing)) {
+    issues.push("root sendPacing differs from account sendPacing");
+  }
+
+  for (const [copyName, pacingObj] of [
+    ["root sendPacing", rootPacing],
+    ["account sendPacing", accountPacing],
+  ] as const) {
+    const properties = pacingObj.properties as Record<string, { default?: unknown }> | undefined;
+    if (!properties) {
+      issues.push(`${copyName} missing properties`);
+      continue;
+    }
+    const missing = expectedSendPacingKeys.filter((k) => !properties.hasOwnProperty(k));
+    const extra = Object.keys(properties).filter((k) => !expectedSendPacingKeys.includes(k));
+    if (missing.length > 0) {
+      issues.push(`${copyName} missing keys: ${missing.join(", ")}`);
+    }
+    if (extra.length > 0) {
+      issues.push(`${copyName} unexpected extra keys: ${extra.join(", ")}`);
+    }
+
+    // Object-level default.
+    if (JSON.stringify(pacingObj.default) !== JSON.stringify(expectedSendPacingDefaults)) {
+      issues.push(`${copyName} object-level default mismatch`);
+    }
+
+    // Per-property defaults.
+    for (const key of expectedSendPacingKeys) {
+      const expected = expectedSendPacingDefaults[key as keyof typeof expectedSendPacingDefaults];
+      const actual = properties[key]?.default;
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+        issues.push(
+          `${copyName} default for ${key} mismatch: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
+        );
+      }
+    }
+  }
+
+  return issues;
 }
 
 describe("meshcore config schema", () => {
@@ -189,89 +323,53 @@ describe("meshcore config schema", () => {
   // `npm run sync-manifest` would write. This catches any hand-edits or
   // stale generated schema copies.
   it("committed manifest matches sync-manifest output", () => {
-    const fs = require("fs");
     const committed = JSON.parse(fs.readFileSync("./openclaw.plugin.json", "utf8"));
-    const generated = buildManifest();
+    const packageJson = JSON.parse(fs.readFileSync("./package.json", "utf8"));
+    const canonicalSchema = JSON.parse(
+      fs.readFileSync("./src/meshcore-channel-config.schema.json", "utf8"),
+    );
+    const generated = buildManifest(committed, packageJson, canonicalSchema, meshcoreChannelConfigUiHints);
     expect(generated).toEqual(committed);
+  });
+
+  // Regression: importing the drift-guard builder must not rewrite the
+  // committed manifest. We perturb an in-memory copy and assert the guard
+  // reports the divergence.
+  it("drift guard detects stale in-memory manifest without rewriting disk", () => {
+    const committed = JSON.parse(fs.readFileSync("./openclaw.plugin.json", "utf8"));
+    const packageJson = JSON.parse(fs.readFileSync("./package.json", "utf8"));
+    const canonicalSchema = JSON.parse(
+      fs.readFileSync("./src/meshcore-channel-config.schema.json", "utf8"),
+    );
+    const perturbed = buildManifest(
+      committed,
+      packageJson,
+      canonicalSchema,
+      meshcoreChannelConfigUiHints,
+    );
+
+    // Mutation B1: change a default in both root and account copies.
+    const meshcoreSchema = (perturbed.channelConfigs as Record<string, Record<string, unknown>>)
+      .meshcore.schema as Record<string, unknown>;
+    const rootPacing = meshcoreSchema.properties.sendPacing as Record<string, unknown>;
+    const accountPacing = ((meshcoreSchema.properties.accounts as Record<string, unknown>)
+      .additionalProperties as Record<string, unknown>).properties.sendPacing as Record<string, unknown>;
+
+    (rootPacing.properties as Record<string, { default: unknown }>).minDelayMs.default = 999;
+    (accountPacing.properties as Record<string, { default: unknown }>).minDelayMs.default = 999;
+
+    const issues = checkManifestDrift(perturbed);
+    expect(issues).toContainEqual(expect.stringContaining("minDelayMs"));
+    expect(issues).toContainEqual(expect.stringContaining("default for minDelayMs mismatch"));
   });
 
   // Drift-guard: every key of the zod channel config schema also exists in the
   // canonical JSON schema and in the manifest JSON schema. Checks BOTH copies
   // in openclaw.plugin.json (root channel config and per-account config).
   it("canonical and manifest schemas match zod keys", () => {
-    const fs = require("fs");
     const manifest = JSON.parse(fs.readFileSync("./openclaw.plugin.json", "utf8"));
-    const canonical = JSON.parse(
-      fs.readFileSync("./src/meshcore-channel-config.schema.json", "utf8"),
-    );
 
-    const manifestProperties = manifest.channelConfigs.meshcore.schema.properties;
-    const accountProperties = manifestProperties.accounts?.additionalProperties?.properties;
-
-    const zodRootKeys = sortedKeys(MeshcoreConfigSchema.shape);
-    const zodAccountKeys = sortedKeys(MeshcoreAccountSchema.shape);
-    const canonicalRootKeys = sortedKeys(canonical.properties);
-    const canonicalAccountKeys = sortedKeys(canonical.$defs.account.properties);
-    const manifestRootKeys = sortedKeys(manifestProperties);
-    const manifestAccountKeys = sortedKeys(accountProperties);
-
-    // 1. Zod and canonical must agree (single source of truth for keys).
-    expect(zodRootKeys, "zod root keys mismatch vs canonical").toEqual(canonicalRootKeys);
-    expect(zodAccountKeys, "zod account keys mismatch vs canonical").toEqual(canonicalAccountKeys);
-
-    // 2. Manifest must agree with canonical in both copies.
-    expect(manifestRootKeys, "manifest root keys mismatch vs canonical").toEqual(canonicalRootKeys);
-    expect(
-      manifestAccountKeys,
-      "manifest account keys mismatch vs canonical",
-    ).toEqual(canonicalAccountKeys);
-
-    // 3. Both manifest copies must be identical for the shared fields.
-    const sharedRootKeys = manifestRootKeys.filter((k) => k !== "accounts" && k !== "defaultAccount");
-    expect(manifestAccountKeys, "manifest root/account shared keys mismatch").toEqual(
-      sharedRootKeys,
-    );
-
-    // 4. sendPacing keys and defaults across both copies (regression guard).
-    const rootPacing = manifestProperties.sendPacing;
-    const accountPacing = accountProperties.sendPacing;
-    expect(rootPacing).toBeDefined();
-    expect(accountPacing).toBeDefined();
-    expect(rootPacing).toEqual(accountPacing);
-
-    const zodKeys = [
-      "enabled",
-      "mode",
-      "minDelayMs",
-      "maxDelayMs",
-      "airtimeMargin",
-      "ackTimeoutMs",
-      "defaultSf",
-      "defaultBw",
-      "defaultCr",
-    ];
-
-    const expectedDefaults = {
-      enabled: true,
-      mode: "ack",
-      minDelayMs: 200,
-      maxDelayMs: 5000,
-      airtimeMargin: 1.25,
-      ackTimeoutMs: 6000,
-      defaultSf: 8,
-      defaultBw: 62500,
-      defaultCr: 8,
-    };
-
-    for (const [copyName, pacingObj] of [
-      ["root sendPacing", rootPacing],
-      ["account sendPacing", accountPacing],
-    ] as const) {
-      const missing = zodKeys.filter((k) => !pacingObj.properties.hasOwnProperty(k));
-      const extra = Object.keys(pacingObj.properties).filter((k) => !zodKeys.includes(k));
-      expect(missing, `${copyName} is missing keys`).toEqual([]);
-      expect(extra, `${copyName} has unexpected extra keys`).toEqual([]);
-      expect(pacingObj.default, `${copyName} defaults mismatch`).toEqual(expectedDefaults);
-    }
+    const issues = checkManifestDrift(manifest);
+    expect(issues).toEqual([]);
   });
 });
