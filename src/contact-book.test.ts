@@ -208,6 +208,23 @@ describe("contact book", () => {
     expect(entry.outPathLen).toBe(-1);
   });
 
+  it("merges an explicit outPathLen:0 over an existing non-zero value when the incoming advert is newer (issue #18)", () => {
+    rememberContact(makeFullAdvert(), accountId);
+
+    rememberContact(
+      {
+        publicKey: samplePublicKey,
+        outPathLen: 0,
+        outPath: new Uint8Array(64),
+        lastAdvert: 2_000_000_000,
+      },
+      accountId,
+    );
+
+    const entry = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(entry.outPathLen).toBe(0);
+  });
+
   it("isolates entries between accounts", () => {
     const accountA = "account-a";
     const accountB = "account-b";
