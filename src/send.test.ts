@@ -4,7 +4,7 @@ import { estimateChunkAirtimeMs, resolveSendPacingConfig } from "./airtime.js";
 import { clearSendConfirmedStateForTests } from "./device-client.js";
 import { clearOutboundEchoCache, isOutboundEcho } from "./echo-dedupe.js";
 import { clearPacingStateForTests } from "./pacing.js";
-import { sendMessageMeshcore } from "./send.js";
+import { MeshcoreSendAbortedError, sendMessageMeshcore } from "./send.js";
 import type { CoreConfig } from "./types.js";
 
 const TEST_NODE_ID = "!00000000000000000000000000000000000000000000000000000000aabbccdd";
@@ -50,7 +50,9 @@ function createDeviceHandle(
       sendTextMessage,
       on: emitter.on.bind(emitter) as (event: string | number, listener: (...args: unknown[]) => void) => void,
       off: emitter.off.bind(emitter) as (event: string | number, listener: (...args: unknown[]) => void) => void,
+      once: emitter.once.bind(emitter) as (event: string | number, listener: (...args: unknown[]) => void) => void,
       emit: emitter.emit.bind(emitter) as (event: string | number, ...args: unknown[]) => boolean,
+      listenerCount: emitter.listenerCount.bind(emitter) as (event: string | number) => number,
     },
     connected: true,
     contacts: [],
@@ -928,6 +930,147 @@ describe("sendMessageMeshcore", () => {
       expect(okSend).toHaveBeenCalledTimes(1);
 
       await nextPromise;
+    });
+  });
+
+  describe("send resilience (#15)", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("aborts remaining frames fast on disconnect and releases the queue", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      const handle = createDeviceHandle(sendTextMessage);
+      getMeshcoreDeviceMock.mockReturnValue(handle);
+
+      const promise = sendMessageMeshcore(TEST_NODE_ID, "a".repeat(200), {
+        cfg: createConfig({ textChunkLimit: 100, sendPacing: { enabled: true, mode: "ack" } }),
+      });
+      promise.catch(() => {});
+
+      // Frame 1 sends immediately and registers an ACK waiter.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      // Simulate a disconnect while frame 2 is waiting for frame 1's confirm.
+      const errorPromise = expect(promise).rejects.toThrow(MeshcoreSendAbortedError);
+      handle.connection.emit("disconnected");
+      await errorPromise;
+
+      // Frame 2 must never be attempted.
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      // The error names the cause.
+      await expect(promise).rejects.toMatchObject({
+        name: "MeshcoreSendAbortedError",
+        cause: "connection_lost",
+      });
+
+      // A subsequent send to the same account is no longer blocked.
+      const okSend = vi.fn(async () => ({ expectedAckCrc: 2 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(okSend));
+
+      const nextPromise = sendMessageMeshcore(TEST_NODE_ID, "ok", {
+        cfg: createConfig({ sendPacing: { enabled: false } }),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(nextPromise).resolves.toEqual(
+        expect.objectContaining({ messageId: "2", target: TEST_NODE_ID }),
+      );
+      expect(okSend).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects a send that exceeds the queue budget, logs a dead-letter, and releases the queue", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      // Never-confirming send plus a tiny budget forces the watchdog to fire.
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      const handle = createDeviceHandle(sendTextMessage);
+      getMeshcoreDeviceMock.mockReturnValue(handle);
+
+      const promise = sendMessageMeshcore(TEST_NODE_ID, "a".repeat(200), {
+        cfg: createConfig({
+          textChunkLimit: 100,
+          sendPacing: { enabled: true, mode: "ack" },
+        }),
+        sendQueueBudgetMs: 50,
+      });
+      promise.catch(() => {});
+
+      // Frame 1 sends; frame 2 waits for a confirm that never arrives.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(promise).rejects.toMatchObject({
+        name: "MeshcoreSendAbortedError",
+        cause: "queue_budget_exceeded",
+      });
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy.mock.calls[0][0]).toMatch(/^\[meshcore\] send queue budget exceeded; dead-letter message id/);
+
+      // Later send to the same account succeeds.
+      const okSend = vi.fn(async () => ({ expectedAckCrc: 2 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(okSend));
+
+      const nextPromise = sendMessageMeshcore(TEST_NODE_ID, "ok", {
+        cfg: createConfig({ sendPacing: { enabled: false } }),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(nextPromise).resolves.toEqual(
+        expect.objectContaining({ messageId: "2", target: TEST_NODE_ID }),
+      );
+
+      errorSpy.mockRestore();
+    });
+
+    it("clears disconnect listeners and timers when a send is aborted", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      const handle = createDeviceHandle(sendTextMessage);
+      getMeshcoreDeviceMock.mockReturnValue(handle);
+
+      const baseDisconnectListeners = handle.connection.listenerCount("disconnected");
+
+      const promise = sendMessageMeshcore(TEST_NODE_ID, "a".repeat(200), {
+        cfg: createConfig({ textChunkLimit: 100, sendPacing: { enabled: true, mode: "ack" } }),
+        sendQueueBudgetMs: 50,
+      });
+      promise.catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handle.connection.listenerCount("disconnected")).toBeGreaterThan(baseDisconnectListeners);
+
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(promise).rejects.toThrow(MeshcoreSendAbortedError);
+
+      expect(handle.connection.listenerCount("disconnected")).toBe(baseDisconnectListeners);
+      expect(vi.getTimerCount()).toBe(0);
+      errorSpy.mockRestore();
+    });
+
+    it("clears disconnect listeners and timers after a mid-sequence disconnect abort", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      const handle = createDeviceHandle(sendTextMessage);
+      getMeshcoreDeviceMock.mockReturnValue(handle);
+
+      const baseDisconnectListeners = handle.connection.listenerCount("disconnected");
+
+      const promise = sendMessageMeshcore(TEST_NODE_ID, "a".repeat(200), {
+        cfg: createConfig({ textChunkLimit: 100, sendPacing: { enabled: true, mode: "ack" } }),
+      });
+      promise.catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(0);
+      handle.connection.emit("disconnected");
+      await expect(promise).rejects.toThrow(MeshcoreSendAbortedError);
+
+      expect(handle.connection.listenerCount("disconnected")).toBe(baseDisconnectListeners);
+      expect(vi.getTimerCount()).toBe(0);
     });
   });
 });

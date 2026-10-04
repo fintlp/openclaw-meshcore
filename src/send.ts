@@ -19,9 +19,10 @@ import {
   parseMeshcoreChannelIndex,
   parseMeshcoreNodeId,
 } from "./normalize.js";
-import { withPacedSend } from "./pacing.js";
+import { withPacedSend, type WithPacedSendOptions } from "./pacing.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig } from "./types.js";
+import { resolveSendPacingConfig } from "./airtime.js";
 
 type SendMeshcoreOptions = {
   cfg: CoreConfig;
@@ -29,7 +30,23 @@ type SendMeshcoreOptions = {
   replyTo?: string;
   target?: string;
   deviceHandle?: MeshcoreDeviceHandle;
+  /** Internal override for the queue watchdog budget (tests only). */
+  sendQueueBudgetMs?: number;
 };
+
+/** Error thrown when a paced send is aborted mid-sequence. */
+export class MeshcoreSendAbortedError extends Error {
+  constructor(
+    message: string,
+    public cause: string,
+  ) {
+    super(message);
+    this.name = "MeshcoreSendAbortedError";
+  }
+}
+
+const SEND_QUEUE_BUDGET_MIN_MS = 30_000;
+const SEND_QUEUE_BUDGET_PAD_MS = 5_000;
 
 type SendMeshcoreResult = {
   messageId: string;
@@ -165,38 +182,90 @@ export async function sendMessageMeshcore(
   }
   const pubkey = nodeIdToPubkey(nodeId, account.accountId);
 
-  return await withPacedSend(
-    account.accountId,
+  const pacingConfig = resolveSendPacingConfig(
     account.config.sendPacing as Record<string, unknown> | undefined,
-    handle.selfInfo,
-    async (ctx) => {
-      let lastMessageId = "";
-      for (const chunk of chunks) {
-        const chunkBytes = utf8ByteLength(chunk);
-        await ctx.beforeFrame(chunkBytes);
-        rememberOutboundEcho(chunk);
-        const response = await handle.connection.sendTextMessage(pubkey, chunk);
-        lastMessageId = String(response.expectedAckCrc ?? response.estTimeout ?? Date.now());
-        ctx.afterFrame(chunkBytes, response.expectedAckCrc);
-      }
-
-      recordMeshcoreOutboundActivity(account.accountId);
-
-      return {
-        messageId: lastMessageId,
-        target,
-        receipt: createMessageReceiptFromOutboundResults({
-          results: [
-            {
-              channel: "meshcore",
-              messageId: lastMessageId,
-              conversationId: target,
-            },
-          ],
-          kind: "text",
-          ...(opts.replyTo ? { replyToId: opts.replyTo } : {}),
-        }),
-      };
-    },
   );
+
+  const sendQueueBudgetMs =
+    opts.sendQueueBudgetMs ??
+    Math.max(
+      SEND_QUEUE_BUDGET_MIN_MS,
+      chunks.length * (pacingConfig.maxDelayMs + pacingConfig.ackTimeoutMs) +
+        SEND_QUEUE_BUDGET_PAD_MS,
+    );
+
+  // Stable id used for dead-letter logging if the queue watchdog has to kill
+  // this send before the final frame id is known.
+  const pendingMessageId = `${target}-${Date.now()}-${chunks.length}`;
+
+  const abortController = new AbortController();
+  const pacingOptions: WithPacedSendOptions = { abortSignal: abortController.signal };
+
+  let budgetTimer: ReturnType<typeof setTimeout> | null = null;
+  let onDisconnected: (() => void) | null = null;
+
+  const disposeAbortWatchdogs = () => {
+    if (budgetTimer) {
+      clearTimeout(budgetTimer);
+      budgetTimer = null;
+    }
+    if (onDisconnected) {
+      handle.connection.off("disconnected", onDisconnected);
+      onDisconnected = null;
+    }
+  };
+
+  onDisconnected = () => {
+    abortController.abort(new MeshcoreSendAbortedError("connection lost", "connection_lost"));
+  };
+  handle.connection.on("disconnected", onDisconnected);
+
+  budgetTimer = setTimeout(() => {
+    console.error(
+      `[meshcore] send queue budget exceeded; dead-letter message id ${pendingMessageId}`,
+    );
+    abortController.abort(
+      new MeshcoreSendAbortedError("send queue budget exceeded", "queue_budget_exceeded"),
+    );
+  }, sendQueueBudgetMs);
+
+  try {
+    return await withPacedSend(
+      account.accountId,
+      account.config.sendPacing as Record<string, unknown> | undefined,
+      handle.selfInfo,
+      async (ctx) => {
+        let lastMessageId = "";
+        for (const chunk of chunks) {
+          const chunkBytes = utf8ByteLength(chunk);
+          await ctx.beforeFrame(chunkBytes);
+          rememberOutboundEcho(chunk);
+          const response = await handle.connection.sendTextMessage(pubkey, chunk);
+          lastMessageId = String(response.expectedAckCrc ?? response.estTimeout ?? Date.now());
+          ctx.afterFrame(chunkBytes, response.expectedAckCrc);
+        }
+
+        recordMeshcoreOutboundActivity(account.accountId);
+
+        return {
+          messageId: lastMessageId,
+          target,
+          receipt: createMessageReceiptFromOutboundResults({
+            results: [
+              {
+                channel: "meshcore",
+                messageId: lastMessageId,
+                conversationId: target,
+              },
+            ],
+            kind: "text",
+            ...(opts.replyTo ? { replyToId: opts.replyTo } : {}),
+          }),
+        };
+      },
+      pacingOptions,
+    );
+  } finally {
+    disposeAbortWatchdogs();
+  }
 }
