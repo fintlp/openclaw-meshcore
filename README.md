@@ -94,6 +94,9 @@ You can also set the environment variable `MESHCORE_HOST` for the default accoun
 
 ## Config reference
 
+> To add or change a config field, see [`CONTRIBUTING.md`](CONTRIBUTING.md) —
+> the manifest is generated from a single canonical JSON Schema.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `true` | Master switch for the channel. |
