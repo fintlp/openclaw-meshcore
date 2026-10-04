@@ -1073,4 +1073,173 @@ describe("sendMessageMeshcore", () => {
       expect(vi.getTimerCount()).toBe(0);
     });
   });
+
+  describe("send resilience probes (#15) — real timers", () => {
+    beforeEach(() => {
+      vi.useRealTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      clearOutboundEchoCache();
+      vi.clearAllMocks();
+      clearPacingStateForTests();
+      clearSendConfirmedStateForTests();
+    });
+
+    it("PROBE-1: a hanging sendTextMessage is raced against the budget watchdog and releases the queue", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const hangingSend = vi.fn(async () => new Promise<never>(() => {}));
+      const handle = createDeviceHandle(hangingSend);
+      getMeshcoreDeviceMock.mockReturnValue(handle);
+
+      const promise = sendMessageMeshcore(TEST_NODE_ID, "hang forever", {
+        cfg: createConfig({ sendPacing: { enabled: false } }),
+        sendQueueBudgetMs: 50,
+      });
+      promise.catch(() => {});
+
+      await new Promise((r) => setTimeout(r, 80));
+      await expect(promise).rejects.toMatchObject({
+        name: "MeshcoreSendAbortedError",
+        cause: "queue_budget_exceeded",
+      });
+
+      // The queue must be released: a later send to the same account actually
+      // attempts its transmission.
+      const laterSend = vi.fn(async () => ({ expectedAckCrc: 42 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(laterSend));
+
+      const nextPromise = sendMessageMeshcore(TEST_NODE_ID, "later", {
+        cfg: createConfig({ sendPacing: { enabled: false } }),
+      });
+      await expect(nextPromise).resolves.toEqual(
+        expect.objectContaining({ messageId: "42", target: TEST_NODE_ID }),
+      );
+      expect(laterSend).toHaveBeenCalledTimes(1);
+
+      errorSpy.mockRestore();
+    });
+
+    it("PROBE-4: disconnect mid-sendTextMessage unwinds with cause connection_lost", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      let orphanResolve: (value: { expectedAckCrc: number }) => void;
+      const hangingSend = vi.fn(async () => {
+        return new Promise<{ expectedAckCrc: number }>((resolve) => {
+          orphanResolve = resolve;
+        });
+      });
+      const handle = createDeviceHandle(hangingSend);
+      getMeshcoreDeviceMock.mockReturnValue(handle);
+
+      const promise = sendMessageMeshcore(TEST_NODE_ID, "disconnect me", {
+        cfg: createConfig({ sendPacing: { enabled: false } }),
+      });
+      promise.catch(() => {});
+
+      // Let the first frame enter sendTextMessage.
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Simulate disconnect while sendTextMessage is still pending.
+      handle.connection.emit("disconnected");
+
+      await expect(promise).rejects.toMatchObject({
+        name: "MeshcoreSendAbortedError",
+        cause: "connection_lost",
+      });
+
+      // Late settlement of the orphaned library promise must not crash or
+      // leave the queue wedged.
+      orphanResolve!({ expectedAckCrc: 1 });
+      await new Promise((r) => setTimeout(r, 10));
+
+      const laterSend = vi.fn(async () => ({ expectedAckCrc: 99 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(laterSend));
+      const nextPromise = sendMessageMeshcore(TEST_NODE_ID, "after disconnect", {
+        cfg: createConfig({ sendPacing: { enabled: false } }),
+      });
+      await expect(nextPromise).resolves.toEqual(
+        expect.objectContaining({ messageId: "99", target: TEST_NODE_ID }),
+      );
+      expect(laterSend).toHaveBeenCalledTimes(1);
+
+      errorSpy.mockRestore();
+    });
+
+    it("orphaned sendTextMessage promise that rejects late never triggers unhandledRejection", async () => {
+      const unhandledRejections: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandledRejections.push(reason);
+      process.on("unhandledRejection", onUnhandled);
+
+      try {
+        let orphanReject: (error: Error) => void;
+        const sendTextMessage = vi.fn(async () => {
+          return new Promise<never>((_, reject) => {
+            orphanReject = reject;
+          });
+        });
+        const handle = createDeviceHandle(sendTextMessage);
+        getMeshcoreDeviceMock.mockReturnValue(handle);
+
+        const promise = sendMessageMeshcore(TEST_NODE_ID, "hang then reject", {
+          cfg: createConfig({ sendPacing: { enabled: false } }),
+          sendQueueBudgetMs: 50,
+        });
+        promise.catch(() => {});
+
+        // Wait for the budget watchdog to fire and the race to reject.
+        await new Promise((r) => setTimeout(r, 80));
+        await expect(promise).rejects.toMatchObject({
+          name: "MeshcoreSendAbortedError",
+          cause: "queue_budget_exceeded",
+        });
+
+        // Force the abandoned library promise to reject late.
+        orphanReject!(new Error("late rejection from meshcore.js"));
+
+        // Give the event loop a turn to surface any unhandled rejection.
+        await new Promise((r) => setTimeout(r, 30));
+
+        expect(unhandledRejections).toHaveLength(0);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
+    });
+
+    it("dead-letter is logged exactly once and only on genuine abandonment", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      // Successful send within budget: no dead-letter.
+      const okSend = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(okSend));
+      await sendMessageMeshcore(TEST_NODE_ID, "ok", {
+        cfg: createConfig({ sendPacing: { enabled: false } }),
+        sendQueueBudgetMs: 50,
+      });
+
+      // Genuine abandonment via budget exceeded: exactly one dead-letter.
+      const hangingSend = vi.fn(async () => new Promise<never>(() => {}));
+      const handle = createDeviceHandle(hangingSend);
+      getMeshcoreDeviceMock.mockReturnValue(handle);
+
+      const promise = sendMessageMeshcore(TEST_NODE_ID, "abandoned", {
+        cfg: createConfig({ sendPacing: { enabled: false } }),
+        sendQueueBudgetMs: 50,
+      });
+      promise.catch(() => {});
+
+      await new Promise((r) => setTimeout(r, 80));
+      await expect(promise).rejects.toMatchObject({
+        name: "MeshcoreSendAbortedError",
+        cause: "queue_budget_exceeded",
+      });
+
+      const deadLetterCalls = errorSpy.mock.calls.filter((call) =>
+        String(call[0]).includes("dead-letter"),
+      );
+      expect(deadLetterCalls).toHaveLength(1);
+
+      errorSpy.mockRestore();
+    });
+  });
 });
