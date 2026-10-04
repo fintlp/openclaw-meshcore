@@ -41,20 +41,26 @@ declare module "@liamcottle/meshcore.js" {
     error: (error: Error) => void;
     rx: (frame: Uint8Array) => void;
     tx: (frame: Uint8Array) => void;
-    SelfInfo: (info: Record<string, unknown>) => void;
-    DeviceInfo: (info: Record<string, unknown>) => void;
-    Contact: (contact: Record<string, unknown>) => void;
-    EndOfContacts: () => void;
-    ChannelInfo: (info: Record<string, unknown>) => void;
-    ContactMsgRecv: (message: Record<string, unknown>) => void;
-    ChannelMsgRecv: (message: Record<string, unknown>) => void;
-    ChannelDataRecv: (data: Record<string, unknown>) => void;
-    BatteryVoltage: (info: Record<string, unknown>) => void;
-    Ok: () => void;
-    Err: (error: Record<string, unknown>) => void;
-    Sent: (response: Record<string, unknown>) => void;
-    MsgWaiting: () => void;
-    SendConfirmed: (response: Record<string, unknown>) => void;
+    // Response events are emitted by numeric code (Constants.ResponseCodes),
+    // not by friendly name. Keys match the numeric constants so typed
+    // subscribers that use Constants.ResponseCodes.* resolve correctly.
+    0: () => void;
+    1: (error: Record<string, unknown>) => void;
+    3: (contact: Record<string, unknown>) => void;
+    4: () => void;
+    5: (info: Record<string, unknown>) => void;
+    6: (response: Record<string, unknown>) => void;
+    7: (message: Record<string, unknown>) => void;
+    8: (message: Record<string, unknown>) => void;
+    12: (info: Record<string, unknown>) => void;
+    13: (info: Record<string, unknown>) => void;
+    17: (message: Record<string, unknown>) => void;
+    18: (info: Record<string, unknown>) => void;
+    27: (data: Record<string, unknown>) => void;
+    // Push events are emitted by numeric code (Constants.PushCodes).
+    0x80: (advert: Record<string, unknown>) => void;
+    0x82: (response: Record<string, unknown>) => void;
+    0x8a: (advert: Record<string, unknown>) => void;
   };
 
   export class TCPConnection extends EventEmitter {

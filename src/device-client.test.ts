@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { Constants } from "@liamcottle/meshcore.js";
 import {
   attachSendConfirmedHandler,
   clearSendConfirmedStateForTests,
@@ -7,6 +8,8 @@ import {
   disconnectMeshcoreDevice,
   waitForSendConfirmed,
 } from "./device-client.js";
+
+const fakeMode = vi.hoisted(() => ({ mode: "full" as "full" | "no-self-info" }));
 
 vi.mock("@liamcottle/meshcore.js", async (importOriginal) => {
   const { EventEmitter } = await import("node:events");
@@ -25,6 +28,11 @@ vi.mock("@liamcottle/meshcore.js", async (importOriginal) => {
       // SelfInfo to the next event-loop iteration so the handshake listener is
       // already registered.
       this.emit("connected");
+      if (fakeMode.mode === "no-self-info") {
+        // Simulate a node that never answers SelfInfo. Other connect-time fetches
+        // must still run (issue #20).
+        return;
+      }
       setImmediate(() => {
         this.emit(original.Constants.ResponseCodes.SelfInfo, {
         type: 1,
@@ -184,6 +192,10 @@ describe("waitForSendConfirmed per-frame ack correlation", () => {
 });
 
 describe("connectMeshcoreDevice numeric response code handshake", () => {
+  beforeEach(() => {
+    fakeMode.mode = "full";
+  });
+
   it("populates selfInfo, deviceInfo, contacts, batteryMv and channels when the node emits numeric response codes", async () => {
     const handle = await connectMeshcoreDevice({
       accountId: "acct-numeric-handshake",
@@ -210,6 +222,42 @@ describe("connectMeshcoreDevice numeric response code handshake", () => {
       expect(handle.connected).toBe(true);
     } finally {
       await disconnectMeshcoreDevice("acct-numeric-handshake");
+    }
+  });
+
+  it("isolates a lost SelfInfo response so DeviceInfo, contacts, channels and battery still populate (issue #20)", async () => {
+    fakeMode.mode = "no-self-info";
+    const handle = await connectMeshcoreDevice({
+      accountId: "acct-no-selfinfo",
+      host: "127.0.0.1",
+      port: 5000,
+      handshakeTimeoutMs: 50,
+    });
+
+    try {
+      expect(handle.selfInfo).toBeUndefined();
+
+      expect(handle.deviceInfo).toBeDefined();
+      expect(handle.deviceInfo?.manufacturerModel).toBe("testmodel");
+
+      expect(handle.contacts.length).toBe(1);
+      expect(handle.contacts[0]?.advName).toBe("friend");
+
+      expect(handle.batteryMv).toBe(4200);
+
+      expect(handle.channels.length).toBe(8);
+      expect(handle.channels[0]?.name).toBe("ch0");
+
+      // Each fetch must clean up its own listener; no leak from the timed-out
+      // SelfInfo wait.
+      expect(handle.connection.listenerCount(Constants.ResponseCodes.SelfInfo)).toBe(0);
+      expect(handle.connection.listenerCount(Constants.ResponseCodes.DeviceInfo)).toBe(0);
+      expect(handle.connection.listenerCount(Constants.ResponseCodes.Contact)).toBe(0);
+      expect(handle.connection.listenerCount(Constants.ResponseCodes.EndOfContacts)).toBe(0);
+      expect(handle.connection.listenerCount(Constants.ResponseCodes.ChannelInfo)).toBe(0);
+      expect(handle.connection.listenerCount(Constants.ResponseCodes.BatteryVoltage)).toBe(0);
+    } finally {
+      await disconnectMeshcoreDevice("acct-no-selfinfo");
     }
   });
 });
