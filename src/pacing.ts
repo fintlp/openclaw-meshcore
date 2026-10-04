@@ -4,6 +4,7 @@ import {
   type SendPacingConfig,
 } from "./airtime.js";
 import {
+  removeSendConfirmedWait,
   waitForSendConfirmed,
   type SendConfirmedPayload,
 } from "./device-client.js";
@@ -51,8 +52,35 @@ function getOrCreateState(accountId: string): PacingState {
   return state;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function createAbortError(reason: unknown): Error {
+  if (reason instanceof Error) {
+    return reason;
+  }
+  return new Error(typeof reason === "string" ? reason : "send aborted");
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw createAbortError(signal.reason);
+  }
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    if (!signal) {
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(createAbortError(signal.reason));
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export type PacingFrameContext = {
@@ -69,6 +97,11 @@ export type PacingFrameContext = {
   afterFrame: (frameBytes: number, expectedAckCode?: number) => void;
 };
 
+export type WithPacedSendOptions = {
+  /** If aborted, the paced sequence stops before the next frame. */
+  abortSignal?: AbortSignal;
+};
+
 /**
  * Serialize all outbound text sends for an account and enforce inter-frame
  * airtime pacing. Every frame — SDK-chunked pieces, internal sub-chunks, and
@@ -79,18 +112,22 @@ export async function withPacedSend<T>(
   rawPacing: Record<string, unknown> | undefined,
   radioParams: { radioSf?: number; radioBw?: number; radioCr?: number } | undefined,
   work: (ctx: PacingFrameContext) => Promise<T>,
+  options?: WithPacedSendOptions,
 ): Promise<T> {
   const pacing = resolveSendPacingConfig(rawPacing);
   const state = getOrCreateState(accountId);
+  const signal = options?.abortSignal;
 
   const previous = state.inFlight;
   const current = (async () => {
     // Wait for any previous send on this account to finish (including pacing
     // delays and chunk loops). This serializes outbound frames.
     await previous;
+    throwIfAborted(signal);
 
     return await work({
       beforeFrame: async (frameBytes) => {
+        throwIfAborted(signal);
         if (!pacing.enabled) {
           return;
         }
@@ -123,16 +160,34 @@ export async function withPacedSend<T>(
           const pending = state.pendingAckWait;
           if (pending && pending.ackCode === state.lastFrameAckCode) {
             state.ackWaitPending = true;
-            const result = await pending.promise;
-            state.ackWaitPending = false;
-            // One waiter per frame: consume it so it cannot be reused.
-            if (state.pendingAckWait === pending) {
-              state.pendingAckWait = null;
+            try {
+              const result = signal
+                ? await Promise.race([
+                    pending.promise,
+                    new Promise<never>((_, reject) => {
+                      const onAbort = () => {
+                        removeSendConfirmedWait(accountId, pending.ackCode);
+                        reject(createAbortError(signal.reason));
+                      };
+                      if (signal.aborted) {
+                        onAbort();
+                        return;
+                      }
+                      signal.addEventListener("abort", onAbort, { once: true });
+                    }),
+                  ])
+                : await pending.promise;
+              if (!("timeout" in result)) {
+                return;
+              }
+              // Confirm timed out: fall through to enforce the airtime gapNeeded floor.
+            } finally {
+              state.ackWaitPending = false;
+              // One waiter per frame: consume it so it cannot be reused.
+              if (state.pendingAckWait === pending) {
+                state.pendingAckWait = null;
+              }
             }
-            if (!("timeout" in result)) {
-              return;
-            }
-            // Confirm timed out: fall through to enforce the airtime gapNeeded floor.
           }
         }
 
@@ -142,7 +197,7 @@ export async function withPacedSend<T>(
         const totalElapsed = Date.now() - state.lastFrameSentAt;
         const delay = Math.max(0, gapNeeded - totalElapsed);
         if (delay > 0) {
-          await sleep(delay);
+          await sleep(delay, signal);
         }
       },
       afterFrame: (frameBytes, expectedAckCode) => {

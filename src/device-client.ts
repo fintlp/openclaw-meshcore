@@ -143,6 +143,30 @@ export function clearSendConfirmedStateForTests(): void {
   pendingSendConfirmedResolvers.clear();
 }
 
+/**
+ * Remove the pending waiter for a specific expected ack tag without resolving
+ * it. The timer is cleared and the entry is removed from the queue so a late
+ * confirm is not credited anywhere. Intended for internal abort paths (e.g.
+ * connection lost mid-send).
+ */
+export function removeSendConfirmedWait(accountId: string, expectedAckCode: number): void {
+  const queue = pendingSendConfirmedResolvers.get(accountId);
+  if (!queue) {
+    return;
+  }
+  const matchIndex = queue.findIndex(
+    (w) => w.expectedAckCode !== undefined && w.expectedAckCode === expectedAckCode,
+  );
+  if (matchIndex < 0) {
+    return;
+  }
+  const [matched] = queue.splice(matchIndex, 1);
+  if (matched.timer) {
+    clearTimeout(matched.timer);
+    matched.timer = null;
+  }
+}
+
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
 
