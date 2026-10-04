@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { MeshcoreConfigSchema } from "./config-schema.js";
+import { buildManifest } from "../scripts/sync-manifest.js";
+import { MeshcoreAccountSchema, MeshcoreConfigSchema } from "./config-schema.js";
 
 function expectValidConfig(result: ReturnType<typeof MeshcoreConfigSchema.safeParse>) {
   expect(result.success).toBe(true);
@@ -15,6 +16,10 @@ function expectInvalidConfig(result: ReturnType<typeof MeshcoreConfigSchema.safe
     throw new Error("expected config to be invalid");
   }
   return result.error.issues;
+}
+
+function sortedKeys(obj: Record<string, unknown>): string[] {
+  return Object.keys(obj).sort();
 }
 
 describe("meshcore config schema", () => {
@@ -180,29 +185,60 @@ describe("meshcore config schema", () => {
     expect(issues.some((issue) => issue.path.join(".").startsWith("sendPacing.defaultCr"))).toBe(true);
   });
 
-  // Drift-guard: assert every key of the zod channel config schema also exists in the manifest JSON schema.
-  // FAILS if either schema is missing fields from the other (e.g. issue #16 where sendPacing was missing).
-  // Checks BOTH copies in openclaw.plugin.json: root channel config and per-account config.
-  it("manifest schema drift guard: every zod field exists in manifest", () => {
+  // Drift-guard: the committed openclaw.plugin.json must be exactly what
+  // `npm run sync-manifest` would write. This catches any hand-edits or
+  // stale generated schema copies.
+  it("committed manifest matches sync-manifest output", () => {
+    const fs = require("fs");
+    const committed = JSON.parse(fs.readFileSync("./openclaw.plugin.json", "utf8"));
+    const generated = buildManifest();
+    expect(generated).toEqual(committed);
+  });
+
+  // Drift-guard: every key of the zod channel config schema also exists in the
+  // canonical JSON schema and in the manifest JSON schema. Checks BOTH copies
+  // in openclaw.plugin.json (root channel config and per-account config).
+  it("canonical and manifest schemas match zod keys", () => {
     const fs = require("fs");
     const manifest = JSON.parse(fs.readFileSync("./openclaw.plugin.json", "utf8"));
+    const canonical = JSON.parse(
+      fs.readFileSync("./src/meshcore-channel-config.schema.json", "utf8"),
+    );
+
     const manifestProperties = manifest.channelConfigs.meshcore.schema.properties;
+    const accountProperties = manifestProperties.accounts?.additionalProperties?.properties;
+
+    const zodRootKeys = sortedKeys(MeshcoreConfigSchema.shape);
+    const zodAccountKeys = sortedKeys(MeshcoreAccountSchema.shape);
+    const canonicalRootKeys = sortedKeys(canonical.properties);
+    const canonicalAccountKeys = sortedKeys(canonical.$defs.account.properties);
+    const manifestRootKeys = sortedKeys(manifestProperties);
+    const manifestAccountKeys = sortedKeys(accountProperties);
+
+    // 1. Zod and canonical must agree (single source of truth for keys).
+    expect(zodRootKeys, "zod root keys mismatch vs canonical").toEqual(canonicalRootKeys);
+    expect(zodAccountKeys, "zod account keys mismatch vs canonical").toEqual(canonicalAccountKeys);
+
+    // 2. Manifest must agree with canonical in both copies.
+    expect(manifestRootKeys, "manifest root keys mismatch vs canonical").toEqual(canonicalRootKeys);
+    expect(
+      manifestAccountKeys,
+      "manifest account keys mismatch vs canonical",
+    ).toEqual(canonicalAccountKeys);
+
+    // 3. Both manifest copies must be identical for the shared fields.
+    const sharedRootKeys = manifestRootKeys.filter((k) => k !== "accounts" && k !== "defaultAccount");
+    expect(manifestAccountKeys, "manifest root/account shared keys mismatch").toEqual(
+      sharedRootKeys,
+    );
+
+    // 4. sendPacing keys and defaults across both copies (regression guard).
     const rootPacing = manifestProperties.sendPacing;
-    const accountPacing = manifestProperties.accounts?.additionalProperties?.properties?.sendPacing;
-
-    // 1. Top-level channel config keys: every key in zod schema must exist in manifest
-    const zodTopLevelKeys = Object.keys(MeshcoreConfigSchema.shape);
-    const missingTopLevel = zodTopLevelKeys.filter((k) => !manifestProperties.hasOwnProperty(k));
-    expect(missingTopLevel).toEqual([]);
-
-    // 2. Both manifest copies must exist and be defined
+    const accountPacing = accountProperties.sendPacing;
     expect(rootPacing).toBeDefined();
     expect(accountPacing).toBeDefined();
-
-    // 3. Both manifest copies must be identical to each other
     expect(rootPacing).toEqual(accountPacing);
 
-    // 4. sendPacing keys and defaults across both copies
     const zodKeys = [
       "enabled",
       "mode",
