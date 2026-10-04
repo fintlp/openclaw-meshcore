@@ -152,7 +152,7 @@ export function buildMeshcoreEndpoint(host: string, port: number): string {
 
 function waitForEvent<T>(
   emitter: TCPConnection,
-  event: string,
+  event: string | number,
   timeoutMs: number,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -332,7 +332,7 @@ export async function connectMeshcoreDevice(params: {
   try {
     const selfInfoRaw = (await waitForEvent<Record<string, unknown>>(
       connection,
-      "SelfInfo",
+      Constants.ResponseCodes.SelfInfo,
       handshakeTimeoutMs,
     )) as Record<string, unknown>;
     handle.selfInfo = normalizeSelfInfo(selfInfoRaw);
@@ -340,7 +340,7 @@ export async function connectMeshcoreDevice(params: {
     await connection.sendCommandDeviceQuery(1);
     const deviceInfoRaw = await waitForEvent<Record<string, unknown>>(
       connection,
-      "DeviceInfo",
+      Constants.ResponseCodes.DeviceInfo,
       handshakeTimeoutMs,
     );
     handle.deviceInfo = normalizeDeviceInfo(deviceInfoRaw);
@@ -365,11 +365,11 @@ export async function connectMeshcoreDevice(params: {
         resolve(contacts);
       };
       const cleanup = () => {
-        connection.off("Contact", onContact);
-        connection.off("EndOfContacts", onEnd);
+        connection.off(Constants.ResponseCodes.Contact, onContact);
+        connection.off(Constants.ResponseCodes.EndOfContacts, onEnd);
       };
-      connection.on("Contact", onContact);
-      connection.on("EndOfContacts", onEnd);
+      connection.on(Constants.ResponseCodes.Contact, onContact);
+      connection.on(Constants.ResponseCodes.EndOfContacts, onEnd);
       void connection.sendCommandGetContacts();
     });
     handle.contacts = contactsRaw.map(normalizeContact);
@@ -397,9 +397,9 @@ export async function connectMeshcoreDevice(params: {
         resolve(value);
       };
       const cleanup = () => {
-        connection.off("BatteryVoltage", handler);
+        connection.off(Constants.ResponseCodes.BatteryVoltage, handler);
       };
-      connection.on("BatteryVoltage", handler);
+      connection.on(Constants.ResponseCodes.BatteryVoltage, handler);
       void connection.sendCommandGetBatteryVoltage();
     });
     handle.batteryMv = Number(batteryRaw.batteryMilliVolts ?? 0);
