@@ -6,6 +6,7 @@ import { createAccountStatusSink } from "./channel-api.js";
 import {
   contactHasMissingMetadata,
   getContactByPubkey,
+  POSITION_RESYNC_AFTER_MS,
   rememberContact,
 } from "./contact-book.js";
 import {
@@ -28,6 +29,7 @@ import {
   parseMeshcoreChannelIndex,
   parseMeshcoreNodeId,
 } from "./normalize.js";
+import { bytesToHex } from "./protocol.js";
 import { formatMeshcoreEndpoint } from "./transport.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import { sendMessageMeshcore } from "./send.js";
@@ -35,6 +37,36 @@ import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
 
 const CHANNEL_ID = "meshcore" as const;
+
+// Track the last staleness-based position re-sync per contact so a moving
+// peer triggers at most one getContacts call per POSITION_RESYNC_AFTER_MS window.
+const lastPositionResyncByContact = new Map<string, number>();
+
+function positionResyncKey(accountId: string, pubkeyHex: string): string {
+  return `${accountId}:${pubkeyHex}`;
+}
+
+/** @internal Reset staleness-based re-sync tracking; tests only. */
+export function resetPositionResyncStateForTests(): void {
+  lastPositionResyncByContact.clear();
+}
+
+function shouldResyncPosition(stored: { lastAdvert: number }, accountId: string, pubkeyHex: string): boolean {
+  if (stored.lastAdvert <= 0) {
+    return false;
+  }
+  const elapsedMs = Date.now() - stored.lastAdvert * 1000;
+  if (elapsedMs <= POSITION_RESYNC_AFTER_MS) {
+    return false;
+  }
+  const key = positionResyncKey(accountId, pubkeyHex);
+  const lastResync = lastPositionResyncByContact.get(key) ?? 0;
+  if (Date.now() - lastResync <= POSITION_RESYNC_AFTER_MS) {
+    return false;
+  }
+  lastPositionResyncByContact.set(key, Date.now());
+  return true;
+}
 
 export type MeshcoreMonitorOptions = {
   accountId?: string;
@@ -441,7 +473,8 @@ export function monitorMeshcoreProvider(
     const onLegacyAdvert = (advert: Record<string, unknown>) => {
       // 0x80 only carries the pubkey for known contacts. Remember what we have,
       // then schedule a debounced contact-list sync if the stored entry still
-      // lacks metadata.
+      // lacks metadata, or if the stored position is stale enough that a moving
+      // peer may have updated coordinates (issue #18 item 3).
       onAdvert(advert);
       try {
         const pk = advert.publicKey;
@@ -455,7 +488,15 @@ export function monitorMeshcoreProvider(
           return;
         }
         const stored = getContactByPubkey(bytes, account.accountId);
-        if (stored && contactHasMissingMetadata(stored)) {
+        if (!stored) {
+          return;
+        }
+        if (contactHasMissingMetadata(stored)) {
+          contactSync.schedule();
+          return;
+        }
+        const pubkeyHex = bytesToHex(bytes).toLowerCase();
+        if (shouldResyncPosition(stored, account.accountId, pubkeyHex)) {
           contactSync.schedule();
         }
       } catch {

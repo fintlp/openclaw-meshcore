@@ -466,6 +466,14 @@ export function contactHasMissingMetadata(entry: ContactBookEntry): boolean {
   return entry.advName === "" && entry.lastAdvert === 0;
 }
 
+/**
+ * Re-sync a known contact's position/metadata from the node when a 0x80 push
+ * arrives and the stored `lastAdvert` timestamp is older than this. The
+ * firmware advertises its own `lastAdvert` in seconds since epoch; the stored
+ * value is compared against the current gateway time.
+ */
+export const POSITION_RESYNC_AFTER_MS = 6 * 60 * 60 * 1000;
+
 /** @internal Reset function for tests only. Does not delete the persisted file. */
 export function resetContactBookForTests(): void {
   contactBooks.clear();
