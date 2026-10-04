@@ -19,9 +19,65 @@ import {
   parseMeshcoreChannelIndex,
   parseMeshcoreNodeId,
 } from "./normalize.js";
-import { withPacedSend } from "./pacing.js";
+import { withPacedSend, type WithPacedSendOptions } from "./pacing.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig } from "./types.js";
+import { resolveSendPacingConfig } from "./airtime.js";
+
+function createAbortError(reason: unknown): Error {
+  if (reason instanceof Error) {
+    return reason;
+  }
+  return new Error(typeof reason === "string" ? reason : "send aborted");
+}
+
+/**
+ * Race a sendTextMessage call against an AbortSignal. If the signal aborts
+ * first, the abandoned library promise is swallowed so its late
+ * settlement/rejection cannot surface as an unhandledRejection.
+ */
+function raceSendTextMessage(
+  connection: MeshcoreDeviceHandle["connection"],
+  pubkey: Uint8Array,
+  chunk: string,
+  signal: AbortSignal | undefined,
+): Promise<{ expectedAckCrc?: number; estTimeout?: number }> {
+  const sendPromise = connection.sendTextMessage(pubkey, chunk);
+  if (!signal) {
+    return sendPromise;
+  }
+  if (signal.aborted) {
+    sendPromise.catch(() => {});
+    return Promise.reject(createAbortError(signal.reason));
+  }
+  return new Promise<{ expectedAckCrc?: number; estTimeout?: number }>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      if (!settled) {
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+      }
+    };
+    sendPromise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+    const onAbort = () => {
+      cleanup();
+      // Swallow the orphaned library promise so it cannot become an
+      // unhandledRejection if it settles after we have already aborted.
+      sendPromise.catch(() => {});
+      reject(createAbortError(signal.reason));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 type SendMeshcoreOptions = {
   cfg: CoreConfig;
@@ -29,7 +85,23 @@ type SendMeshcoreOptions = {
   replyTo?: string;
   target?: string;
   deviceHandle?: MeshcoreDeviceHandle;
+  /** Internal override for the queue watchdog budget (tests only). */
+  sendQueueBudgetMs?: number;
 };
+
+/** Error thrown when a paced send is aborted mid-sequence. */
+export class MeshcoreSendAbortedError extends Error {
+  constructor(
+    message: string,
+    public cause: string,
+  ) {
+    super(message);
+    this.name = "MeshcoreSendAbortedError";
+  }
+}
+
+const SEND_QUEUE_BUDGET_MIN_MS = 30_000;
+const SEND_QUEUE_BUDGET_PAD_MS = 5_000;
 
 type SendMeshcoreResult = {
   messageId: string;
@@ -165,38 +237,101 @@ export async function sendMessageMeshcore(
   }
   const pubkey = nodeIdToPubkey(nodeId, account.accountId);
 
-  return await withPacedSend(
-    account.accountId,
+  const pacingConfig = resolveSendPacingConfig(
     account.config.sendPacing as Record<string, unknown> | undefined,
-    handle.selfInfo,
-    async (ctx) => {
-      let lastMessageId = "";
-      for (const chunk of chunks) {
-        const chunkBytes = utf8ByteLength(chunk);
-        await ctx.beforeFrame(chunkBytes);
-        rememberOutboundEcho(chunk);
-        const response = await handle.connection.sendTextMessage(pubkey, chunk);
-        lastMessageId = String(response.expectedAckCrc ?? response.estTimeout ?? Date.now());
-        ctx.afterFrame(chunkBytes, response.expectedAckCrc);
-      }
-
-      recordMeshcoreOutboundActivity(account.accountId);
-
-      return {
-        messageId: lastMessageId,
-        target,
-        receipt: createMessageReceiptFromOutboundResults({
-          results: [
-            {
-              channel: "meshcore",
-              messageId: lastMessageId,
-              conversationId: target,
-            },
-          ],
-          kind: "text",
-          ...(opts.replyTo ? { replyToId: opts.replyTo } : {}),
-        }),
-      };
-    },
   );
+
+  const sendQueueBudgetMs =
+    opts.sendQueueBudgetMs ??
+    Math.max(
+      SEND_QUEUE_BUDGET_MIN_MS,
+      chunks.length * (pacingConfig.maxDelayMs + pacingConfig.ackTimeoutMs) +
+        SEND_QUEUE_BUDGET_PAD_MS,
+    );
+
+  // Stable id used for dead-letter logging if the queue watchdog has to kill
+  // this send before the final frame id is known.
+  const pendingMessageId = `${target}-${Date.now()}-${chunks.length}`;
+
+  const abortController = new AbortController();
+  const pacingOptions: WithPacedSendOptions = { abortSignal: abortController.signal };
+
+  let budgetTimer: ReturnType<typeof setTimeout> | null = null;
+  let onDisconnected: (() => void) | null = null;
+
+  const disposeAbortWatchdogs = () => {
+    if (budgetTimer) {
+      clearTimeout(budgetTimer);
+      budgetTimer = null;
+    }
+    if (onDisconnected) {
+      handle.connection.off("disconnected", onDisconnected);
+      onDisconnected = null;
+    }
+  };
+
+  onDisconnected = () => {
+    abortController.abort(new MeshcoreSendAbortedError("connection lost", "connection_lost"));
+  };
+  handle.connection.on("disconnected", onDisconnected);
+
+  budgetTimer = setTimeout(() => {
+    abortController.abort(
+      new MeshcoreSendAbortedError("send queue budget exceeded", "queue_budget_exceeded"),
+    );
+  }, sendQueueBudgetMs);
+
+  try {
+    return await withPacedSend(
+      account.accountId,
+      account.config.sendPacing as Record<string, unknown> | undefined,
+      handle.selfInfo,
+      async (ctx) => {
+        let lastMessageId = "";
+        for (const chunk of chunks) {
+          const chunkBytes = utf8ByteLength(chunk);
+          await ctx.beforeFrame(chunkBytes);
+          rememberOutboundEcho(chunk);
+          const response = await raceSendTextMessage(
+            handle.connection,
+            pubkey,
+            chunk,
+            abortController.signal,
+          );
+          lastMessageId = String(response.expectedAckCrc ?? response.estTimeout ?? Date.now());
+          ctx.afterFrame(chunkBytes, response.expectedAckCrc);
+        }
+
+        recordMeshcoreOutboundActivity(account.accountId);
+
+        return {
+          messageId: lastMessageId,
+          target,
+          receipt: createMessageReceiptFromOutboundResults({
+            results: [
+              {
+                channel: "meshcore",
+                messageId: lastMessageId,
+                conversationId: target,
+              },
+            ],
+            kind: "text",
+            ...(opts.replyTo ? { replyToId: opts.replyTo } : {}),
+          }),
+        };
+      },
+      pacingOptions,
+    );
+  } catch (error) {
+    if (error instanceof MeshcoreSendAbortedError) {
+      const logMessage =
+        error.cause === "queue_budget_exceeded"
+          ? `[meshcore] send queue budget exceeded; dead-letter message id ${pendingMessageId}`
+          : `[meshcore] send aborted (${error.cause}); dead-letter message id ${pendingMessageId}`;
+      console.error(logMessage);
+    }
+    throw error;
+  } finally {
+    disposeAbortWatchdogs();
+  }
 }
