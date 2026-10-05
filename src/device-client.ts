@@ -4,6 +4,7 @@ import {
   rememberSelfInfo,
   resolveContactPubkeyByPrefix,
 } from "./contact-book.js";
+import { writeNodeStatusSnapshot } from "./node-status.js";
 import type { MeshcoreContact, MeshcoreDeviceInfo, MeshcoreSelfInfo } from "./types.js";
 import {
   bytesToHex,
@@ -292,13 +293,18 @@ async function queryAllChannels(connection: TCPConnection): Promise<
   return channels;
 }
 
-export async function connectMeshcoreDevice(params: {
+export type MeshcoreConnectOptions = {
   accountId: string;
   host: string;
   port: number;
   connectTimeoutMs?: number;
   handshakeTimeoutMs?: number;
-}): Promise<MeshcoreDeviceHandle> {
+  reconnectCount?: number;
+  lastRestartReason?: string;
+  lastRestartAt?: number;
+};
+
+export async function connectMeshcoreDevice(params: MeshcoreConnectOptions): Promise<MeshcoreDeviceHandle> {
   const existing = devices.get(params.accountId);
   if (existing) {
     await disconnectMeshcoreDevice(params.accountId);
@@ -365,6 +371,13 @@ export async function connectMeshcoreDevice(params: {
     );
     handle.selfInfo = normalizeSelfInfo(selfInfoRaw);
     rememberSelfInfo(handle.selfInfo, handle.accountId);
+    writeNodeStatusSnapshot(handle.selfInfo, {
+      connectionState: "connected",
+      since: Date.now(),
+      reconnectCount: params.reconnectCount ?? 0,
+      lastRestartReason: params.lastRestartReason,
+      lastRestartAt: params.lastRestartAt,
+    });
   } catch {
     // SelfInfo is optional for messaging; keep the connection.
   }

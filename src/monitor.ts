@@ -21,6 +21,7 @@ import {
   type MeshcoreDeviceHandle,
 } from "./device-client.js";
 import { isOutboundEcho, rememberOutboundEcho } from "./echo-dedupe.js";
+import { updateNodeStatusOps } from "./node-status.js";
 import { handleMeshcoreInbound } from "./inbound.js";
 import {
   formatMeshcoreChannelTarget,
@@ -86,7 +87,14 @@ export type MeshcoreMonitorOptions = {
     message: MeshcoreInboundMessage,
     handle: MeshcoreDeviceHandle,
   ) => void | Promise<void>;
+  reconnectCount?: number;
+  lastRestartReason?: string;
+  lastRestartAt?: number;
 };
+
+function toIso(timestamp: number): string {
+  return new Date(timestamp).toISOString();
+}
 
 function channelIndexFromPacket(channel: number): number {
   if (Number.isFinite(channel) && channel >= 0 && channel <= 7) {
@@ -234,6 +242,9 @@ export function monitorMeshcoreProvider(
       accountId: account.accountId,
       host: account.host,
       port: account.port,
+      reconnectCount: opts.reconnectCount ?? 0,
+      lastRestartReason: opts.lastRestartReason,
+      lastRestartAt: opts.lastRestartAt,
     });
 
     const allowedChannels = new Set(account.config.channels ?? [0]);
@@ -398,10 +409,12 @@ export function monitorMeshcoreProvider(
     };
 
     const onDisconnected = () => {
+      const now = Date.now();
+      updateNodeStatusOps({ connectionState: "disconnected", since: toIso(now) });
       opts.statusSink?.({
         connected: false,
-        lastEventAt: Date.now(),
-        lastTransportActivityAt: Date.now(),
+        lastEventAt: now,
+        lastTransportActivityAt: now,
       });
       if (settled) return;
       doCleanup();
