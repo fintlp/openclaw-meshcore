@@ -64,7 +64,28 @@ vi.mock("./channel-api.js", async (importOriginal) => {
 });
 
 vi.mock("./inbound.js", () => ({
-  handleMeshcoreInbound: vi.fn(),
+  handleMeshcoreInbound: vi.fn(async (params) => {
+    if (params.message.isGroup && params.onAdmittedGroup) {
+      // Simulate the admission gate that monitor.ts now runs before digest
+      // persistence: groupPolicy=disabled drops, allowlist requires a matching
+      // group entry.
+      const cfg = params.account.config;
+      const groupPolicy = cfg.groupPolicy ?? "disabled";
+      if (groupPolicy === "disabled") {
+        return;
+      }
+      if (groupPolicy === "allowlist") {
+        const groups = cfg.groups ?? {};
+        const allowed = Object.keys(groups).some(
+          (key) => key === params.message.target || key === "*",
+        );
+        if (!allowed) {
+          return;
+        }
+      }
+      await params.onAdmittedGroup(params.message);
+    }
+  }),
 }));
 
 vi.mock("./send.js", () => ({
@@ -498,6 +519,20 @@ describe("monitorMeshcoreProvider", () => {
     connectMeshcoreDeviceMock.mockResolvedValue(handle);
     const onMessage = vi.fn();
 
+    resolveMeshcoreAccountMock.mockReturnValue(
+      createResolvedAccount({
+        config: {
+          dmPolicy: "pairing",
+          allowFrom: [],
+          groupPolicy: "allowlist",
+          groupAllowFrom: [],
+          channels: [0],
+          groups: { "channel:0": {} },
+          groupMonitorMode: "digest",
+        },
+      }),
+    );
+
     const monitorPromise = monitorMeshcoreProvider({
       config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
       runtime: createRuntimeEnv(),
@@ -524,6 +559,36 @@ describe("monitorMeshcoreProvider", () => {
         text: "digest broadcast",
       }),
     );
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("does not log group messages in digest mode when admission rejects (#7)", async () => {
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const onMessage = vi.fn();
+
+    // Default createResolvedAccount has groupPolicy: "disabled".
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      onMessage,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    handle.connection.emit(8, {
+      channelIdx: 0,
+      txtType: 0,
+      senderTimestamp: 1700000000,
+      text: "rejected broadcast",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(readGroupLogEntries()).toHaveLength(0);
 
     handle.connection.emit("disconnected");
     await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);

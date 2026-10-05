@@ -402,12 +402,26 @@ export function monitorMeshcoreProvider(
           });
 
           if (groupMonitorMode === "digest") {
-            appendGroupLogEntry({
-              ts: new Date().toISOString(),
-              channel: inbound.target,
-              senderPubkeyPrefix: extractSenderPubkeyPrefix(message),
-              name: inbound.senderName,
-              text: inbound.text,
+            await handleMeshcoreInbound({
+              message: inbound,
+              account,
+              config: cfg,
+              runtime,
+              sendReply: async () => {
+                runtime.error?.(
+                  `[${account.accountId}] blocked outbound reply to group ${inbound.target}: groups are receive-only`,
+                );
+              },
+              statusSink: opts.statusSink,
+              onAdmittedGroup: (admitted) => {
+                appendGroupLogEntry({
+                  ts: new Date().toISOString(),
+                  channel: admitted.target,
+                  senderPubkeyPrefix: extractSenderPubkeyPrefix(message),
+                  name: admitted.senderName,
+                  text: admitted.text,
+                });
+              },
             });
             return;
           }

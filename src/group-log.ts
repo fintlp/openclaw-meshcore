@@ -44,6 +44,18 @@ function atomicWriteLines(path: string, lines: string[]): void {
   renameSync(tmpPath, path);
 }
 
+function isValidLogLine(line: string): boolean {
+  if (line.trim().length === 0) {
+    return false;
+  }
+  try {
+    JSON.parse(line);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function readLines(path: string): string[] {
   try {
     const text = readFileSync(path, "utf8");
@@ -56,10 +68,10 @@ function readLines(path: string): string[] {
   }
 }
 
-/** Append a group message to the digest log, rotating to keep the newest lines. */
+/** Append a group message to the digest log, rotating to keep the newest valid lines. */
 export function appendGroupLogEntry(entry: GroupLogEntry): void {
   const path = getGroupLogPath();
-  const lines = readLines(path);
+  const lines = readLines(path).filter(isValidLogLine);
   lines.push(JSON.stringify(entry));
   if (lines.length > GROUP_LOG_MAX_LINES) {
     lines.splice(0, lines.length - GROUP_LOG_MAX_LINES);
@@ -69,7 +81,15 @@ export function appendGroupLogEntry(entry: GroupLogEntry): void {
 
 /** @internal Read all entries for tests/debugging. */
 export function readGroupLogEntries(): GroupLogEntry[] {
-  return readLines(getGroupLogPath()).map((line) => JSON.parse(line) as GroupLogEntry);
+  const entries: GroupLogEntry[] = [];
+  for (const line of readLines(getGroupLogPath())) {
+    try {
+      entries.push(JSON.parse(line) as GroupLogEntry);
+    } catch {
+      // Drop corrupt lines rather than failing the whole read.
+    }
+  }
+  return entries;
 }
 
 /** @internal Reset the test path only; does not delete the persisted file. */

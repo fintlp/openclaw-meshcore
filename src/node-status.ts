@@ -56,11 +56,16 @@ export function setNodeStatusPathForTests(path: string | undefined): void {
   testNodeStatusPath = path;
 }
 
-function getNodeStatusPath(): string {
-  return (
-    testNodeStatusPath ??
-    `${process.env.HOME ?? "~"}/.openclaw/state/meshcore-node-status.json`
-  );
+function getNodeStatusPath(accountId?: string): string {
+  if (testNodeStatusPath) {
+    return testNodeStatusPath;
+  }
+  const base = `${process.env.HOME ?? "~"}/.openclaw/state/meshcore-node-status`;
+  // Default account keeps the plain filename for backwards compatibility;
+  // named accounts get a scoped file.
+  return accountId && accountId !== "default"
+    ? `${base}.${accountId}.json`
+    : `${base}.json`;
 }
 
 function atomicWriteJson(path: string, data: unknown): void {
@@ -70,9 +75,11 @@ function atomicWriteJson(path: string, data: unknown): void {
   renameSync(tmpPath, path);
 }
 
-function readSnapshot(): Partial<NodeStatusSnapshot> {
+function readSnapshot(accountId?: string): Partial<NodeStatusSnapshot> {
   try {
-    return JSON.parse(readFileSync(getNodeStatusPath(), "utf8")) as Partial<NodeStatusSnapshot>;
+    return JSON.parse(
+      readFileSync(getNodeStatusPath(accountId), "utf8"),
+    ) as Partial<NodeStatusSnapshot>;
   } catch {
     return {};
   }
@@ -92,6 +99,7 @@ export function buildNodeStatusSnapshot(
     lastRestartReason?: string;
     lastRestartAt?: number;
   },
+  accountId?: string,
 ): NodeStatusSnapshot {
   const crDenominator = selfInfo.radioCr;
   return {
@@ -120,6 +128,7 @@ export function buildNodeStatusSnapshot(
     reconnectCount: ops.reconnectCount,
     lastRestartReason: ops.lastRestartReason,
     lastRestartAt: ops.lastRestartAt !== undefined ? toIso(ops.lastRestartAt) : undefined,
+    accountId,
   };
 }
 
@@ -133,8 +142,12 @@ export function writeNodeStatusSnapshot(
     lastRestartReason?: string;
     lastRestartAt?: number;
   },
+  accountId?: string,
 ): void {
-  atomicWriteJson(getNodeStatusPath(), buildNodeStatusSnapshot(selfInfo, ops));
+  atomicWriteJson(
+    getNodeStatusPath(accountId),
+    buildNodeStatusSnapshot(selfInfo, ops, accountId),
+  );
 }
 
 /** Update only the live operational fields, preserving SelfInfo data. */
@@ -145,20 +158,21 @@ export function updateNodeStatusOps(
       "connectionState" | "since" | "reconnectCount" | "lastRestartReason" | "lastRestartAt"
     >
   >,
+  accountId?: string,
 ): void {
-  const current = readSnapshot();
+  const current = readSnapshot(accountId);
   const next: Partial<NodeStatusSnapshot> = { ...current };
   if (ops.connectionState !== undefined) next.connectionState = ops.connectionState;
   if (ops.since !== undefined) next.since = ops.since;
   if (ops.reconnectCount !== undefined) next.reconnectCount = ops.reconnectCount;
   if (ops.lastRestartReason !== undefined) next.lastRestartReason = ops.lastRestartReason;
   if (ops.lastRestartAt !== undefined) next.lastRestartAt = ops.lastRestartAt;
-  atomicWriteJson(getNodeStatusPath(), next);
+  atomicWriteJson(getNodeStatusPath(accountId), next);
 }
 
 /** @internal Read the persisted snapshot for tests/debugging. */
-export function readNodeStatusSnapshot(): NodeStatusSnapshot | undefined {
-  const data = readSnapshot();
+export function readNodeStatusSnapshot(accountId?: string): NodeStatusSnapshot | undefined {
+  const data = readSnapshot(accountId);
   if (data.pubkey === undefined) {
     return undefined;
   }

@@ -263,7 +263,19 @@ async function maybeApplyAdvertPositionCorrection(params: AdvertPositionCorrecti
     return;
   }
   try {
-    await connection.setAdvertLatLong(advertLat, advertLon);
+    // The wire format expects int32 degrees * 1e6 (Companion Protocol), while
+    // config and logs use decimal degrees. Scale before calling the library.
+    const targetLatFixed = Math.round(advertLat * 1e6);
+    const targetLonFixed = Math.round(advertLon * 1e6);
+    await Promise.race([
+      connection.setAdvertLatLong(targetLatFixed, targetLonFixed),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("setAdvertLatLong timeout (5000ms)")),
+          5_000,
+        ),
+      ),
+    ]);
     console.log(
       `[meshcore] corrected advertised position from ${currentLat.toFixed(6)},${currentLon.toFixed(6)} to ${advertLat.toFixed(6)},${advertLon.toFixed(6)}`,
     );
@@ -272,8 +284,8 @@ async function maybeApplyAdvertPositionCorrection(params: AdvertPositionCorrecti
     writeNodeStatusSnapshot(
       {
         ...selfInfo,
-        advLat: Math.round(advertLat * 1e6),
-        advLon: Math.round(advertLon * 1e6),
+        advLat: targetLatFixed,
+        advLon: targetLonFixed,
       },
       ops,
     );
@@ -421,6 +433,7 @@ export async function connectMeshcoreDevice(params: MeshcoreConnectOptions): Pro
   // best-effort: the TCP connection stays up and the handle is returned.
 
   // SelfInfo is emitted automatically after connect on firmware v1+.
+  const connectNow = Date.now();
   try {
     const selfInfoRaw = await waitForEvent<Record<string, unknown>>(
       connection,
@@ -429,10 +442,9 @@ export async function connectMeshcoreDevice(params: MeshcoreConnectOptions): Pro
     );
     handle.selfInfo = normalizeSelfInfo(selfInfoRaw);
     rememberSelfInfo(handle.selfInfo, handle.accountId);
-    const now = Date.now();
     writeNodeStatusSnapshot(handle.selfInfo, {
       connectionState: "connected",
-      since: now,
+      since: connectNow,
       reconnectCount: params.reconnectCount ?? 0,
       lastRestartReason: params.lastRestartReason,
       lastRestartAt: params.lastRestartAt,
@@ -444,14 +456,22 @@ export async function connectMeshcoreDevice(params: MeshcoreConnectOptions): Pro
       advertLon: params.advertLon,
       ops: {
         connectionState: "connected",
-        since: now,
+        since: connectNow,
         reconnectCount: params.reconnectCount ?? 0,
         lastRestartReason: params.lastRestartReason,
         lastRestartAt: params.lastRestartAt,
       },
     });
   } catch {
-    // SelfInfo is optional for messaging; keep the connection.
+    // SelfInfo is optional for messaging; keep the connection. Still update
+    // live ops so a reconnect without SelfInfo doesn't leave stale state.
+    updateNodeStatusOps({
+      connectionState: "connected",
+      since: new Date(connectNow).toISOString(),
+      reconnectCount: params.reconnectCount ?? 0,
+      lastRestartReason: params.lastRestartReason,
+      lastRestartAt: params.lastRestartAt !== undefined ? new Date(params.lastRestartAt).toISOString() : undefined,
+    });
   }
 
   // DeviceInfo must be explicitly requested.

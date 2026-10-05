@@ -326,4 +326,66 @@ describe("meshcore inbound behavior", () => {
       expect.stringContaining("drop group sender channel:0 (policy=disabled)"),
     );
   });
+
+  it("invokes onAdmittedGroup for admitted groups instead of dispatching", async () => {
+    const onAdmittedGroup = vi.fn();
+    await handleMeshcoreInbound({
+      message: createMessage({
+        isGroup: true,
+        target: "channel:0",
+        senderNodeId: "channel:0",
+        text: "digest ping",
+      }),
+      account: createAccount({
+        config: {
+          dmPolicy: "pairing",
+          allowFrom: [],
+          groupPolicy: "allowlist",
+          groupAllowFrom: [],
+          channels: [0],
+          groups: {
+            "channel:0": {
+              requireMention: false,
+            },
+          },
+        },
+      }),
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      sendReply: vi.fn(async () => undefined),
+      onAdmittedGroup,
+    });
+
+    expect(onAdmittedGroup).toHaveBeenCalledTimes(1);
+    expect(onAdmittedGroup).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "digest ping", isGroup: true, target: "channel:0" }),
+    );
+  });
+
+  it("does not invoke onAdmittedGroup when group admission rejects", async () => {
+    const onAdmittedGroup = vi.fn();
+    await handleMeshcoreInbound({
+      message: createMessage({
+        isGroup: true,
+        target: "channel:0",
+        senderNodeId: "channel:0",
+        text: "rejected digest",
+      }),
+      account: createAccount({
+        config: {
+          dmPolicy: "pairing",
+          allowFrom: [],
+          groupPolicy: "disabled",
+          groupAllowFrom: [],
+          channels: [0],
+        },
+      }),
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      sendReply: vi.fn(async () => undefined),
+      onAdmittedGroup,
+    });
+
+    expect(onAdmittedGroup).not.toHaveBeenCalled();
+  });
 });

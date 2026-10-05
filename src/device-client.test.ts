@@ -326,7 +326,11 @@ describe("connectMeshcoreDevice numeric response code handshake", () => {
 
     try {
       const conn = handle.connection as unknown as { setAdvertLatLongCalls: Array<{ lat: number; lon: number }> };
-      expect(conn.setAdvertLatLongCalls).toEqual([{ lat: 50.123456, lon: 10.987654 }]);
+      // The wire format requires int32 degrees * 1e6, so the call receives
+      // scaled integers even though config and logs stay in decimal degrees.
+      expect(conn.setAdvertLatLongCalls).toEqual([
+        { lat: 50_123456, lon: 10_987654 },
+      ]);
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("corrected advertised position"),
       );
