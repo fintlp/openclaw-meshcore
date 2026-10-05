@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { bytesToHex } from "./protocol.js";
+import { pluginStateDir } from "./state-dir.js";
 import type { MeshcoreSelfInfo } from "./types.js";
 
 /**
@@ -62,7 +63,7 @@ function getNodeStatusPath(accountId?: string): string {
   if (testNodeStatusPath) {
     return testNodeStatusPath;
   }
-  const base = `${process.env.HOME ?? "~"}/.openclaw/state/meshcore-node-status`;
+  const base = `${pluginStateDir()}/meshcore-node-status`;
   // Default account keeps the plain filename for backwards compatibility;
   // named accounts get a scoped file.
   return accountId && accountId !== "default"

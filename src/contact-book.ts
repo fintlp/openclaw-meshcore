@@ -6,6 +6,7 @@ import {
   MESHCORE_PUBKEY_LENGTH,
   MESHCORE_PUBKEY_PREFIX_LENGTH,
 } from "./protocol.js";
+import { pluginStateDir } from "./state-dir.js";
 
 /**
  * MeshCore advert/contact metadata persisted as a local contact book.
@@ -65,7 +66,7 @@ function getContactBookPath(): string {
   return (
     testContactBookPath ??
     process.env.MESHCORE_ADVERT_CACHE_PATH ??
-    `${process.env.HOME ?? "~"}/.openclaw/state/meshcore-advert-contacts.json`
+    `${pluginStateDir()}/meshcore-advert-contacts.json`
   );
 }
 

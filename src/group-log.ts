@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { pluginStateDir } from "./state-dir.js";
 
 /**
  * JSON-lines digest of admitted group/broadcast messages.
@@ -36,7 +37,7 @@ function getGroupLogPath(accountId?: string): string {
   if (testGroupLogPath) {
     return testGroupLogPath;
   }
-  const base = `${process.env.HOME ?? "~"}/.openclaw/state/meshcore-group-log`;
+  const base = `${pluginStateDir()}/meshcore-group-log`;
   return accountId && accountId !== "default"
     ? `${base}.${accountId}.jsonl`
     : `${base}.jsonl`;
