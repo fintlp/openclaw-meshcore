@@ -245,6 +245,8 @@ export function monitorMeshcoreProvider(
       reconnectCount: opts.reconnectCount ?? 0,
       lastRestartReason: opts.lastRestartReason,
       lastRestartAt: opts.lastRestartAt,
+      advertLat: account.config.advertLat,
+      advertLon: account.config.advertLon,
     });
 
     const allowedChannels = new Set(account.config.channels ?? [0]);
