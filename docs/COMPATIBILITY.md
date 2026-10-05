@@ -39,4 +39,4 @@ Verified combinations, with the date and evidence class. "Verified" = exercised 
 
 - Node: Heltec V3/V4-class board, current MeshCore companion firmware, dedicated to the gateway.
 - Peers: current MeshCore companion app or current MeshOS (≥ 1.3.6 recommended for the fixes since).
-- Gateway: OpenClaw ≥ 2026.9.8.
+- Gateway: OpenClaw ≥ 2026.9.8 (tested). The plugin's declared minimum is ≥ 2026.5.26 — older-than-tested may work, but we only stand behind the matrix above.

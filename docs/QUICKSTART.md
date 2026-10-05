@@ -9,7 +9,7 @@ You have an OpenClaw gateway. You want your agent reachable over LoRa mesh. This
 1. **A LoRa board supported by MeshCore companion firmware.** Verified: Heltec WiFi LoRa 32 (V3 and V4 both work, ~€20–30). Any ESP32 board with a MeshCore companion build is fine.
 2. **The board flashed with MeshCore companion firmware *with WiFi*** — the build that exposes the Companion Protocol over TCP (default port **5000**). Use the official MeshCore flasher.
 3. **The node on the same LAN as your OpenClaw gateway** (or otherwise TCP-reachable).
-4. **OpenClaw 2026.9.x or newer** (verified on 2026.9.8).
+4. **OpenClaw ≥ 2026.5.26** (the plugin manifest's declared floor). Verified daily-driver: 2026.9.x (2026.9.6–2026.9.8).
 
 > A second device (handheld with MeshCore firmware, or MeshOS) is recommended so you can actually send yourself a DM — the mesh needs two ends.
 
@@ -39,7 +39,7 @@ nc -z 192.0.2.10 5000   # replace with your node's IP — must succeed
 
 ## Step 2 — Install the plugin (~2 min)
 
-Until registry distribution lands (tracked in issue #2), install from a git checkout:
+Until registry distribution lands (the manifest is already npm-shaped; publishing is tracked in issue #2), install from a git checkout:
 
 ```bash
 git clone https://github.com/fintlp/openclaw-meshcore.git
@@ -77,8 +77,10 @@ openclaw gateway restart
 Then verify the channel came up — `openclaw status`, or in the gateway log:
 
 ```
-[meshcore] [default] starting MeshCore provider (tcp) at 192.0.2.10:5000
+[default] starting MeshCore provider (tcp) at 192.0.2.10:5000
 ```
+
+(Log-line prefixing varies by gateway version — grep for `starting MeshCore provider` if the literal line doesn't match.)
 
 ## Step 4 — First contact (~5 min)
 

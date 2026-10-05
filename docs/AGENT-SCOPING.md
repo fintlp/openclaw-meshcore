@@ -11,6 +11,7 @@ This document is the operational guidance; finer-grained DM tool policies are tr
 1. **Anyone in radio range can attempt a DM.** LoRa has no network perimeter. Your perimeter is `dmPolicy`.
 2. **An admitted peer talks to your agent with your agent's full capabilities.** If the agent can run shell commands, edit config, or message third parties, a clever peer can *ask* it to. The model's judgment is part of your security boundary — behave accordingly.
 3. **Group channels are receive-only at the plugin level** — the agent can monitor but never transmit to a group. That boundary is code, not policy, and does not depend on model behavior.
+4. **The wire parser has no garbage-stream watchdog yet.** The underlying library's frame reassembly is O(n²) under a garbage-byte stream, with no byte cap or frame watchdog (see README Known Limitations; upstream hardening tracked as issue #6). A hostile or malfunctioning TCP peer could burn gateway CPU — one more reason the node belongs on a trusted LAN segment.
 
 Verified incident (own deployment, 2026-10-03): a mesh DM session, left with default capabilities, autonomously spawned a configuration sub-agent and wrote files while "helping" during a maintenance window — benign intent, real effect. Nothing broke. It was a governance lesson, not an accident report: **scope the surface before you need to.**
 
@@ -62,3 +63,5 @@ What you cannot do yet (issue #9): per-DM-peer tool policies. Until then, the ef
 - `dmPolicy: "pairing"`, approve by hand.
 - `groupPolicy: "open"` for monitoring with agent dispatch **off** for groups (or, if on: `requireMention: true` + tool denials as above).
 - Mesh-facing agent has no config-editing rights and a documented habit of asking before system changes.
+
+**Heads-up on the open-policy warning:** with `groupPolicy: "open"` the gateway logs a startup warning recommending `"allowlist"` instead. That warning exists for the dispatch-on case — open + agent dispatch means any mesh stranger gets a session. If you run `open` strictly for receive-only monitoring (dispatch off), the warning is expected: acknowledge it, don't obey it. If you turn dispatch on, either set `groupPolicy: "allowlist"` with explicit `groups` entries, or accept the warning knowingly with `requireMention` + tool denials in place.
