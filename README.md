@@ -10,6 +10,45 @@ This plugin connects OpenClaw to a MeshCore node acting as a companion server on
 - **Group / broadcast channels:** receive-only by design. The plugin can listen to mesh channel traffic and dispatch it to agents, but it will never transmit a reply back to a group.
 - **Multi-account:** `channels.meshcore.accounts` lets you define more than one node connection.
 
+## Safety by default: the danger zone and the guardrails
+
+Connecting an AI agent to a LoRa mesh is a little different from connecting it to a conventional chat app. There is no network perimeter on the radio: anyone with an inexpensive LoRa board and a bit of curiosity can send your node a message. And everything transmitted on a public channel is heard by every node in range — there is no edit button and no delete button on the airwaves.
+
+None of this should scare you off. The defaults in this plugin are deliberately cautious, and this section explains both what could go wrong and exactly which guardrails stand between your agent and the crowd. Once you understand these few ideas, you can experiment freely and safely.
+
+### The danger zone: what a stranger could make your agent *do*
+
+The radio itself is not the risky part. The risk begins when a message from an unknown sender is turned into an **agent session** — because that session runs with the agent's normal capabilities: reading files, calling tools, or messaging other channels, depending on how you configured it. Two configuration combinations deserve your respect:
+
+- **`dmPolicy: "open"` together with `allowFrom: ["*"]`** admits every sender as a full DM session. A stranger in radio range can then have a conversation with your agent — and a persuasive stranger can ask your agent to do things on your behalf. Reserve this for demos, and only with an agent whose tools are tightly restricted.
+- **`groupPolicy: "open"` with session dispatch enabled and no tool restrictions** lets public-channel traffic start agent sessions. Even then, the agent can never *reply* publicly (see guardrail 1 below) — but a crafted public message could still make the agent act silently in the background: running tools, spawning helpers, or burning tokens.
+
+A true story from this plugin's early days makes the point: during testing, an agent session decided on its own that the helpful thing to do was to launch a configuration helper and modify files — all in good faith, all unnecessary, and all invisible until someone looked. Nothing broke, but the lesson shaped this plugin: **decide what a mesh-reachable session may do before someone else decides for you.**
+
+One privacy note as well: if your node advertises a GPS position, that position is broadcast to every node in range. The `advertLat`/`advertLon` setting lets you choose *which* location you publish — pick one you are comfortable sharing with strangers.
+
+### The guardrails: why the agent cannot speak in public
+
+The most important safety property of this plugin is that **the agent can never transmit to a group channel** — and this does not depend on the AI's behavior, mood, or instructions. It is enforced in three independent layers:
+
+1. **In the code.** The plugin's send path refuses every group-addressed message, unconditionally, no matter what any config file or any agent says. This is covered by automated tests, and removing it would take a deliberate code change.
+2. **In the defaults.** Group monitoring starts `disabled`. If you enable it, the default is **digest mode**: public-channel traffic is quietly written to a log file and no agent session is started per message. Your agent can summarize the chatter when *you* ask — it never chimes in on its own.
+3. **In your agent's instructions (recommended).** Give your agent a standing rule to never reply on mesh group channels. It is belt and suspenders on top of layer 1 — cheap insurance in case a future code change ever misbehaves.
+
+Why so strict? Because LoRa airtime is a shared commons. Every transmission on a public channel is heard by everyone and occupies the frequency for everyone. A chatty agent would not just embarrass you — it would degrade the mesh for every other user in range. Being a good mesh citizen is part of the design.
+
+### Radio parameters: read-only, on purpose
+
+The node's radio parameters — frequency, bandwidth, spreading factor, coding rate — are the shared "meeting channel" the whole mesh agreed on. If your node changes its own settings, it does not get an error message; it simply stops hearing and being heard, and fixing it means physical access or a maintenance window with the companion app. Frequency choice is also regulated (for example, 869.618 MHz is the EU868 setting used in Austria), which makes it a matter of law rather than taste.
+
+For that reason this plugin only ever **reads** radio parameters — they show up in the node-status snapshot, so your agent can *report* them, but never change them. The one node property you may set remotely is the advertised GPS position (`advertLat`/`advertLon`), because a wrong position is cosmetic and easy to correct. A wrong frequency is neither.
+
+### What this means for your first experiments
+
+Start with the defaults: `dmPolicy: "pairing"`, so every new contact needs your explicit approval, and group monitoring `disabled`. Send yourself a DM from a second device, watch the messages arrive, and get a feel for the pacing. When you grow curious about the public channel, switch on monitoring in digest mode and simply ask your agent what the mesh has been saying. You will learn the ropes without ever risking a public transmission — the code has your back, literally.
+
+For the operator-level detail (trust model, per-group tool policies, hardened examples), see [docs/AGENT-SCOPING.md](docs/AGENT-SCOPING.md).
+
 ## Documentation
 
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — zero to first mesh DM in ~15 minutes.
