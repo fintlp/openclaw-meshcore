@@ -20,7 +20,9 @@ import {
   resolveSenderNodeId,
   type MeshcoreDeviceHandle,
 } from "./device-client.js";
+import { appendGroupLogEntry } from "./group-log.js";
 import { isOutboundEcho, rememberOutboundEcho } from "./echo-dedupe.js";
+import { updateNodeStatusOps } from "./node-status.js";
 import { handleMeshcoreInbound } from "./inbound.js";
 import {
   formatMeshcoreChannelTarget,
@@ -86,7 +88,14 @@ export type MeshcoreMonitorOptions = {
     message: MeshcoreInboundMessage,
     handle: MeshcoreDeviceHandle,
   ) => void | Promise<void>;
+  reconnectCount?: number;
+  lastRestartReason?: string;
+  lastRestartAt?: number;
 };
+
+function toIso(timestamp: number): string {
+  return new Date(timestamp).toISOString();
+}
 
 function channelIndexFromPacket(channel: number): number {
   if (Number.isFinite(channel) && channel >= 0 && channel <= 7) {
@@ -234,6 +243,11 @@ export function monitorMeshcoreProvider(
       accountId: account.accountId,
       host: account.host,
       port: account.port,
+      reconnectCount: opts.reconnectCount ?? 0,
+      lastRestartReason: opts.lastRestartReason,
+      lastRestartAt: opts.lastRestartAt,
+      advertLat: account.config.advertLat,
+      advertLon: account.config.advertLon,
     });
 
     const allowedChannels = new Set(account.config.channels ?? [0]);
@@ -241,6 +255,21 @@ export function monitorMeshcoreProvider(
     let settled = false;
     let resolveMonitor: ((value: { stop: () => void }) => void) | null = null;
     let rejectMonitor: ((reason: Error) => void) | null = null;
+    const groupMonitorMode = account.config.groupMonitorMode ?? "digest";
+
+    function extractSenderPubkeyPrefix(message: Record<string, unknown>): string | undefined {
+      const prefix = message.pubKeyPrefix;
+      const bytes =
+        prefix instanceof Uint8Array
+          ? prefix
+          : Array.isArray(prefix)
+            ? new Uint8Array(prefix as number[])
+            : undefined;
+      if (!bytes || bytes.length === 0) {
+        return undefined;
+      }
+      return bytesToHex(bytes.slice(0, 6)).toLowerCase();
+    }
 
     const contactSync = createThrottledContactSync({
       getContacts: async () => handle.connection.getContacts(),
@@ -372,6 +401,34 @@ export function monitorMeshcoreProvider(
             at: inbound.timestamp,
           });
 
+          if (groupMonitorMode === "digest") {
+            await handleMeshcoreInbound({
+              message: inbound,
+              account,
+              config: cfg,
+              runtime,
+              sendReply: async () => {
+                runtime.error?.(
+                  `[${account.accountId}] blocked outbound reply to group ${inbound.target}: groups are receive-only`,
+                );
+              },
+              statusSink: opts.statusSink,
+              onAdmittedGroup: (admitted) => {
+                appendGroupLogEntry(
+                  {
+                    ts: new Date().toISOString(),
+                    channel: admitted.target,
+                    senderPubkeyPrefix: extractSenderPubkeyPrefix(message),
+                    name: admitted.senderName,
+                    text: admitted.text,
+                  },
+                  account.accountId,
+                );
+              },
+            });
+            return;
+          }
+
           if (opts.onMessage) {
             await opts.onMessage(inbound, handle);
             return;
@@ -398,10 +455,15 @@ export function monitorMeshcoreProvider(
     };
 
     const onDisconnected = () => {
+      const now = Date.now();
+      updateNodeStatusOps(
+        { connectionState: "disconnected", since: toIso(now) },
+        account.accountId,
+      );
       opts.statusSink?.({
         connected: false,
-        lastEventAt: Date.now(),
-        lastTransportActivityAt: Date.now(),
+        lastEventAt: now,
+        lastTransportActivityAt: now,
       });
       if (settled) return;
       doCleanup();

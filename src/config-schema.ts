@@ -76,6 +76,9 @@ const MeshcoreAccountSchemaBase = z
         defaultBw: 62_500,
         defaultCr: 8,
       }),
+    advertLat: z.number().min(-90).max(90).optional(),
+    advertLon: z.number().min(-180).max(180).optional(),
+    groupMonitorMode: z.enum(["digest", "session"]).optional().default("digest"),
     logInboundMessageContent: z.boolean().optional(),
   })
   .strict();

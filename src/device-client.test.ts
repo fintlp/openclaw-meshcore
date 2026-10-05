@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Constants } from "@liamcottle/meshcore.js";
 import {
   attachSendConfirmedHandler,
@@ -8,8 +11,18 @@ import {
   disconnectMeshcoreDevice,
   waitForSendConfirmed,
 } from "./device-client.js";
+import {
+  readNodeStatusSnapshot,
+  resetNodeStatusStateForTests,
+  setNodeStatusPathForTests,
+} from "./node-status.js";
 
-const fakeMode = vi.hoisted(() => ({ mode: "full" as "full" | "no-self-info" }));
+const fakeMode = vi.hoisted(() => ({
+  mode: "full" as "full" | "no-self-info",
+  selfInfoAdvLat: 0,
+  selfInfoAdvLon: 0,
+  setAdvertLatLongShouldFail: false,
+}));
 
 vi.mock("@liamcottle/meshcore.js", async (importOriginal) => {
   const { EventEmitter } = await import("node:events");
@@ -39,8 +52,8 @@ vi.mock("@liamcottle/meshcore.js", async (importOriginal) => {
         txPower: 20,
         maxTxPower: 22,
         publicKey: new Uint8Array(32).fill(2),
-        advLat: 0,
-        advLon: 0,
+        advLat: fakeMode.selfInfoAdvLat,
+        advLon: fakeMode.selfInfoAdvLon,
         reserved: new Uint8Array(0),
         manualAddContacts: 0,
         radioFreq: 868,
@@ -54,6 +67,15 @@ vi.mock("@liamcottle/meshcore.js", async (importOriginal) => {
 
     close() {
       this.emit("disconnected");
+    }
+
+    setAdvertLatLongCalls: Array<{ lat: number; lon: number }> = [];
+
+    async setAdvertLatLong(latitude: number, longitude: number) {
+      this.setAdvertLatLongCalls.push({ lat: latitude, lon: longitude });
+      if (fakeMode.setAdvertLatLongShouldFail) {
+        throw new Error("setAdvertLatLong failed");
+      }
     }
 
     async sendCommandDeviceQuery() {
@@ -194,6 +216,16 @@ describe("waitForSendConfirmed per-frame ack correlation", () => {
 describe("connectMeshcoreDevice numeric response code handshake", () => {
   beforeEach(() => {
     fakeMode.mode = "full";
+    fakeMode.selfInfoAdvLat = 0;
+    fakeMode.selfInfoAdvLon = 0;
+    fakeMode.setAdvertLatLongShouldFail = false;
+    const dir = mkdtempSync(join(tmpdir(), "meshcore-device-client-"));
+    setNodeStatusPathForTests(join(dir, "node-status.json"));
+  });
+
+  afterEach(() => {
+    setNodeStatusPathForTests(undefined);
+    resetNodeStatusStateForTests();
   });
 
   it("populates selfInfo, deviceInfo, contacts, batteryMv and channels when the node emits numeric response codes", async () => {
@@ -258,6 +290,108 @@ describe("connectMeshcoreDevice numeric response code handshake", () => {
       expect(handle.connection.listenerCount(Constants.ResponseCodes.BatteryVoltage)).toBe(0);
     } finally {
       await disconnectMeshcoreDevice("acct-no-selfinfo");
+    }
+  });
+
+  it("skips advert position correction when advertLat/advertLon are unset", async () => {
+    const handle = await connectMeshcoreDevice({
+      accountId: "acct-no-advert-override",
+      host: "127.0.0.1",
+      port: 5000,
+    });
+
+    try {
+      const conn = handle.connection as unknown as { setAdvertLatLongCalls: Array<{ lat: number; lon: number }> };
+      expect(conn.setAdvertLatLongCalls).toHaveLength(0);
+      const snapshot = readNodeStatusSnapshot()!;
+      expect(snapshot.position).toEqual({ lat: 0, lon: 0 });
+    } finally {
+      await disconnectMeshcoreDevice("acct-no-advert-override");
+    }
+  });
+
+  it("applies advert position correction when config differs beyond epsilon", async () => {
+    fakeMode.selfInfoAdvLat = 48_858900;
+    fakeMode.selfInfoAdvLon = 2_294500;
+
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    const handle = await connectMeshcoreDevice({
+      accountId: "acct-advert-correct",
+      host: "127.0.0.1",
+      port: 5000,
+      advertLat: 50.123456,
+      advertLon: 10.987654,
+    });
+
+    try {
+      const conn = handle.connection as unknown as { setAdvertLatLongCalls: Array<{ lat: number; lon: number }> };
+      // The wire format requires int32 degrees * 1e6, so the call receives
+      // scaled integers even though config and logs stay in decimal degrees.
+      expect(conn.setAdvertLatLongCalls).toEqual([
+        { lat: 50_123456, lon: 10_987654 },
+      ]);
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("corrected advertised position"),
+      );
+      const snapshot = readNodeStatusSnapshot()!;
+      expect(snapshot.position.lat).toBeCloseTo(50.123456, 6);
+      expect(snapshot.position.lon).toBeCloseTo(10.987654, 6);
+    } finally {
+      consoleSpy.mockRestore();
+      await disconnectMeshcoreDevice("acct-advert-correct");
+    }
+  });
+
+  it("skips advert position correction when difference is within epsilon", async () => {
+    fakeMode.selfInfoAdvLat = 48_858900;
+    fakeMode.selfInfoAdvLon = 2_294500;
+
+    const handle = await connectMeshcoreDevice({
+      accountId: "acct-advert-near",
+      host: "127.0.0.1",
+      port: 5000,
+      advertLat: 48.858905,
+      advertLon: 2.294505,
+    });
+
+    try {
+      const conn = handle.connection as unknown as { setAdvertLatLongCalls: Array<{ lat: number; lon: number }> };
+      expect(conn.setAdvertLatLongCalls).toHaveLength(0);
+      const snapshot = readNodeStatusSnapshot()!;
+      expect(snapshot.position).toEqual({ lat: 48.8589, lon: 2.2945 });
+    } finally {
+      await disconnectMeshcoreDevice("acct-advert-near");
+    }
+  });
+
+  it("logs correction failures to console.error and keeps the connection", async () => {
+    fakeMode.selfInfoAdvLat = 0;
+    fakeMode.selfInfoAdvLon = 0;
+    fakeMode.setAdvertLatLongShouldFail = true;
+
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const handle = await connectMeshcoreDevice({
+      accountId: "acct-advert-fail",
+      host: "127.0.0.1",
+      port: 5000,
+      advertLat: 10,
+      advertLon: 20,
+    });
+
+    try {
+      expect(handle.connected).toBe(true);
+      const conn = handle.connection as unknown as {
+        setAdvertLatLongCalls: Array<{ lat: number; lon: number }>;
+      };
+      expect(conn.setAdvertLatLongCalls).toHaveLength(1);
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("failed to apply advertised position correction"),
+      );
+    } finally {
+      consoleSpy.mockRestore();
+      await disconnectMeshcoreDevice("acct-advert-fail");
     }
   });
 });

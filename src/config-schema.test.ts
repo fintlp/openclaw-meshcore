@@ -191,6 +191,69 @@ describe("meshcore config schema", () => {
     expect(config.logInboundMessageContent).toBe(true);
   });
 
+  it("accepts advertLat/advertLon overrides", () => {
+    const config = expectValidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        advertLat: 48.8589,
+        advertLon: 2.2945,
+      }),
+    );
+    expect(config.advertLat).toBe(48.8589);
+    expect(config.advertLon).toBe(2.2945);
+  });
+
+  it("rejects advertLat outside -90..90", () => {
+    const issues = expectInvalidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        advertLat: 91,
+        advertLon: 2.2945,
+      }),
+    );
+    expect(issues.some((issue) => issue.path.join(".") === "advertLat")).toBe(true);
+  });
+
+  it("rejects advertLon outside -180..180", () => {
+    const issues = expectInvalidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        advertLat: 48.8589,
+        advertLon: 181,
+      }),
+    );
+    expect(issues.some((issue) => issue.path.join(".") === "advertLon")).toBe(true);
+  });
+
+  it("defaults groupMonitorMode to digest", () => {
+    const config = expectValidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+      }),
+    );
+    expect(config.groupMonitorMode).toBe("digest");
+  });
+
+  it("accepts groupMonitorMode session", () => {
+    const config = expectValidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        groupMonitorMode: "session",
+      }),
+    );
+    expect(config.groupMonitorMode).toBe("session");
+  });
+
+  it("rejects invalid groupMonitorMode", () => {
+    const issues = expectInvalidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        groupMonitorMode: "alerts",
+      }) as ReturnType<typeof MeshcoreConfigSchema.safeParse>,
+    );
+    expect(issues.some((issue) => issue.path.join(".") === "groupMonitorMode")).toBe(true);
+  });
+
   it('rejects dmPolicy="open" without allowFrom "*"', () => {
     const issues = expectInvalidConfig(
       MeshcoreConfigSchema.safeParse({

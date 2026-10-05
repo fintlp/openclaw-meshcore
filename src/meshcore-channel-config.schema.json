@@ -387,6 +387,24 @@
     "logInboundMessageContent": {
       "type": "boolean"
     },
+    "advertLat": {
+      "type": "number",
+      "minimum": -90,
+      "maximum": 90
+    },
+    "advertLon": {
+      "type": "number",
+      "minimum": -180,
+      "maximum": 180
+    },
+    "groupMonitorMode": {
+      "default": "digest",
+      "type": "string",
+      "enum": [
+        "digest",
+        "session"
+      ]
+    },
     "accounts": {
       "type": "object",
       "propertyNames": {
@@ -779,6 +797,24 @@
           },
           "logInboundMessageContent": {
             "type": "boolean"
+          },
+          "advertLat": {
+            "type": "number",
+            "minimum": -90,
+            "maximum": 90
+          },
+          "advertLon": {
+            "type": "number",
+            "minimum": -180,
+            "maximum": 180
+          },
+          "groupMonitorMode": {
+            "default": "digest",
+            "type": "string",
+            "enum": [
+              "digest",
+              "session"
+            ]
           }
         },
         "required": [
@@ -1189,6 +1225,24 @@
         },
         "logInboundMessageContent": {
           "type": "boolean"
+        },
+        "advertLat": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90
+        },
+        "advertLon": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "groupMonitorMode": {
+          "default": "digest",
+          "type": "string",
+          "enum": [
+            "digest",
+            "session"
+          ]
         }
       },
       "required": [

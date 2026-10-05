@@ -4,6 +4,7 @@ import {
   rememberSelfInfo,
   resolveContactPubkeyByPrefix,
 } from "./contact-book.js";
+import { updateNodeStatusOps, writeNodeStatusSnapshot } from "./node-status.js";
 import type { MeshcoreContact, MeshcoreDeviceInfo, MeshcoreSelfInfo } from "./types.js";
 import {
   bytesToHex,
@@ -227,6 +228,76 @@ function normalizeSelfInfo(raw: Record<string, unknown>): MeshcoreSelfInfo {
   };
 }
 
+const ADVERT_POSITION_EPSILON = 1e-5;
+
+type AdvertPositionCorrectionParams = {
+  connection: TCPConnection;
+  selfInfo: MeshcoreSelfInfo;
+  advertLat?: number;
+  advertLon?: number;
+  ops: {
+    connectionState: "connected" | "disconnected";
+    since: number;
+    reconnectCount: number;
+    lastRestartReason?: string;
+    lastRestartAt?: number;
+  };
+  accountId?: string;
+};
+
+/**
+ * Apply config-driven advertised position correction. Only runs when both
+ * advertLat and advertLon are set and the current advertised position differs
+ * by more than 1e-5 degrees. Uses console.* because plugin logger.info does not
+ * reach gateway.log (issue #14).
+ */
+async function maybeApplyAdvertPositionCorrection(params: AdvertPositionCorrectionParams): Promise<void> {
+  const { advertLat, advertLon, selfInfo, connection, ops } = params;
+  if (advertLat === undefined || advertLon === undefined) {
+    return;
+  }
+  const currentLat = selfInfo.advLat / 1e6;
+  const currentLon = selfInfo.advLon / 1e6;
+  const latDiff = Math.abs(currentLat - advertLat);
+  const lonDiff = Math.abs(currentLon - advertLon);
+  if (latDiff <= ADVERT_POSITION_EPSILON && lonDiff <= ADVERT_POSITION_EPSILON) {
+    return;
+  }
+  try {
+    // The wire format expects int32 degrees * 1e6 (Companion Protocol), while
+    // config and logs use decimal degrees. Scale before calling the library.
+    const targetLatFixed = Math.round(advertLat * 1e6);
+    const targetLonFixed = Math.round(advertLon * 1e6);
+    await Promise.race([
+      connection.setAdvertLatLong(targetLatFixed, targetLonFixed),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("setAdvertLatLong timeout (5000ms)")),
+          5_000,
+        ),
+      ),
+    ]);
+    console.log(
+      `[meshcore] corrected advertised position from ${currentLat.toFixed(6)},${currentLon.toFixed(6)} to ${advertLat.toFixed(6)},${advertLon.toFixed(6)}`,
+    );
+    // Refresh the snapshot with the target coordinates; the node reports the
+    // same value back, so this avoids an extra getSelfInfo round-trip.
+    writeNodeStatusSnapshot(
+      {
+        ...selfInfo,
+        advLat: targetLatFixed,
+        advLon: targetLonFixed,
+      },
+      ops,
+      params.accountId,
+    );
+  } catch (error) {
+    console.error(
+      `[meshcore] failed to apply advertised position correction: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 function normalizeDeviceInfo(raw: Record<string, unknown>): MeshcoreDeviceInfo {
   return {
     firmwareVer: Number(raw.firmwareVer ?? 0),
@@ -292,13 +363,20 @@ async function queryAllChannels(connection: TCPConnection): Promise<
   return channels;
 }
 
-export async function connectMeshcoreDevice(params: {
+export type MeshcoreConnectOptions = {
   accountId: string;
   host: string;
   port: number;
   connectTimeoutMs?: number;
   handshakeTimeoutMs?: number;
-}): Promise<MeshcoreDeviceHandle> {
+  reconnectCount?: number;
+  lastRestartReason?: string;
+  lastRestartAt?: number;
+  advertLat?: number;
+  advertLon?: number;
+};
+
+export async function connectMeshcoreDevice(params: MeshcoreConnectOptions): Promise<MeshcoreDeviceHandle> {
   const existing = devices.get(params.accountId);
   if (existing) {
     await disconnectMeshcoreDevice(params.accountId);
@@ -357,6 +435,7 @@ export async function connectMeshcoreDevice(params: {
   // best-effort: the TCP connection stays up and the handle is returned.
 
   // SelfInfo is emitted automatically after connect on firmware v1+.
+  const connectNow = Date.now();
   try {
     const selfInfoRaw = await waitForEvent<Record<string, unknown>>(
       connection,
@@ -365,8 +444,47 @@ export async function connectMeshcoreDevice(params: {
     );
     handle.selfInfo = normalizeSelfInfo(selfInfoRaw);
     rememberSelfInfo(handle.selfInfo, handle.accountId);
+    writeNodeStatusSnapshot(
+      handle.selfInfo,
+      {
+        connectionState: "connected",
+        since: connectNow,
+        reconnectCount: params.reconnectCount ?? 0,
+        lastRestartReason: params.lastRestartReason,
+        lastRestartAt: params.lastRestartAt,
+      },
+      handle.accountId,
+    );
+    await maybeApplyAdvertPositionCorrection({
+      connection,
+      selfInfo: handle.selfInfo,
+      advertLat: params.advertLat,
+      advertLon: params.advertLon,
+      ops: {
+        connectionState: "connected",
+        since: connectNow,
+        reconnectCount: params.reconnectCount ?? 0,
+        lastRestartReason: params.lastRestartReason,
+        lastRestartAt: params.lastRestartAt,
+      },
+      accountId: params.accountId,
+    });
   } catch {
-    // SelfInfo is optional for messaging; keep the connection.
+    // SelfInfo is optional for messaging; keep the connection. Still update
+    // live ops so a reconnect without SelfInfo doesn't leave stale state.
+    updateNodeStatusOps(
+      {
+        connectionState: "connected",
+        since: new Date(connectNow).toISOString(),
+        reconnectCount: params.reconnectCount ?? 0,
+        lastRestartReason: params.lastRestartReason,
+        lastRestartAt:
+          params.lastRestartAt !== undefined
+            ? new Date(params.lastRestartAt).toISOString()
+            : undefined,
+      },
+      params.accountId,
+    );
   }
 
   // DeviceInfo must be explicitly requested.

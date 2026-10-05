@@ -77,6 +77,9 @@ declare module "@liamcottle/meshcore.js" {
     sendCommandGetBatteryVoltage(): Promise<void>;
     sendCommandGetChannel(channelIdx: number): Promise<void>;
     sendCommandSyncNextMessage(): Promise<void>;
+    sendCommandSetAdvertLatLon(latitude: number, longitude: number): Promise<void>;
+    /** Set advertised lat/lon. Arguments are int32 degrees * 1e6 (not decimal degrees). */
+    setAdvertLatLong(latitude: number, longitude: number): Promise<void>;
     sendTextMessage(
       pubKey: Uint8Array,
       text: string,

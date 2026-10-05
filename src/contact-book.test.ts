@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,9 +16,12 @@ import {
 import { bytesToHex, hexToBytes } from "./protocol.js";
 
 describe("contact book", () => {
+  let contactBookPath: string;
+
   beforeEach(() => {
     const dir = mkdtempSync(join(tmpdir(), "meshcore-contact-book-"));
-    setContactBookPathForTests(join(dir, "contacts.json"));
+    contactBookPath = join(dir, "contacts.json");
+    setContactBookPathForTests(contactBookPath);
     resetContactBookForTests();
   });
 
@@ -492,6 +495,58 @@ describe("contact book", () => {
     expect(formatContactPrefix(entry)).toBe(
       bytesToHex(samplePublicKey.slice(0, 6)).toLowerCase(),
     );
+  });
+
+  it("persists lat/lon in decimal degrees alongside raw advLat/advLon", () => {
+    rememberContact(makeFullAdvert(), accountId);
+
+    const raw = JSON.parse(readFileSync(contactBookPath, "utf8"));
+    expect(raw.version).toBe(2);
+    expect(raw.contacts).toHaveLength(1);
+    const row = raw.contacts[0];
+    expect(row.advLat).toBe(48858900);
+    expect(row.advLon).toBe(2294500);
+    expect(row.lat).toBe(48.8589);
+    expect(row.lon).toBe(2.2945);
+  });
+
+  it("writes decimal-degree coords for negative lat/lon", () => {
+    rememberContact(
+      {
+        publicKey: samplePublicKey,
+        advName: "SouthWest",
+        advLat: -33_868800,
+        advLon: -151_209300,
+      },
+      accountId,
+    );
+
+    const raw = JSON.parse(readFileSync(contactBookPath, "utf8"));
+    const row = raw.contacts[0];
+    expect(row.advLat).toBe(-33_868800);
+    expect(row.advLon).toBe(-151_209300);
+    expect(row.lat).toBe(-33.8688);
+    expect(row.lon).toBe(-151.2093);
+  });
+
+  it("updates decimal-degree coords when raw coords change", () => {
+    rememberContact(makeFullAdvert(), accountId);
+    rememberContact(
+      {
+        publicKey: samplePublicKey,
+        advLat: 50000000,
+        advLon: 10000000,
+        lastAdvert: 2_000_000_000,
+      },
+      accountId,
+    );
+
+    const raw = JSON.parse(readFileSync(contactBookPath, "utf8"));
+    const row = raw.contacts[0];
+    expect(row.advLat).toBe(50000000);
+    expect(row.advLon).toBe(10000000);
+    expect(row.lat).toBe(50);
+    expect(row.lon).toBe(10);
   });
 
   it("survives a v2 row with malformed outPathHex without losing the pubkey", () => {

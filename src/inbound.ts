@@ -118,6 +118,8 @@ export async function handleMeshcoreInbound(params: {
   runtime: RuntimeEnv;
   sendReply?: (target: string, text: string, replyToId?: string) => Promise<void>;
   statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
+  /** If provided for group messages, called after admission succeeds and then normal session dispatch is skipped. */
+  onAdmittedGroup?: (message: MeshcoreInboundMessage) => void | Promise<void>;
 }): Promise<void> {
   const { message, account, config, runtime } = params;
   const core = getMeshcoreRuntime();
@@ -284,6 +286,12 @@ export async function handleMeshcoreInbound(params: {
     } else {
       runtime.log?.(`meshcore: drop DM sender ${message.senderNodeId} (dmPolicy=${dmPolicy})`);
     }
+    return;
+  }
+
+  // Digest mode hook: admitted group message, but do not wake a session.
+  if (message.isGroup && params.onAdmittedGroup) {
+    await params.onAdmittedGroup(message);
     return;
   }
 

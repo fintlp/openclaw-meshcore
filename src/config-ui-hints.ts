@@ -41,4 +41,16 @@ export const meshcoreChannelConfigUiHints = {
     label: "Log Inbound Message Content",
     help: "When true, Gateway logs include up to 80 characters of inbound mesh text. Default is false (metadata only: sender, target, message id, length).",
   },
+  advertLat: {
+    label: "Advertised Latitude",
+    help: "Override the node's advertised latitude in decimal degrees (-90..90). Both Advertised Latitude and Advertised Longitude must be set to apply; difference must exceed 1e-5° from the node's current position.",
+  },
+  advertLon: {
+    label: "Advertised Longitude",
+    help: "Override the node's advertised longitude in decimal degrees (-180..180). Both Advertised Latitude and Advertised Longitude must be set to apply; difference must exceed 1e-5° from the node's current position.",
+  },
+  groupMonitorMode: {
+    label: "Group Monitor Mode",
+    help: '"digest" (default) writes admitted group messages to state/meshcore-group-log.jsonl without waking sessions. "session" routes them to agent sessions as before. Groups remain receive-only in both modes.',
+  },
 } satisfies Record<string, ChannelConfigUiHint>;

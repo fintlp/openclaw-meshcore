@@ -58,6 +58,12 @@ export type MeshcoreAccountConfig = {
   sendPacing?: MeshcoreSendPacingConfig;
   /** When true, inbound info logs include up to 80 characters of message text (default: metadata only). */
   logInboundMessageContent?: boolean;
+  /** Override the node's advertised latitude, decimal degrees (-90..90). Both advertLat and advertLon must be set to apply. */
+  advertLat?: number;
+  /** Override the node's advertised longitude, decimal degrees (-180..180). Both advertLat and advertLon must be set to apply. */
+  advertLon?: number;
+  /** Group/broadcast monitoring mode. "digest" appends admitted group messages to a JSONL log without waking sessions (default). "session" routes them to agent sessions as before. */
+  groupMonitorMode?: "digest" | "session";
 };
 
 type MeshcoreConfig = MeshcoreAccountConfig & {
