@@ -63,7 +63,7 @@ The file is schema-versioned:
 
 #### Latitude / longitude scaling
 
-The raw `advLat`/`advLon` values are stored as-is. Per the MeshCore Companion Protocol documentation, the wire values are 32-bit little-endian fixed-point coordinates scaled by `1e6` (i.e. `degrees = raw / 1e6`). The plugin does not convert them, so consumers should divide by `1e6` when displaying coordinates. See [MeshCore Companion Protocol — Device Config](https://docs.meshcore.io/companion_protocol/) (issue #11).
+The raw `advLat`/`advLon` values are stored as-is. Per the MeshCore Companion Protocol documentation, the wire values are 32-bit little-endian fixed-point coordinates scaled by `1e6` (i.e. `degrees = raw / 1e6`). The persisted v2 contact book also includes `lat` and `lon` in decimal degrees so consumers can read coordinates without doing the fixed-point conversion (issue #12). See [MeshCore Companion Protocol — Device Config](https://docs.meshcore.io/companion_protocol/) (issue #11).
 
 ## Install
 

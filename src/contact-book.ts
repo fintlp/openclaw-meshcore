@@ -16,7 +16,11 @@ import {
  * coordinates scaled by 1e6 (i.e. degrees = raw / 1e6):
  * https://docs.meshcore.io/companion_protocol/
  *
+ * The persisted v2 file also includes `lat` and `lon` in decimal degrees so
+ * consumers can read coordinates without knowing the fixed-point scaling.
+ *
  * Issue #11: contact book: capture full advert metadata.
+ * Issue #12: contact book: decimal-degree coordinates.
  */
 export type ContactBookEntry = {
   publicKey: Uint8Array;
@@ -28,6 +32,10 @@ export type ContactBookEntry = {
   lastAdvert: number;
   advLat: number;
   advLon: number;
+  /** Latitude in decimal degrees (advLat / 1e6). Not persisted separately; derived on write. */
+  lat?: number;
+  /** Longitude in decimal degrees (advLon / 1e6). Not persisted separately; derived on write. */
+  lon?: number;
   lastMod: number;
   lastHeardAt: number;
 };
@@ -107,6 +115,10 @@ type PersistedContactV2 = {
   lastAdvert: number;
   advLat: number;
   advLon: number;
+  /** Latitude in decimal degrees (advLat / 1e6). */
+  lat: number;
+  /** Longitude in decimal degrees (advLon / 1e6). */
+  lon: number;
   lastMod: number;
   lastHeardAt: number;
 };
@@ -188,6 +200,10 @@ function rowToEntry(row: PersistedContactV2): ContactBookEntry | undefined {
     console.error(`[meshcore contact-book] skipping corrupt contact row ${hex}: ${String(error)}`);
     return undefined;
   }
+}
+
+function toDecimalDegrees(raw: number): number {
+  return raw / 1e6;
 }
 
 function loadV2File(file: ContactBookFileV2): void {
@@ -275,6 +291,8 @@ function persistContacts(): void {
           lastAdvert: entry.lastAdvert,
           advLat: entry.advLat,
           advLon: entry.advLon,
+          lat: toDecimalDegrees(entry.advLat),
+          lon: toDecimalDegrees(entry.advLon),
           lastMod: entry.lastMod,
           lastHeardAt: entry.lastHeardAt,
         });
@@ -291,6 +309,8 @@ function persistContacts(): void {
         lastAdvert: entry.lastAdvert,
         advLat: entry.advLat,
         advLon: entry.advLon,
+        lat: toDecimalDegrees(entry.advLat),
+        lon: toDecimalDegrees(entry.advLon),
         lastMod: entry.lastMod,
         lastHeardAt: entry.lastHeardAt,
       });
