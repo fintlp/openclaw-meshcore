@@ -35,15 +35,18 @@ export async function startMeshcoreGatewayAccount(ctx: {
 
   // Track gateway-account restarts so the node-status snapshot can report
   // reconnectCount / lastRestartAt / lastRestartReason (issue #14).
-  const prior = readNodeStatusSnapshot();
+  const prior = readNodeStatusSnapshot(account.accountId);
   const reconnectCount = (prior?.reconnectCount ?? 0) + 1;
   const lastRestartAtMs = Date.now();
   const lastRestartReason = "health-monitor-restart";
-  updateNodeStatusOps({
-    reconnectCount,
-    lastRestartAt: new Date(lastRestartAtMs).toISOString(),
-    lastRestartReason,
-  });
+  updateNodeStatusOps(
+    {
+      reconnectCount,
+      lastRestartAt: new Date(lastRestartAtMs).toISOString(),
+      lastRestartReason,
+    },
+    account.accountId,
+  );
 
   await runStoppablePassiveMonitor({
     abortSignal: ctx.abortSignal,

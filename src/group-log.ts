@@ -19,6 +19,8 @@ export type GroupLogEntry = {
   name?: string;
   /** Message text. */
   text: string;
+  /** Account that received the message. Omitted for the default account to keep JSONL compact. */
+  accountId?: string;
 };
 
 const GROUP_LOG_MAX_LINES = 1000;
@@ -30,11 +32,14 @@ export function setGroupLogPathForTests(path: string | undefined): void {
   testGroupLogPath = path;
 }
 
-function getGroupLogPath(): string {
-  return (
-    testGroupLogPath ??
-    `${process.env.HOME ?? "~"}/.openclaw/state/meshcore-group-log.jsonl`
-  );
+function getGroupLogPath(accountId?: string): string {
+  if (testGroupLogPath) {
+    return testGroupLogPath;
+  }
+  const base = `${process.env.HOME ?? "~"}/.openclaw/state/meshcore-group-log`;
+  return accountId && accountId !== "default"
+    ? `${base}.${accountId}.jsonl`
+    : `${base}.jsonl`;
 }
 
 function atomicWriteLines(path: string, lines: string[]): void {
@@ -69,10 +74,14 @@ function readLines(path: string): string[] {
 }
 
 /** Append a group message to the digest log, rotating to keep the newest valid lines. */
-export function appendGroupLogEntry(entry: GroupLogEntry): void {
-  const path = getGroupLogPath();
+export function appendGroupLogEntry(entry: GroupLogEntry, accountId?: string): void {
+  const path = getGroupLogPath(accountId);
   const lines = readLines(path).filter(isValidLogLine);
-  lines.push(JSON.stringify(entry));
+  const payload: GroupLogEntry = { ...entry };
+  if (accountId && accountId !== "default") {
+    payload.accountId = accountId;
+  }
+  lines.push(JSON.stringify(payload));
   if (lines.length > GROUP_LOG_MAX_LINES) {
     lines.splice(0, lines.length - GROUP_LOG_MAX_LINES);
   }
@@ -80,9 +89,9 @@ export function appendGroupLogEntry(entry: GroupLogEntry): void {
 }
 
 /** @internal Read all entries for tests/debugging. */
-export function readGroupLogEntries(): GroupLogEntry[] {
+export function readGroupLogEntries(accountId?: string): GroupLogEntry[] {
   const entries: GroupLogEntry[] = [];
-  for (const line of readLines(getGroupLogPath())) {
+  for (const line of readLines(getGroupLogPath(accountId))) {
     try {
       entries.push(JSON.parse(line) as GroupLogEntry);
     } catch {

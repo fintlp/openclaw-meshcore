@@ -414,13 +414,16 @@ export function monitorMeshcoreProvider(
               },
               statusSink: opts.statusSink,
               onAdmittedGroup: (admitted) => {
-                appendGroupLogEntry({
-                  ts: new Date().toISOString(),
-                  channel: admitted.target,
-                  senderPubkeyPrefix: extractSenderPubkeyPrefix(message),
-                  name: admitted.senderName,
-                  text: admitted.text,
-                });
+                appendGroupLogEntry(
+                  {
+                    ts: new Date().toISOString(),
+                    channel: admitted.target,
+                    senderPubkeyPrefix: extractSenderPubkeyPrefix(message),
+                    name: admitted.senderName,
+                    text: admitted.text,
+                  },
+                  account.accountId,
+                );
               },
             });
             return;
@@ -453,7 +456,10 @@ export function monitorMeshcoreProvider(
 
     const onDisconnected = () => {
       const now = Date.now();
-      updateNodeStatusOps({ connectionState: "disconnected", since: toIso(now) });
+      updateNodeStatusOps(
+        { connectionState: "disconnected", since: toIso(now) },
+        account.accountId,
+      );
       opts.statusSink?.({
         connected: false,
         lastEventAt: now,

@@ -16,6 +16,11 @@ import {
   resetGroupLogStateForTests,
   setGroupLogPathForTests,
 } from "./group-log.js";
+import {
+  readNodeStatusSnapshot,
+  resetNodeStatusStateForTests,
+  setNodeStatusPathForTests,
+} from "./node-status.js";
 import { bytesToHex, hexToBytes } from "./protocol.js";
 import type { CoreConfig } from "./types.js";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
@@ -174,7 +179,9 @@ describe("monitorMeshcoreProvider", () => {
     const dir = mkdtempSync(join(tmpdir(), "meshcore-monitor-"));
     setContactBookPathForTests(join(dir, "contacts.json"));
     setGroupLogPathForTests(join(dir, "group-log.jsonl"));
+    setNodeStatusPathForTests(join(dir, "node-status.json"));
     resetContactBookForTests();
+    resetNodeStatusStateForTests();
     const { getMeshcoreRuntime } = await import("./runtime.js");
     getMeshcoreRuntime.mockReturnValue(createRuntime());
     resolveMeshcoreAccountMock.mockReturnValue(createResolvedAccount());
@@ -185,7 +192,9 @@ describe("monitorMeshcoreProvider", () => {
     resetContactBookForTests();
     setContactBookPathForTests(undefined);
     setGroupLogPathForTests(undefined);
+    setNodeStatusPathForTests(undefined);
     resetGroupLogStateForTests();
+    resetNodeStatusStateForTests();
   });
 
   it("rejects the monitor promise when the socket disconnects mid-session", async () => {

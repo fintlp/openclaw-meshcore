@@ -47,6 +47,8 @@ export type NodeStatusSnapshot = {
   lastRestartReason?: string;
   /** ISO 8601 timestamp of the most recent monitor restart. */
   lastRestartAt?: string;
+  /** Account this snapshot belongs to (omitted for the default account). */
+  accountId?: string;
 };
 
 let testNodeStatusPath: string | undefined;

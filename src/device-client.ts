@@ -242,6 +242,7 @@ type AdvertPositionCorrectionParams = {
     lastRestartReason?: string;
     lastRestartAt?: number;
   };
+  accountId?: string;
 };
 
 /**
@@ -288,6 +289,7 @@ async function maybeApplyAdvertPositionCorrection(params: AdvertPositionCorrecti
         advLon: targetLonFixed,
       },
       ops,
+      params.accountId,
     );
   } catch (error) {
     console.error(
@@ -442,13 +444,17 @@ export async function connectMeshcoreDevice(params: MeshcoreConnectOptions): Pro
     );
     handle.selfInfo = normalizeSelfInfo(selfInfoRaw);
     rememberSelfInfo(handle.selfInfo, handle.accountId);
-    writeNodeStatusSnapshot(handle.selfInfo, {
-      connectionState: "connected",
-      since: connectNow,
-      reconnectCount: params.reconnectCount ?? 0,
-      lastRestartReason: params.lastRestartReason,
-      lastRestartAt: params.lastRestartAt,
-    });
+    writeNodeStatusSnapshot(
+      handle.selfInfo,
+      {
+        connectionState: "connected",
+        since: connectNow,
+        reconnectCount: params.reconnectCount ?? 0,
+        lastRestartReason: params.lastRestartReason,
+        lastRestartAt: params.lastRestartAt,
+      },
+      handle.accountId,
+    );
     await maybeApplyAdvertPositionCorrection({
       connection,
       selfInfo: handle.selfInfo,
@@ -461,17 +467,24 @@ export async function connectMeshcoreDevice(params: MeshcoreConnectOptions): Pro
         lastRestartReason: params.lastRestartReason,
         lastRestartAt: params.lastRestartAt,
       },
+      accountId: params.accountId,
     });
   } catch {
     // SelfInfo is optional for messaging; keep the connection. Still update
     // live ops so a reconnect without SelfInfo doesn't leave stale state.
-    updateNodeStatusOps({
-      connectionState: "connected",
-      since: new Date(connectNow).toISOString(),
-      reconnectCount: params.reconnectCount ?? 0,
-      lastRestartReason: params.lastRestartReason,
-      lastRestartAt: params.lastRestartAt !== undefined ? new Date(params.lastRestartAt).toISOString() : undefined,
-    });
+    updateNodeStatusOps(
+      {
+        connectionState: "connected",
+        since: new Date(connectNow).toISOString(),
+        reconnectCount: params.reconnectCount ?? 0,
+        lastRestartReason: params.lastRestartReason,
+        lastRestartAt:
+          params.lastRestartAt !== undefined
+            ? new Date(params.lastRestartAt).toISOString()
+            : undefined,
+      },
+      params.accountId,
+    );
   }
 
   // DeviceInfo must be explicitly requested.
