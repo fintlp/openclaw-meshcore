@@ -20,6 +20,7 @@ import {
   resolveSenderNodeId,
   type MeshcoreDeviceHandle,
 } from "./device-client.js";
+import { appendGroupLogEntry } from "./group-log.js";
 import { isOutboundEcho, rememberOutboundEcho } from "./echo-dedupe.js";
 import { updateNodeStatusOps } from "./node-status.js";
 import { handleMeshcoreInbound } from "./inbound.js";
@@ -254,6 +255,21 @@ export function monitorMeshcoreProvider(
     let settled = false;
     let resolveMonitor: ((value: { stop: () => void }) => void) | null = null;
     let rejectMonitor: ((reason: Error) => void) | null = null;
+    const groupMonitorMode = account.config.groupMonitorMode ?? "digest";
+
+    function extractSenderPubkeyPrefix(message: Record<string, unknown>): string | undefined {
+      const prefix = message.pubKeyPrefix;
+      const bytes =
+        prefix instanceof Uint8Array
+          ? prefix
+          : Array.isArray(prefix)
+            ? new Uint8Array(prefix as number[])
+            : undefined;
+      if (!bytes || bytes.length === 0) {
+        return undefined;
+      }
+      return bytesToHex(bytes.slice(0, 6)).toLowerCase();
+    }
 
     const contactSync = createThrottledContactSync({
       getContacts: async () => handle.connection.getContacts(),
@@ -384,6 +400,17 @@ export function monitorMeshcoreProvider(
             direction: "inbound",
             at: inbound.timestamp,
           });
+
+          if (groupMonitorMode === "digest") {
+            appendGroupLogEntry({
+              ts: new Date().toISOString(),
+              channel: inbound.target,
+              senderPubkeyPrefix: extractSenderPubkeyPrefix(message),
+              name: inbound.senderName,
+              text: inbound.text,
+            });
+            return;
+          }
 
           if (opts.onMessage) {
             await opts.onMessage(inbound, handle);

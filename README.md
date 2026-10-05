@@ -61,6 +61,18 @@ The file is schema-versioned:
 - **v1** was a plain array `[{ publicKeyHex, name? }, ...]`. v1 files still load cleanly; missing fields are defaulted to zero/empty and the file is rewritten as v2 on the next advert or SelfInfo.
 - **v2** is an object `{ version: 2, contacts: [...] }` containing every field listed above. `outPath` is hex-encoded in the JSON file.
 
+#### Group monitoring digest mode
+
+By default (`groupMonitorMode: "digest"`), the plugin does **not** wake an agent session for every group/broadcast message. Instead, admitted group messages are appended as JSON lines to `~/.openclaw/state/meshcore-group-log.jsonl`:
+
+```json
+{"ts":"2026-10-05T09:00:00.000Z","channel":"channel:0","senderPubkeyPrefix":"aabbccdd1122","name":"TestNode","text":"hello mesh"}
+```
+
+- The log is rotated at approximately 1000 lines, keeping the newest entries.
+- The never-transmit-to-groups rule is unchanged; digest mode only changes inbound routing.
+- Use `"session"` mode to restore the previous behavior of routing each admitted group message to an agent session.
+
 #### Latitude / longitude scaling
 
 The raw `advLat`/`advLon` values are stored as-is. Per the MeshCore Companion Protocol documentation, the wire values are 32-bit little-endian fixed-point coordinates scaled by `1e6` (i.e. `degrees = raw / 1e6`). The persisted v2 contact book also includes `lat` and `lon` in decimal degrees so consumers can read coordinates without doing the fixed-point conversion (issue #12). See [MeshCore Companion Protocol — Device Config](https://docs.meshcore.io/companion_protocol/) (issue #11).
@@ -112,6 +124,9 @@ You can also set the environment variable `MESHCORE_HOST` for the default accoun
 | `textChunkLimit` | number (40–500) | `127` | Max **UTF-8 bytes** per outbound text chunk (the wire frame limit is byte-based). Chunks split at word boundaries where possible and never inside a multibyte character. Default 127 matches the observed wire cap — see Known Limitations. |
 | `sendPacing` | object | see below | Outbound airtime pacing for multi-chunk sends. |
 | `logInboundMessageContent` | boolean | `false` | When `true`, inbound log lines include up to 80 chars of text. |
+| `advertLat` | number (-90..90) | — | Override the node's advertised latitude. Requires `advertLon` and a difference >1e-5° from current position. |
+| `advertLon` | number (-180..180) | — | Override the node's advertised longitude. Requires `advertLat` and a difference >1e-5° from current position. |
+| `groupMonitorMode` | `"digest" \| "session"` | `"digest"` | Group/broadcast monitoring mode. `"digest"` writes admitted group messages to `state/meshcore-group-log.jsonl` without waking sessions; `"session"` routes them to agent sessions. Groups remain receive-only in both modes. |
 
 #### `sendPacing`
 

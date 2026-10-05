@@ -225,6 +225,35 @@ describe("meshcore config schema", () => {
     expect(issues.some((issue) => issue.path.join(".") === "advertLon")).toBe(true);
   });
 
+  it("defaults groupMonitorMode to digest", () => {
+    const config = expectValidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+      }),
+    );
+    expect(config.groupMonitorMode).toBe("digest");
+  });
+
+  it("accepts groupMonitorMode session", () => {
+    const config = expectValidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        groupMonitorMode: "session",
+      }),
+    );
+    expect(config.groupMonitorMode).toBe("session");
+  });
+
+  it("rejects invalid groupMonitorMode", () => {
+    const issues = expectInvalidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        groupMonitorMode: "alerts",
+      }) as ReturnType<typeof MeshcoreConfigSchema.safeParse>,
+    );
+    expect(issues.some((issue) => issue.path.join(".") === "groupMonitorMode")).toBe(true);
+  });
+
   it('rejects dmPolicy="open" without allowFrom "*"', () => {
     const issues = expectInvalidConfig(
       MeshcoreConfigSchema.safeParse({

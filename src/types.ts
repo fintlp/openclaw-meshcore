@@ -62,6 +62,8 @@ export type MeshcoreAccountConfig = {
   advertLat?: number;
   /** Override the node's advertised longitude, decimal degrees (-180..180). Both advertLat and advertLon must be set to apply. */
   advertLon?: number;
+  /** Group/broadcast monitoring mode. "digest" appends admitted group messages to a JSONL log without waking sessions (default). "session" routes them to agent sessions as before. */
+  groupMonitorMode?: "digest" | "session";
 };
 
 type MeshcoreConfig = MeshcoreAccountConfig & {

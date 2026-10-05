@@ -397,6 +397,14 @@
       "minimum": -180,
       "maximum": 180
     },
+    "groupMonitorMode": {
+      "default": "digest",
+      "type": "string",
+      "enum": [
+        "digest",
+        "session"
+      ]
+    },
     "accounts": {
       "type": "object",
       "propertyNames": {
@@ -799,6 +807,14 @@
             "type": "number",
             "minimum": -180,
             "maximum": 180
+          },
+          "groupMonitorMode": {
+            "default": "digest",
+            "type": "string",
+            "enum": [
+              "digest",
+              "session"
+            ]
           }
         },
         "required": [
@@ -1219,6 +1235,14 @@
           "type": "number",
           "minimum": -180,
           "maximum": 180
+        },
+        "groupMonitorMode": {
+          "default": "digest",
+          "type": "string",
+          "enum": [
+            "digest",
+            "session"
+          ]
         }
       },
       "required": [

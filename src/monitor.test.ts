@@ -11,6 +11,11 @@ import {
   resetContactBookForTests,
   setContactBookPathForTests,
 } from "./contact-book.js";
+import {
+  readGroupLogEntries,
+  resetGroupLogStateForTests,
+  setGroupLogPathForTests,
+} from "./group-log.js";
 import { bytesToHex, hexToBytes } from "./protocol.js";
 import type { CoreConfig } from "./types.js";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
@@ -104,7 +109,7 @@ function createRuntime() {
   };
 }
 
-function createResolvedAccount() {
+function createResolvedAccount(overrides?: Partial<ReturnType<typeof createResolvedAccount>>) {
   return {
     accountId: "default",
     enabled: true,
@@ -118,7 +123,9 @@ function createResolvedAccount() {
       groupPolicy: "disabled",
       groupAllowFrom: [],
       channels: [0],
+      groupMonitorMode: "digest" as const,
     },
+    ...overrides,
   };
 }
 
@@ -145,6 +152,7 @@ describe("monitorMeshcoreProvider", () => {
     resetPositionResyncStateForTests();
     const dir = mkdtempSync(join(tmpdir(), "meshcore-monitor-"));
     setContactBookPathForTests(join(dir, "contacts.json"));
+    setGroupLogPathForTests(join(dir, "group-log.jsonl"));
     resetContactBookForTests();
     const { getMeshcoreRuntime } = await import("./runtime.js");
     getMeshcoreRuntime.mockReturnValue(createRuntime());
@@ -155,6 +163,8 @@ describe("monitorMeshcoreProvider", () => {
     vi.restoreAllMocks();
     resetContactBookForTests();
     setContactBookPathForTests(undefined);
+    setGroupLogPathForTests(undefined);
+    resetGroupLogStateForTests();
   });
 
   it("rejects the monitor promise when the socket disconnects mid-session", async () => {
@@ -480,6 +490,93 @@ describe("monitorMeshcoreProvider", () => {
 
     handle.connection.emit("disconnected");
     vi.useRealTimers();
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("appends admitted group messages to digest log in digest mode (#7)", async () => {
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const onMessage = vi.fn();
+
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      onMessage,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    handle.connection.emit(8, {
+      channelIdx: 0,
+      txtType: 0,
+      senderTimestamp: 1700000000,
+      text: "digest broadcast",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onMessage).not.toHaveBeenCalled();
+    const logEntries = readGroupLogEntries();
+    expect(logEntries).toHaveLength(1);
+    expect(logEntries[0]).toEqual(
+      expect.objectContaining({
+        channel: "channel:0",
+        text: "digest broadcast",
+      }),
+    );
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("routes admitted group messages to sessions in session mode (#7)", async () => {
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const onMessage = vi.fn();
+
+    resolveMeshcoreAccountMock.mockReturnValue(
+      createResolvedAccount({
+        config: {
+          dmPolicy: "pairing",
+          allowFrom: [],
+          groupPolicy: "allowlist",
+          groupAllowFrom: [],
+          channels: [0],
+          groups: { "channel:0": {} },
+          groupMonitorMode: "session",
+        },
+      }),
+    );
+
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      onMessage,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    handle.connection.emit(8, {
+      channelIdx: 0,
+      txtType: 0,
+      senderTimestamp: 1700000000,
+      text: "session broadcast",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "session broadcast",
+        isGroup: true,
+        target: "channel:0",
+      }),
+      handle,
+    );
+    expect(readGroupLogEntries()).toHaveLength(0);
+
+    handle.connection.emit("disconnected");
     await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
   });
 
