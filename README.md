@@ -80,6 +80,8 @@ By default (`groupMonitorMode: "digest"`), the plugin does **not** wake an agent
 
 - The log is rotated at approximately 1000 lines, keeping the newest entries.
 - The never-transmit-to-groups rule is unchanged; digest mode only changes inbound routing.
+- **Privacy:** the digest stores the **full text** of admitted group messages, on disk, in plain JSON. This is more content than the gateway log keeps when `logInboundMessageContent` is disabled — treat the file as sensitive.
+- **Upgrading?** Digest is the default for every deployment, including existing ones. If you relied on group messages reaching agent sessions, set `groupMonitorMode: "session"` explicitly after upgrading.
 - Use `"session"` mode to restore the previous behavior of routing each admitted group message to an agent session.
 
 #### Latitude / longitude scaling
