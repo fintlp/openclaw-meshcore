@@ -197,6 +197,77 @@ function waitForEvent<T>(
   });
 }
 
+/**
+ * Create a SelfInfo fetcher that first captures any firmware push emitted
+ * synchronously during connect, then falls back to an explicit request.
+ *
+ * Covers both observed behaviours:
+ * - RACE: firmware pushes SelfInfo before the connect promise resolves and
+ *   before a post-connect listener could attach.
+ * - NO PUSH: firmware (e.g. MeshOS 1.3.6 companion over TCP) only answers
+ *   an explicit AppStart/SelfInfo request.
+ */
+function createSelfInfoFetcher(connection: TCPConnection, timeoutMs: number): {
+  fetch: () => Promise<Record<string, unknown>>;
+} {
+  let captured: Record<string, unknown> | undefined;
+  let settled = false;
+
+  const earlyHandler = (value: Record<string, unknown>) => {
+    captured = value;
+  };
+
+  connection.on(Constants.ResponseCodes.SelfInfo, earlyHandler);
+
+  const cleanup = () => {
+    if (!settled) {
+      settled = true;
+      connection.off(Constants.ResponseCodes.SelfInfo, earlyHandler);
+    }
+  };
+
+  return {
+    fetch: () => {
+      return new Promise<Record<string, unknown>>((resolve, reject) => {
+        if (captured) {
+          cleanup();
+          resolve(captured);
+          return;
+        }
+
+        let timer: ReturnType<typeof setTimeout> | null = null;
+
+        const handler = (value: Record<string, unknown>) => {
+          cleanup();
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
+          connection.off(Constants.ResponseCodes.SelfInfo, handler);
+          resolve(value);
+        };
+
+        timer = setTimeout(() => {
+          cleanup();
+          connection.off(Constants.ResponseCodes.SelfInfo, handler);
+          reject(new Error(`timeout waiting for SelfInfo (${timeoutMs}ms)`));
+        }, timeoutMs);
+
+        connection.on(Constants.ResponseCodes.SelfInfo, handler);
+        connection.sendCommandAppStart().catch((error: unknown) => {
+          cleanup();
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
+          connection.off(Constants.ResponseCodes.SelfInfo, handler);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        });
+      });
+    },
+  };
+}
+
 function convertToUint8Array(value: unknown): Uint8Array {
   if (value instanceof Uint8Array) {
     return value;
@@ -395,6 +466,10 @@ export async function connectMeshcoreDevice(params: MeshcoreConnectOptions): Pro
   const connectTimeoutMs = params.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const handshakeTimeoutMs = params.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
 
+  // Attach the SelfInfo listener before the TCP handshake so any synchronous
+  // firmware push is captured (race hypothesis #1).
+  const selfInfoFetcher = createSelfInfoFetcher(connection, handshakeTimeoutMs);
+
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       cleanup();
@@ -434,14 +509,10 @@ export async function connectMeshcoreDevice(params: MeshcoreConnectOptions): Pro
   // lost response never forfeits a sibling fetch (issue #20). All failures are
   // best-effort: the TCP connection stays up and the handle is returned.
 
-  // SelfInfo is emitted automatically after connect on firmware v1+.
+  // SelfInfo: capture any synchronous push, otherwise request explicitly.
   const connectNow = Date.now();
   try {
-    const selfInfoRaw = await waitForEvent<Record<string, unknown>>(
-      connection,
-      Constants.ResponseCodes.SelfInfo,
-      handshakeTimeoutMs,
-    );
+    const selfInfoRaw = await selfInfoFetcher.fetch();
     handle.selfInfo = normalizeSelfInfo(selfInfoRaw);
     rememberSelfInfo(handle.selfInfo, handle.accountId);
     writeNodeStatusSnapshot(

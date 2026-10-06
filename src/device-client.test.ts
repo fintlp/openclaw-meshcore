@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Constants } from "@liamcottle/meshcore.js";
@@ -18,7 +18,7 @@ import {
 } from "./node-status.js";
 
 const fakeMode = vi.hoisted(() => ({
-  mode: "full" as "full" | "no-self-info",
+  mode: "full" as "full" | "no-self-info" | "sync-push",
   selfInfoAdvLat: 0,
   selfInfoAdvLon: 0,
   setAdvertLatLongShouldFail: false,
@@ -37,17 +37,17 @@ vi.mock("@liamcottle/meshcore.js", async (importOriginal) => {
     }
 
     async connect() {
-      // Emit synchronously so the connect promise resolves immediately; defer
-      // SelfInfo to the next event-loop iteration so the handshake listener is
-      // already registered.
+      // Emit synchronously so the connect promise resolves immediately.
       this.emit("connected");
-      if (fakeMode.mode === "no-self-info") {
-        // Simulate a node that never answers SelfInfo. Other connect-time fetches
-        // must still run (issue #20).
-        return;
+      if (fakeMode.mode === "sync-push") {
+        // Simulate firmware that pushes SelfInfo during connect(), before any
+        // post-connect listener could attach (race hypothesis #1).
+        this.emitSelfInfo();
       }
-      setImmediate(() => {
-        this.emit(original.Constants.ResponseCodes.SelfInfo, {
+    }
+
+    private emitSelfInfo() {
+      this.emit(original.Constants.ResponseCodes.SelfInfo, {
         type: 1,
         txPower: 20,
         maxTxPower: 22,
@@ -61,8 +61,19 @@ vi.mock("@liamcottle/meshcore.js", async (importOriginal) => {
         radioSf: 7,
         radioCr: 8,
         name: "testnode",
-        });
       });
+    }
+
+    async sendCommandAppStart() {
+      if (fakeMode.mode === "no-self-info" || fakeMode.mode === "sync-push") {
+        // no-self-info: simulate a node that never answers SelfInfo.
+        // sync-push: SelfInfo was already emitted during connect(); do not
+        // emit a duplicate here.
+        return;
+      }
+      // Simulate firmware that only answers an explicit AppStart request
+      // (no-push hypothesis #2).
+      this.emitSelfInfo();
     }
 
     close() {
@@ -214,13 +225,15 @@ describe("waitForSendConfirmed per-frame ack correlation", () => {
 });
 
 describe("connectMeshcoreDevice numeric response code handshake", () => {
+  let statusDir: string;
+
   beforeEach(() => {
     fakeMode.mode = "full";
     fakeMode.selfInfoAdvLat = 0;
     fakeMode.selfInfoAdvLon = 0;
     fakeMode.setAdvertLatLongShouldFail = false;
-    const dir = mkdtempSync(join(tmpdir(), "meshcore-device-client-"));
-    setNodeStatusPathForTests(join(dir, "node-status.json"));
+    statusDir = mkdtempSync(join(tmpdir(), "meshcore-device-client-"));
+    setNodeStatusPathForTests(join(statusDir, "node-status.json"));
   });
 
   afterEach(() => {
@@ -228,9 +241,9 @@ describe("connectMeshcoreDevice numeric response code handshake", () => {
     resetNodeStatusStateForTests();
   });
 
-  it("populates selfInfo, deviceInfo, contacts, batteryMv and channels when the node emits numeric response codes", async () => {
+  it("populates SelfInfo via active fetch and writes a full snapshot including capturedAt (no-push hypothesis)", async () => {
     const handle = await connectMeshcoreDevice({
-      accountId: "acct-numeric-handshake",
+      accountId: "acct-active-fetch",
       host: "127.0.0.1",
       port: 5000,
     });
@@ -252,8 +265,35 @@ describe("connectMeshcoreDevice numeric response code handshake", () => {
       expect(handle.channels[0]?.name).toBe("ch0");
       expect(handle.channels[7]?.name).toBe("ch7");
       expect(handle.connected).toBe(true);
+
+      const snapshot = readNodeStatusSnapshot()!;
+      expect(snapshot.name).toBe("testnode");
+      expect(snapshot.pubkey).toBe("0202020202020202020202020202020202020202020202020202020202020202");
+      expect(snapshot.capturedAt).toBeDefined();
+      expect(snapshot.connectionState).toBe("connected");
     } finally {
-      await disconnectMeshcoreDevice("acct-numeric-handshake");
+      await disconnectMeshcoreDevice("acct-active-fetch");
+    }
+  });
+
+  it("captures a synchronous SelfInfo push during connect and writes a full snapshot (race hypothesis)", async () => {
+    fakeMode.mode = "sync-push";
+    const handle = await connectMeshcoreDevice({
+      accountId: "acct-sync-push",
+      host: "127.0.0.1",
+      port: 5000,
+    });
+
+    try {
+      expect(handle.selfInfo).toBeDefined();
+      expect(handle.selfInfo?.name).toBe("testnode");
+
+      const snapshot = readNodeStatusSnapshot()!;
+      expect(snapshot.name).toBe("testnode");
+      expect(snapshot.capturedAt).toBeDefined();
+      expect(snapshot.connectionState).toBe("connected");
+    } finally {
+      await disconnectMeshcoreDevice("acct-sync-push");
     }
   });
 
@@ -280,8 +320,12 @@ describe("connectMeshcoreDevice numeric response code handshake", () => {
       expect(handle.channels.length).toBe(8);
       expect(handle.channels[0]?.name).toBe("ch0");
 
-      // Each fetch must clean up its own listener; no leak from the timed-out
-      // SelfInfo wait.
+      // SelfInfo failure must write an ops-only snapshot and must not leak
+      // the early/push listener.
+      const raw = JSON.parse(readFileSync(join(statusDir, "node-status.json"), "utf8"));
+      expect(raw.pubkey).toBeUndefined();
+      expect(raw.connectionState).toBe("connected");
+      expect(raw.reconnectCount).toBe(0);
       expect(handle.connection.listenerCount(Constants.ResponseCodes.SelfInfo)).toBe(0);
       expect(handle.connection.listenerCount(Constants.ResponseCodes.DeviceInfo)).toBe(0);
       expect(handle.connection.listenerCount(Constants.ResponseCodes.Contact)).toBe(0);
