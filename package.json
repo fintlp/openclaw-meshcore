@@ -10,6 +10,7 @@
   "type": "module",
   "files": [
     "dist/**",
+    "assets/icon.png",
     "openclaw.plugin.json",
     "npm-shrinkwrap.json",
     "README.md",
