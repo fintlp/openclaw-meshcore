@@ -48,6 +48,7 @@ What you can do **today**:
 ```
 
 - **`toolsBySender`** for known peers inside groups — e.g. your own handheld gets more reach than everyone else.
+- **Smart-home control from the mesh** — see the recipe below: a dedicated mesh-facing agent with a minimal tool set, and the three risk tiers (read-only / reversible / physical access).
 
 What you cannot do yet (issue #9): per-DM-peer tool policies. Until then, the effective knob for DM sessions is `dmPolicy` discipline + agent-level policy.
 
@@ -57,6 +58,34 @@ What you cannot do yet (issue #9): per-DM-peer tool policies. Until then, the ef
 - **Watch the sessions list occasionally.** Mesh-originated sessions are identifiable by their channel. Unrecognized peer? Revoke the pairing (remove from allowlist / contacts).
 - **Groups stay receive-only.** This is enforced in the plugin (group sends throw) and independently in agent rules. Do not weaken either.
 - **Airtime discipline applies to agents too.** Long, chatty agent replies cost shared spectrum. The plugin paces sends; you should still prefer terse personas for mesh-facing agents.
+
+## Recipe: controlling your smart home from the mesh
+
+The powerful version of "AI on the mesh": if your agent can control your
+smart home (HomeMatic, lights, heating) from WhatsApp, it can do it from a
+mountaintop with zero internet, over LoRa — because a mesh DM session has
+the agent's *real tools*. No extra plugin code: admission + tool scoping
+is configuration. The scoping is where you must be deliberate.
+
+**What exists today:** per-DM-peer tool policies do NOT exist yet
+(issue #9). The available pattern is a **dedicated mesh-facing agent** with
+an agent-level tool policy: allow exactly the home-control tools it needs,
+deny `exec`, config editing, and outbound messaging to other channels. That
+agent's tool set *is* the blast radius of every mesh session it serves.
+
+**Risk tiers — not everything belongs on the mesh:**
+
+| Tier | Examples | Verdict |
+|---|---|---|
+| 1 — Read-only | "Is the heating on?", temperatures, door STATUS | Fine. Worst case of a spoofed peer: information leak — mind layer 3 hygiene anyway. |
+| 2 — Reversible state | Lights, heating setpoints | OK with a dedicated, narrowly-scoped agent. Blast radius is an annoyance, not an incident. |
+| 3 — Physical access | **Garage door, door locks, alarm OFF** | Different risk class. Mesh DM identity is **convenience-grade, not cryptographic**: V3 frames carry only a 6-byte pubkey prefix, and adverts broadcast full pubkeys in plaintext — a determined attacker who grinds a 48-bit prefix collision would be admitted *as your node* (see README Security model, residual risk). Do not expose tier-3 tools without a **second factor**: a per-action confirmation code only you know (never stored on the handheld), a time-limited arming window ("garage enabled for 10 min"), or keep tier 3 off the mesh entirely. |
+
+The garage door is the canonical tier-3 case: a spoofed chat is
+embarrassing; a spoofed *garage door opening* is a physical breach. The
+plugin can guarantee who knocked at the gate (pairing); it cannot
+cryptographically prove who is speaking after admission. Design tier 3
+accordingly.
 
 ## Recommended baseline (what we run)
 

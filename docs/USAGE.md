@@ -53,6 +53,18 @@ node's battery/radio state?" are all answerable from these files — the
 agent never needs to transmit to find out. Radio parameters are read-only
 by design: the agent can *report* them, never change them.
 
+### Controlling your smart home from the mesh
+
+A mesh DM session has the agent's real tools — if it can run your HomeMatic
+from WhatsApp, it can do it off-grid over LoRa. That includes the garage
+door — which is exactly why the recipe in
+[AGENT-SCOPING.md](AGENT-SCOPING.md#recipe-controlling-your-smart-home-from-the-mesh)
+splits actions into three risk tiers and treats **physical access as a
+different risk class**: mesh DM identity is convenience-grade (48-bit
+prefix, public adverts), so garage/lock/alarm actions belong behind a
+second factor or off the mesh entirely. Read it before wiring any tool
+into a mesh-facing agent.
+
 ## Group monitoring (digest mode)
 
 Groups are receive-only forever — the send path refuses group targets, in
