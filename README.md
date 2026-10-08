@@ -55,6 +55,7 @@ For the operator-level detail (trust model, per-group tool policies, hardened ex
 - [docs/NODE-SETUP.md](docs/NODE-SETUP.md) — node preparation and operational behavior (the one-client rule, contact management, GPS adverts).
 - [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — verified firmware/software matrix and interop quirks.
 - [docs/AGENT-SCOPING.md](docs/AGENT-SCOPING.md) — what a mesh-reachable agent can do, and how to bound it.
+- [docs/PUBLISHING.md](docs/PUBLISHING.md) — releasing this plugin to ClawHub: metadata contract, the entrypoint trap, and the release flow.
 
 The full config reference lives below in this README.
 

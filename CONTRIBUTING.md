@@ -53,3 +53,9 @@ on which keys exist.
 
 Keeping them aligned is enforced by tests, not by a heavy Zod-to-JSON-Schema
 converter.
+
+## Releasing
+
+See [docs/PUBLISHING.md](docs/PUBLISHING.md) for the ClawHub release flow and
+the metadata contract the registry inspector enforces (including the
+runtime-entrypoint trap that blocked the first attempt).
