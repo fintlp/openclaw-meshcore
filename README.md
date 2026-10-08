@@ -224,11 +224,13 @@ With the default `dmPolicy: "pairing"`, a DM from an unknown node produces exact
 Flood resistance is structural, and verified against the OpenClaw pairing store (2026.9.x):
 
 - **Same sender, repeated DMs:** the challenge is create-if-missing. Once a request is pending for a node id, further DMs from that node get **no reply at all** — no extra airtime, no store growth.
-- **Many unique fake nodes:** each gets one reply frame and one pending entry, but pending requests are **capped per account** (3) and expired requests are pruned automatically. The store cannot be flooded; the worst case is a few junk entries and a few LoRa reply frames.
+- **Many unique fake nodes:** pending requests are **hard-capped at 3 per account** — and the cap bites *before* any reply is sent: the 4th distinct fake node gets no pending entry and **zero reply frames**. Expired requests are pruned automatically. Total worst-case cost of a flood attempt: 3 junk entries and 3 LoRa reply frames, ever.
 - **Radio reality:** EU868 duty-cycle regulation throttles how fast anyone can transmit, and a genuine flood degrades the shared channel for every node in range — which is itself illegal. The gateway-side cost stays capped regardless.
 - **Silent mode:** if unsolicited contact attempts ever become a nuisance, `dmPolicy: "allowlist"` drops unknown senders without any reply — not even the pairing challenge.
 
 Encryption note: MeshCore DMs are encrypted to the recipient's node key, so message content is protected on the air. **Adverts are not** — your node's name and advertised GPS position are broadcast in plaintext to every node in range. Choose `advertLat`/`advertLon` accordingly.
+
+**Residual risk — 48-bit sender identity.** Inbound DM frames carry only a 6-byte pubkey prefix; the plugin resolves it to a full key via the advert cache, and `allowFrom` admission happens on that resolved identity. Because adverts broadcast full pubkeys in plaintext, an attacker who grinds a keypair whose 48-bit prefix collides with one of your allowlisted contacts would be admitted *as* that contact. This is protocol-inherent (nothing the plugin can fix), and grinding a 48-bit collision is expensive — but treat mesh DM identity as convenience-grade, not cryptographic. If a contact ever starts behaving strangely, re-verify out-of-band.
 
 ## Verification procedure
 
