@@ -217,6 +217,19 @@ This design came out of issue #10, where the node's tx path waits on the over-th
 4. **No private-key exposure.** The plugin never requests or exports the node's private key.
 5. **Node contact requirement (firmware).** Current MeshCore node firmware **silently drops DMs from senders that are not in the node's own contact list** — no ACK, no queue, no companion signaling, no error anywhere. Add expected contacts on the node itself (MeshCore app, with the gateway channel temporarily disabled — one companion client at a time) or enable auto-add on the node. First thing to check when "nothing arrives".
 
+### Pairing: what an unknown sender can and cannot do
+
+With the default `dmPolicy: "pairing"`, a DM from an unknown node produces exactly one thing: a pairing request plus a single reply containing a one-time code and the `openclaw pairing approve` command. The message itself is dropped before it can start an agent session. The code is only meaningful to the **gateway owner** — approval runs on the gateway (CLI or an owner-authorized chat), so a stranger who receives the instructions cannot self-approve, cannot reach an agent, and cannot make the gateway spend a single model token.
+
+Flood resistance is structural, and verified against the OpenClaw pairing store (2026.9.x):
+
+- **Same sender, repeated DMs:** the challenge is create-if-missing. Once a request is pending for a node id, further DMs from that node get **no reply at all** — no extra airtime, no store growth.
+- **Many unique fake nodes:** each gets one reply frame and one pending entry, but pending requests are **capped per account** (3) and expired requests are pruned automatically. The store cannot be flooded; the worst case is a few junk entries and a few LoRa reply frames.
+- **Radio reality:** EU868 duty-cycle regulation throttles how fast anyone can transmit, and a genuine flood degrades the shared channel for every node in range — which is itself illegal. The gateway-side cost stays capped regardless.
+- **Silent mode:** if unsolicited contact attempts ever become a nuisance, `dmPolicy: "allowlist"` drops unknown senders without any reply — not even the pairing challenge.
+
+Encryption note: MeshCore DMs are encrypted to the recipient's node key, so message content is protected on the air. **Adverts are not** — your node's name and advertised GPS position are broadcast in plaintext to every node in range. Choose `advertLat`/`advertLon` accordingly.
+
 ## Verification procedure
 
 1. Ensure the MeshCore node is reachable:
