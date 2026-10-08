@@ -65,6 +65,7 @@
     },
     "install": {
       "npmSpec": "@fintlp/openclaw-meshcore",
+      "clawhubSpec": "@fintlp/openclaw-meshcore",
       "defaultChoice": "npm",
       "minHostVersion": ">=2026.5.26"
     },

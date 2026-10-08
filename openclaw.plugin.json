@@ -1,5 +1,6 @@
 {
   "id": "meshcore",
+  "name": "MeshCore",
   "activation": {
     "onStartup": false
   },
