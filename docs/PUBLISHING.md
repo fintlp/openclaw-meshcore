@@ -60,6 +60,11 @@ clawhub package publish .           # real release
 - The publish reads the **GitHub source** (`github:fintlp/openclaw-meshcore@main`),
   so commit + push everything first — the dry-run prints the exact commit it
   will package.
+- **Asymmetry #2 (learned 2026-10-08, v2026.10.2):** the SERVER-side publish
+  inspector can warn on things the local `validate` never reports (it flagged
+  `manifest-unknown-fields` while local validate was clean — CLI-bundled
+  inspector vs newer server schema). Always read the real publish output even
+  when validate is clean; warnings are P2 and non-blocking.
 - After a blocked attempt there is a short **rate-limit window** (~1 min,
   the error prints the reset time). Wait it out; do not hammer.
 - Inspector reports land in `reports/` — gitignored, do not commit.
