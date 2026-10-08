@@ -94,6 +94,7 @@ Then verify the channel came up — `openclaw status`, or in the gateway log:
 
 ## Where next
 
+- **[USAGE.md](USAGE.md)** — day-2 operation from within OpenClaw: the pairing lifecycle from the operator's side, where the agent finds node data, group digest monitoring, position admin.
 - **[NODE-SETUP.md](NODE-SETUP.md)** — deeper node preparation: the one-client rule, contact management, the 35-minute idle reconnect cycle (expected, not a bug), GPS adverts.
 - **[COMPATIBILITY.md](COMPATIBILITY.md)** — verified firmware / software matrix and known interop quirks.
 - **[AGENT-SCOPING.md](AGENT-SCOPING.md)** — what an agent reachable over the mesh can do, and how to bound it (tool policies, group rules).

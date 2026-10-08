@@ -1,0 +1,117 @@
+# Using the plugin from within OpenClaw
+
+QUICKSTART gets you to first contact; this page is what day-2 looks like:
+the pairing lifecycle from the operator's side, where the agent finds node
+data, group monitoring, position admin, and routine operations.
+
+## The pairing lifecycle (operator's view)
+
+MeshCore has no accounts — any node in radio range can DM your node. The
+plugin's default `dmPolicy: "pairing"` turns each new sender into an
+approval flow:
+
+1. **A stranger DMs your node.** The message is dropped before it can start
+   an agent session. The plugin registers a pairing request and replies
+   once with a one-time code and the approve command. Repeat DMs from the
+   same node get *no further reply* (create-if-missing), and pending
+   requests are hard-capped at 3 per account — a flood cannot grow beyond
+   3 junk entries and 3 reply frames.
+2. **You see the request.** `openclaw pairing list` shows pending (and
+   already-approved) senders, or watch the gateway log for
+   `pairing requested` lines.
+3. **You approve — or don't.**
+   ```bash
+   openclaw pairing approve meshcore <code>
+   ```
+   Only you can do this — the code printed to the requester is useless
+   without an owner-side approval. Approvals live in the **pairing store**,
+   not in `allowFrom`; your config can stay `allowFrom: []` and approvals
+   still stick. To revoke, remove the store entry or tighten the policy.
+4. **Their DMs now dispatch** to agent sessions like any other channel.
+
+Stricter postures: `dmPolicy: "allowlist"` drops unknown senders silently
+(no pairing reply at all — the nuclear option against contact-request
+noise); `"open"` + `allowFrom: ["*"]` admits everyone (demos only, with a
+tool-restricted agent — see the README safety section).
+
+## What the agent can see and do
+
+The plugin maintains three state files under `~/.openclaw/state/` (planned
+move: issue #21) — your agent reads them like any file:
+
+- `meshcore-node-status.json` — the node's SelfInfo snapshot: name, pubkey,
+  radio parameters (freq/BW/SF/CR), TX power, advertised position,
+  connection state, reconnect count. Refreshed on every connect.
+- `meshcore-advert-contacts.json` — the contact book: every known peer's
+  full pubkey, advert name, last-seen timestamp, and advertised GPS
+  position. Persisted across restarts.
+- `meshcore-group-log.jsonl` — the digest log (see below), one JSON line
+  per admitted group message, rotated at 1000 lines.
+
+So "where is node X?", "who has been on the mesh lately?", "what's my
+node's battery/radio state?" are all answerable from these files — the
+agent never needs to transmit to find out. Radio parameters are read-only
+by design: the agent can *report* them, never change them.
+
+## Group monitoring (digest mode)
+
+Groups are receive-only forever — the send path refuses group targets, in
+code, regardless of policy. What you *can* do is listen:
+
+- `groupPolicy: "disabled"` (default) — group traffic is dropped with a log
+  line.
+- `groupPolicy: "allowlist"` + `groups: { "channel:0": {} }` +
+  `groupMonitorMode: "digest"` (default) — admitted group messages are
+  appended to `meshcore-group-log.jsonl` **without waking an agent per
+  message**. Ask your agent "what has the mesh been saying?" and it reads
+  the log. No per-message sessions, no token burn, no accidental public
+  replies.
+- `groupMonitorMode: "session"` — routes admitted group messages to agent
+  sessions like DMs. Replies still never transmit. Use with a
+  tool-restricted agent (README safety section explains why).
+
+## Position admin
+
+The one node property you may set remotely is the advertised GPS position:
+
+```jsonc
+channels: {
+  meshcore: {
+    advertLat: 48.2082,   // decimal degrees
+    advertLon: 16.3738,
+  }
+}
+```
+
+Both keys must be set; the plugin applies them on connect only when the
+drift from the node's current advertised position exceeds 1e-5° (~1 m),
+then reads the position back from SelfInfo into the status snapshot. Config
+becomes the source of truth: any drift (e.g. set from the companion app) is
+corrected at the next connect. Remove the keys to leave the position as-is.
+
+Note the asymmetry: **adverts are public plaintext** — every node in range
+sees your name and position. Advertise a location you are comfortable
+sharing.
+
+## Day-2 operations
+
+- **Config changes** (policies, position, channels): edit config → hot
+  reload applies them; on a busy gateway the reload can defer up to ~5 min
+  and then fires anyway. No restart needed.
+- **Plugin code changes** (upgrades): plugin code loads only at boot — a
+  full gateway restart is required.
+- **The node serves one companion client at a time.** The plugin holds it
+  24/7; connecting the MeshCore app kicks the channel. For node-side
+  maintenance, disable the channel first, do the work, re-enable —
+  see [NODE-SETUP](NODE-SETUP.md).
+- **Mesh-side UX:** replies arrive as 127-byte-max chunks (long answers =
+  multiple messages), plain text only — handhelds render markdown literally.
+  Keep agent responses to mesh users short and unformatted.
+
+## Where the sharp edges live
+
+Known firmware/dependency behaviors that look like bugs but aren't:
+firmware drops DMs from non-contacts silently, known contacts' positions
+refresh only on connect, MeshOS serves no telemetry, and a ~35-minute idle
+reconnect cycle is expected. All documented with evidence in the README's
+Known Limitations and [COMPATIBILITY](COMPATIBILITY.md).

@@ -52,6 +52,7 @@ For the operator-level detail (trust model, per-group tool policies, hardened ex
 ## Documentation
 
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — zero to first mesh DM in ~15 minutes.
+- [docs/USAGE.md](docs/USAGE.md) — day-2 operation from within OpenClaw: pairing lifecycle, agent-visible node data, group digest monitoring, position admin.
 - [docs/NODE-SETUP.md](docs/NODE-SETUP.md) — node preparation and operational behavior (the one-client rule, contact management, GPS adverts).
 - [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — verified firmware/software matrix and interop quirks.
 - [docs/AGENT-SCOPING.md](docs/AGENT-SCOPING.md) — what a mesh-reachable agent can do, and how to bound it.
