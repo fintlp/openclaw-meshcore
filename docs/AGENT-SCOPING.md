@@ -87,6 +87,37 @@ plugin can guarantee who knocked at the gate (pairing); it cannot
 cryptographically prove who is speaking after admission. Design tier 3
 accordingly.
 
+### The double-confirmation challenge (interim, until issue #31 ships)
+
+The property that makes a challenge work over an imperfect identity layer:
+**a prefix-spoofer is blind.** Replies encrypt to the resolved *real*
+pubkey, so an attacker who collided a 48-bit prefix can inject commands but
+cannot read a single response. A challenge they cannot read is a challenge
+they cannot answer.
+
+Protocol for every tier-3 request (garage, locks, alarm):
+
+1. The agent does NOT act on the first request. It issues a per-request
+   challenge and waits.
+2. Confirmation variant A (in-band secret): a pre-agreed code word known
+   only to you — never stored on the handheld, never sent anywhere else —
+   preceded by a random challenge phrase the agent invents per request
+   (defeats replay if the code ever leaks). Even a fixed code defeats
+   blind injectors; the random phrase defeats eavesdroppers of past
+   *plaintext* channels (DMs are encrypted, but habits are cheap).
+3. Confirmation variant B (out-of-band, strongest): the agent asks on an
+   independent channel — e.g. your normal WhatsApp DM: "mesh request:
+   open garage. Reply YES to confirm." Defeats everything short of two
+   independent compromises; requires the agent to actually have the second
+   channel.
+4. Alternative: time-limited arming ("garage control enabled for 10 min") —
+   but note that *arming itself* is a tier-3 action and needs the same
+   challenge.
+
+Once SignedPlain signature verification ships (issue #31), sender identity
+becomes cryptographic for signing clients and the challenge degrades from
+load-bearing to defense-in-depth.
+
 ## Recommended baseline (what we run)
 
 - `dmPolicy: "pairing"`, approve by hand.
