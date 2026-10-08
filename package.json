@@ -1,5 +1,5 @@
 {
-  "name": "openclaw-meshcore",
+  "name": "@fintlp/openclaw-meshcore",
   "version": "2026.10.1",
   "description": "OpenClaw channel plugin for MeshCore LoRa nodes via Companion Protocol over TCP",
   "repository": {
@@ -64,7 +64,7 @@
       ]
     },
     "install": {
-      "npmSpec": "openclaw-meshcore",
+      "npmSpec": "@fintlp/openclaw-meshcore",
       "defaultChoice": "npm",
       "minHostVersion": ">=2026.5.26"
     },
