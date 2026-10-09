@@ -1,10 +1,14 @@
 import { sanitizeForPlainText } from "openclaw/plugin-sdk/infra-runtime";
-import { chunkTextForOutbound } from "./channel-api.js";
 
+/**
+ * The MeshCore wire limit is 127 bytes per text frame, and the plugin's own
+ * chunker (src/send.ts) budgets prefixes and enforces that cap. Tell the
+ * OpenClaw host NOT to pre-chunk outbound text, so the plugin receives the
+ * full message and can number chunks as one sequence.
+ */
 export const meshcoreOutboundBaseAdapter = {
   deliveryMode: "direct" as const,
-  chunker: chunkTextForOutbound,
+  chunker: null,
   chunkerMode: "text" as const,
-  textChunkLimit: 127,
   sanitizeText: ({ text }: { text: string }) => sanitizeForPlainText(text),
 };

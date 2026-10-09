@@ -952,7 +952,7 @@
         },
         "textChunkLimit": {
           "label": "MeshCore Text Chunk Limit",
-          "help": "Maximum UTF-8 bytes per outbound mesh text message (default 127 — node firmware truncates frames at 127 bytes on the wire). Long replies are split into chunks and sent as separate messages."
+          "help": "Maximum UTF-8 bytes per outbound mesh text message. Values above 127 are clamped to 127 because the node firmware kicks the TCP companion session on oversized frames. Default 127; long replies are split into numbered chunks."
         },
         "chunkNumbering": {
           "label": "Chunk Numbering",

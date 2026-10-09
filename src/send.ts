@@ -242,7 +242,13 @@ export async function sendMessageMeshcore(
   }
 
   const target = resolveTarget(to, opts);
-  const chunkLimit = account.config.textChunkLimit ?? DEFAULT_CHUNK_LIMIT;
+  // The firmware drops the TCP companion session when a text frame exceeds
+  // 127 bytes (live-proven 2026-10-09), so values above the wire cap are
+  // clamped even if an operator sets them.
+  const chunkLimit = Math.min(
+    account.config.textChunkLimit ?? DEFAULT_CHUNK_LIMIT,
+    DEFAULT_CHUNK_LIMIT,
+  );
   const chunkNumbering = account.config.chunkNumbering ?? true;
   const chunks = chunkTextWithNumbering(text, chunkLimit, chunkNumbering);
   if (chunks.length === 0) {
