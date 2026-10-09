@@ -29,6 +29,9 @@ function createConfig(overrides?: Partial<CoreConfig["channels"]["meshcore"]>): 
       meshcore: {
         host: "192.0.2.10",
         port: 5000,
+        // Most existing tests exercise chunking/pacing logic, not numbering.
+        // Disable numbering by default; chunk-numbering tests opt-in explicitly.
+        chunkNumbering: false,
         // Most existing tests exercise chunking logic, not pacing. Disable
         // pacing by default so they stay fast; pacing tests opt-in explicitly.
         sendPacing: { enabled: false },
@@ -1240,6 +1243,109 @@ describe("sendMessageMeshcore", () => {
       expect(deadLetterCalls).toHaveLength(1);
 
       errorSpy.mockRestore();
+    });
+  });
+
+  describe("chunk numbering [n/N] (issue #28)", () => {
+    it("does not prefix single-chunk messages", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+      await sendMessageMeshcore(TEST_NODE_ID, "short", {
+        cfg: createConfig({ chunkNumbering: true }),
+      });
+
+      expect(sendTextMessage).toHaveBeenCalledTimes(1);
+      expect(sendTextMessage).toHaveBeenCalledWith(expect.any(Uint8Array), "short");
+    });
+
+    it("prefixes each chunk of a multi-chunk reply", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+      await sendMessageMeshcore(TEST_NODE_ID, "aaaa bbbb cccc", {
+        cfg: createConfig({ textChunkLimit: 12, chunkNumbering: true }),
+      });
+
+      expect(sendTextMessage).toHaveBeenCalledTimes(3);
+      expect(sendTextMessage).toHaveBeenNthCalledWith(1, expect.any(Uint8Array), "[1/3] aaaa");
+      expect(sendTextMessage).toHaveBeenNthCalledWith(2, expect.any(Uint8Array), "[2/3] bbbb");
+      expect(sendTextMessage).toHaveBeenNthCalledWith(3, expect.any(Uint8Array), "[3/3] cccc");
+    });
+
+    it("budgets the prefix inside the wire limit", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+      const encoder = new TextEncoder();
+
+      // 100 single-byte chars with a 40-byte limit. Without numbering the
+      // reply would be 3 chunks; the "[3/3] " prefix forces a 4th chunk, and
+      // every prefixed chunk must still fit inside the 40-byte cap.
+      await sendMessageMeshcore(TEST_NODE_ID, "a".repeat(100), {
+        cfg: createConfig({ textChunkLimit: 40, chunkNumbering: true }),
+      });
+
+      for (const call of sendTextMessage.mock.calls) {
+        const chunkText = call[1] as string;
+        expect(encoder.encode(chunkText).length).toBeLessThanOrEqual(40);
+      }
+      const reassembled = sendTextMessage.mock.calls.map((c) => c[1] as string).join("");
+      expect(reassembled.replace(/\[\d+\/\d+\] /g, "")).toBe("a".repeat(100));
+    });
+
+    it("uses the worst-case prefix length for the final chunk count", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+      const encoder = new TextEncoder();
+
+      // Force a 10-chunk reply so the prefix is "[10/10] " (9 bytes). With a
+      // limit of 20, the effective chunk budget is 11 bytes, producing many
+      // more chunks, but the final count must still be consistent and every
+      // prefixed chunk must fit.
+      await sendMessageMeshcore(TEST_NODE_ID, "a".repeat(200), {
+        cfg: createConfig({ textChunkLimit: 20, chunkNumbering: true }),
+      });
+
+      const finalCount = sendTextMessage.mock.calls.length;
+      const prefixLen = encoder.encode(`[${finalCount}/${finalCount}] `).length;
+      for (const call of sendTextMessage.mock.calls) {
+        const chunkText = call[1] as string;
+        expect(encoder.encode(chunkText).length).toBeLessThanOrEqual(20);
+        expect(chunkText.startsWith("[") && chunkText.includes("/")).toBe(true);
+        // Body portion alone must fit inside the budget left after the prefix.
+        const body = chunkText.replace(/^\[\d+\/\d+\] /, "");
+        expect(encoder.encode(body).length).toBeLessThanOrEqual(20 - prefixLen);
+      }
+    });
+
+    it("is disabled by config", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+      await sendMessageMeshcore(TEST_NODE_ID, "aaaa bbbb cccc", {
+        cfg: createConfig({ textChunkLimit: 6, chunkNumbering: false }),
+      });
+
+      expect(sendTextMessage).toHaveBeenCalledTimes(3);
+      expect(sendTextMessage).toHaveBeenNthCalledWith(1, expect.any(Uint8Array), "aaaa");
+      expect(sendTextMessage).toHaveBeenNthCalledWith(2, expect.any(Uint8Array), "bbbb");
+      expect(sendTextMessage).toHaveBeenNthCalledWith(3, expect.any(Uint8Array), "cccc");
+    });
+
+    it("never splits multibyte characters when numbering", async () => {
+      const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+      getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+      await sendMessageMeshcore(TEST_NODE_ID, "😀😀😀", {
+        cfg: createConfig({ textChunkLimit: 14, chunkNumbering: true }),
+      });
+
+      // "[1/N] " is 7 bytes; 14-byte limit leaves 7 bytes for the body,
+      // enough for one 4-byte emoji per chunk, so each chunk is valid.
+      for (const call of sendTextMessage.mock.calls) {
+        const text = call[1] as string;
+        expect([...text].every((cp) => cp !== "\uFFFD")).toBe(true);
+      }
     });
   });
 });
