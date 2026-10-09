@@ -127,6 +127,51 @@ describe("meshcorePlugin outbound sendText (host-chunking suppression, issue #39
     expect(reassembledWords).toEqual(words);
   });
 
+  it("emits ≤127-byte numbered chunks for multibyte text (umlauts, CJK, emoji)", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    const multibyteWords = Array.from({ length: 30 }, (_, i) =>
+      i % 2 === 0 ? `über-${i} 東京-${i} 🎉-${i}` : `café-${i} 北京-${i} 📡-${i}`,
+    );
+    const text = multibyteWords.join(" ");
+    expect(new TextEncoder().encode(text).length).toBeGreaterThan(500);
+
+    await meshcorePlugin.outbound.sendText({
+      cfg: createConfig(),
+      to: TEST_NODE_ID,
+      text,
+    });
+
+    const encoder = new TextEncoder();
+    const chunks = sendTextMessage.mock.calls.map((call) => call[1] as string);
+
+    expect(chunks.length).toBeGreaterThan(1);
+
+    const numbering: Array<{ index: number; total: number }> = [];
+    for (const chunk of chunks) {
+      expect(encoder.encode(chunk).length).toBeLessThanOrEqual(MESHCORE_WIRE_CHUNK_LIMIT);
+      const match = chunk.match(/^\[(\d+)\/(\d+)\] /);
+      expect(match).not.toBeNull();
+      numbering.push({ index: Number(match![1]), total: Number(match![2]) });
+      // Each emitted chunk must be valid UTF-8 (no split multibyte code point).
+      expect(() => encoder.encode(chunk)).not.toThrow();
+    }
+
+    expect(numbering[0].index).toBe(1);
+    expect(numbering.at(-1)!.index).toBe(numbering.at(-1)!.total);
+    for (let i = 1; i < numbering.length; i++) {
+      expect(numbering[i].index).toBe(numbering[i - 1].index + 1);
+      expect(numbering[i].total).toBe(numbering[0].total);
+    }
+
+    // Reassemble and confirm every original word survived, in order.
+    const reassembledWords = chunks
+      .map((c) => c.replace(/^\[\d+\/\d+\] /, ""))
+      .flatMap((c) => c.split(/\s+/).filter((w) => w.length > 0));
+    expect(reassembledWords).toEqual(multibyteWords.flatMap((line) => line.split(/\s+/)));
+  });
+
   it("does not prefix a single-chunk message", async () => {
     const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 42 }));
     getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
