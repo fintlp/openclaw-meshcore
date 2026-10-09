@@ -26,6 +26,8 @@ export type AdvertScheduler = {
   dispose: () => void;
 };
 
+const ADVERT_SEND_TIMEOUT_MS = 5_000;
+
 function scopeToMethod(connection: TCPConnection, scope: AdvertScope): () => Promise<void> {
   return scope === "flood"
     ? () => connection.sendFloodAdvert()
@@ -34,6 +36,22 @@ function scopeToMethod(connection: TCPConnection, scope: AdvertScope): () => Pro
 
 function hoursToMs(hours: number): number {
   return hours * 60 * 60 * 1000;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, context: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`${context} timeout (${timeoutMs}ms)`));
+      }, timeoutMs);
+      // Prevent dangling timers on normal completion.
+      promise.then(
+        () => clearTimeout(timer),
+        () => clearTimeout(timer),
+      );
+    }),
+  ]);
 }
 
 /**
@@ -46,28 +64,42 @@ function hoursToMs(hours: number): number {
 export function startAdvertScheduler(deps: AdvertSchedulerDeps): AdvertScheduler {
   const { connection, accountId, config, log } = deps;
   let intervalTimer: ReturnType<typeof setInterval> | null = null;
+  let sending = false;
 
   async function sendAdvert(scope: AdvertScope = config.advertScope): Promise<boolean> {
+    if (sending) {
+      return false;
+    }
+    sending = true;
+
     const send = scopeToMethod(connection, scope);
     try {
-      await send();
+      await withTimeout(
+        send(),
+        ADVERT_SEND_TIMEOUT_MS,
+        `${scope} advert send`,
+      );
       const nowIso = new Date().toISOString();
       log(`[${accountId}] sent ${scope} advert`);
       updateNodeStatusOps({ lastAdvertAt: nowIso, advertScope: scope }, accountId);
       return true;
     } catch (error) {
       log(
-        `[${accountId}] ${scope} advert send failed: ${error instanceof Error ? error.message : String(error)}`,
+        `[${accountId}] ${scope} advert send failed: ${error instanceof Error ? error.message : String(error ?? "no response (Err)")}`,
       );
       return false;
+    } finally {
+      sending = false;
     }
   }
 
   if (config.advertIntervalHours > 0) {
     intervalTimer = setInterval(() => {
-      void (async () => {
-        await sendAdvert();
-      })();
+      if (sending) {
+        log(`[${accountId}] scheduled advert skipped (previous send still in flight)`);
+        return;
+      }
+      void sendAdvert();
     }, hoursToMs(config.advertIntervalHours));
   }
 

@@ -24,6 +24,25 @@ function sortedKeys(obj: Record<string, unknown>): string[] {
   return Object.keys(obj).sort();
 }
 
+const expectedAdvertConfig = {
+  advertOnConnect: {
+    default: false,
+    type: "boolean",
+  },
+  advertIntervalHours: {
+    default: 0,
+    type: "number",
+    minimum: 0,
+  },
+  advertScope: {
+    default: "zero-hop",
+    type: "string",
+    enum: ["zero-hop", "flood"],
+  },
+} as const;
+
+type AdvertConfigKey = keyof typeof expectedAdvertConfig;
+
 const expectedSendPacingDefaults = {
   enabled: true,
   mode: "ack",
@@ -53,6 +72,138 @@ function getSendPacingCopies(manifest: Record<string, unknown>) {
  * committed/generated manifest diverges from the zod/canonical source of truth.
  * Never writes to disk.
  */
+function getAdvertConfigCopies(
+  properties: Record<string, unknown>,
+): Record<AdvertConfigKey, Record<string, unknown>> | undefined {
+  const result = {} as Record<AdvertConfigKey, Record<string, unknown>>;
+  for (const key of Object.keys(expectedAdvertConfig) as AdvertConfigKey[]) {
+    const value = properties[key];
+    if (!value || typeof value !== "object") {
+      return undefined;
+    }
+    result[key] = value as Record<string, unknown>;
+  }
+  return result;
+}
+
+function checkAdvertConfigDrift(manifest: Record<string, unknown>): string[] {
+  const issues: string[] = [];
+
+  const meshcoreSchema = (manifest.channelConfigs as Record<string, Record<string, unknown>> | undefined)
+    ?.meshcore?.schema as Record<string, unknown> | undefined;
+  if (!meshcoreSchema) {
+    return ["missing channelConfigs.meshcore.schema"];
+  }
+
+  const rootProperties = meshcoreSchema.properties as Record<string, unknown> | undefined;
+  const accountProperties = (
+    (rootProperties?.accounts as Record<string, unknown> | undefined)
+      ?.additionalProperties as Record<string, unknown> | undefined
+  )?.properties as Record<string, unknown> | undefined;
+
+  if (!rootProperties) {
+    issues.push("missing root schema properties");
+  }
+  if (!accountProperties) {
+    issues.push("missing account schema properties");
+  }
+  if (!rootProperties || !accountProperties) {
+    return issues;
+  }
+
+  const rootAdvert = getAdvertConfigCopies(rootProperties);
+  const accountAdvert = getAdvertConfigCopies(accountProperties);
+  if (!rootAdvert) {
+    issues.push("root advert config missing or malformed");
+  }
+  if (!accountAdvert) {
+    issues.push("account advert config missing or malformed");
+  }
+  if (!rootAdvert || !accountAdvert) {
+    return issues;
+  }
+
+  // Zod defaults.
+  const zodParsed = MeshcoreConfigSchema.safeParse({ host: "192.168.1.10" });
+  const zodDefaults = zodParsed.success
+    ? {
+        advertOnConnect: zodParsed.data.advertOnConnect,
+        advertIntervalHours: zodParsed.data.advertIntervalHours,
+        advertScope: zodParsed.data.advertScope,
+      }
+    : undefined;
+  if (!zodDefaults) {
+    issues.push("could not parse zod defaults for advert config");
+  }
+
+  // UI hints.
+  for (const key of Object.keys(expectedAdvertConfig) as AdvertConfigKey[]) {
+    const hint = meshcoreChannelConfigUiHints[key];
+    if (!hint) {
+      issues.push(`missing config-ui-hint for ${key}`);
+      continue;
+    }
+    if (typeof hint.label !== "string" || hint.label.length === 0) {
+      issues.push(`config-ui-hint ${key} missing label`);
+    }
+    if (typeof hint.help !== "string" || hint.help.length === 0) {
+      issues.push(`config-ui-hint ${key} missing help`);
+    }
+  }
+
+  for (const copyName of ["root", "account"] as const) {
+    const copy = copyName === "root" ? rootAdvert : accountAdvert;
+    for (const key of Object.keys(expectedAdvertConfig) as AdvertConfigKey[]) {
+      const expected = expectedAdvertConfig[key];
+      const actual = copy[key];
+
+      if (actual.default !== expected.default) {
+        issues.push(
+          `${copyName} ${key} default mismatch: expected ${JSON.stringify(expected.default)}, got ${JSON.stringify(actual.default)}`,
+        );
+      }
+      if (actual.type !== expected.type) {
+        issues.push(
+          `${copyName} ${key} type mismatch: expected ${JSON.stringify(expected.type)}, got ${JSON.stringify(actual.type)}`,
+        );
+      }
+      if ("minimum" in expected && actual.minimum !== expected.minimum) {
+        issues.push(
+          `${copyName} ${key} minimum mismatch: expected ${JSON.stringify(expected.minimum)}, got ${JSON.stringify(actual.minimum)}`,
+        );
+      }
+      if ("enum" in expected) {
+        const actualEnum = actual.enum;
+        if (
+          !Array.isArray(actualEnum) ||
+          JSON.stringify([...actualEnum].sort()) !== JSON.stringify([...expected.enum].sort())
+        ) {
+          issues.push(
+            `${copyName} ${key} enum mismatch: expected ${JSON.stringify(expected.enum)}, got ${JSON.stringify(actualEnum)}`,
+          );
+        }
+      }
+      if (zodDefaults) {
+        const zodDefault = zodDefaults[key];
+        if (zodDefault !== expected.default) {
+          issues.push(
+            `zod default for ${key} mismatch: expected ${JSON.stringify(expected.default)}, got ${JSON.stringify(zodDefault)}`,
+          );
+        }
+      }
+    }
+  }
+
+  // Root and account copies must be identical for these shared keys.
+  for (const key of Object.keys(expectedAdvertConfig) as AdvertConfigKey[]) {
+    if (JSON.stringify(rootAdvert[key]) !== JSON.stringify(accountAdvert[key])) {
+      issues.push(`root/account ${key} mismatch`);
+    }
+  }
+
+  return issues;
+}
+
 function checkManifestDrift(manifest: Record<string, unknown>): string[] {
   const issues: string[] = [];
 
@@ -103,7 +254,10 @@ function checkManifestDrift(manifest: Record<string, unknown>): string[] {
     issues.push("manifest root/account shared keys mismatch");
   }
 
-  // 4. sendPacing shape and defaults across both copies.
+  // 4. advert config defaults/shape across zod, manifest, and UI hints.
+  issues.push(...checkAdvertConfigDrift(manifest));
+
+  // 5. sendPacing shape and defaults across both copies.
   const { root: rootPacing, account: accountPacing } = getSendPacingCopies(manifest);
   if (!rootPacing) {
     issues.push("missing root sendPacing");
@@ -155,6 +309,14 @@ function checkManifestDrift(manifest: Record<string, unknown>): string[] {
 
   return issues;
 }
+
+// Drift-guard: the three new advert keys must be consistent across the zod
+// schema, canonical JSON schema, generated manifest, and UI hints.
+it("advert config is consistent across all four config surfaces", () => {
+  const manifest = JSON.parse(fs.readFileSync("./openclaw.plugin.json", "utf8"));
+  const issues = checkAdvertConfigDrift(manifest);
+  expect(issues).toEqual([]);
+});
 
 describe("meshcore config schema", () => {
   it("accepts basic config", () => {

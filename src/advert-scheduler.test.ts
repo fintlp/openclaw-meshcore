@@ -143,6 +143,47 @@ describe("advert scheduler", () => {
     expect(logs.some((line) => line.includes("zero-hop advert send failed"))).toBe(true);
   });
 
+  it("logs an informative message when the device rejects with undefined", async () => {
+    const connection = makeConnection({
+      sendZeroHopAdvert: vi.fn().mockRejectedValue(undefined),
+    });
+    const scheduler = startAdvertScheduler({
+      connection,
+      accountId,
+      config: makeConfig(),
+      log: (message) => logs.push(message),
+    });
+
+    const result = await scheduler.sendAdvert();
+
+    expect(result).toBe(false);
+    expect(logs.some((line) => line.includes("no response (Err)"))).toBe(true);
+  });
+
+  it("times out a stalled advert send", async () => {
+    vi.useFakeTimers();
+    const connection = makeConnection({
+      sendZeroHopAdvert: vi.fn().mockImplementation(
+        () => new Promise<void>(() => {}),
+      ),
+    });
+    const scheduler = startAdvertScheduler({
+      connection,
+      accountId,
+      config: makeConfig(),
+      log: (message) => logs.push(message),
+    });
+
+    const promise = scheduler.sendAdvert();
+    vi.advanceTimersByTime(5_000);
+    const result = await promise;
+
+    expect(result).toBe(false);
+    expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(1);
+    expect(logs.some((line) => line.includes("zero-hop advert send failed"))).toBe(true);
+    expect(logs.some((line) => line.includes("timeout (5000ms)"))).toBe(true);
+  });
+
   it("does not arm an interval when advertIntervalHours is 0", () => {
     vi.useFakeTimers();
     const connection = makeConnection();
@@ -157,7 +198,7 @@ describe("advert scheduler", () => {
     expect(connection.sendZeroHopAdvert).not.toHaveBeenCalled();
   });
 
-  it("fires a scheduled advert every advertIntervalHours", () => {
+  it("fires a scheduled advert every advertIntervalHours", async () => {
     vi.useFakeTimers();
     const connection = makeConnection();
     startAdvertScheduler({
@@ -167,14 +208,14 @@ describe("advert scheduler", () => {
       log: () => {},
     });
 
-    vi.advanceTimersByTime(2 * 60 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000);
     expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(1);
 
-    vi.advanceTimersByTime(2 * 60 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000);
     expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(2);
   });
 
-  it("uses the configured scope for scheduled adverts", () => {
+  it("uses the configured scope for scheduled adverts", async () => {
     vi.useFakeTimers();
     const connection = makeConnection();
     startAdvertScheduler({
@@ -184,11 +225,11 @@ describe("advert scheduler", () => {
       log: () => {},
     });
 
-    vi.advanceTimersByTime(60 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
     expect(connection.sendFloodAdvert).toHaveBeenCalledTimes(1);
   });
 
-  it("stops firing after dispose", () => {
+  it("stops firing after dispose", async () => {
     vi.useFakeTimers();
     const connection = makeConnection();
     const scheduler = startAdvertScheduler({
@@ -198,7 +239,7 @@ describe("advert scheduler", () => {
       log: () => {},
     });
 
-    vi.advanceTimersByTime(60 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
     expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(1);
 
     scheduler.dispose();
@@ -206,9 +247,56 @@ describe("advert scheduler", () => {
     expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(1);
   });
 
-  it("does not double-fire when sendAdvert is called while a scheduled advert is due", async () => {
+  it("skips scheduled ticks while a send is still in-flight", async () => {
     vi.useFakeTimers();
-    const connection = makeConnection();
+
+    let release: (() => void) | undefined;
+    const connection = makeConnection({
+      sendZeroHopAdvert: vi.fn().mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            release = () => resolve();
+          }),
+      ),
+    });
+
+    startAdvertScheduler({
+      connection,
+      accountId,
+      config: makeConfig({ advertIntervalHours: 1 }),
+      log: (message) => logs.push(message),
+    });
+
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(1);
+
+    // Second interval fires while the first send is still pending.
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(1);
+    expect(logs.some((line) => line.includes("scheduled advert skipped"))).toBe(true);
+
+    release?.();
+    // Allow the in-flight promise to settle.
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Third interval can now fire a new advert.
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not double-fire when sendAdvert is called while a scheduled advert is in-flight", async () => {
+    vi.useFakeTimers();
+
+    let release: (() => void) | undefined;
+    const connection = makeConnection({
+      sendZeroHopAdvert: vi.fn().mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            release = () => resolve();
+          }),
+      ),
+    });
+
     const scheduler = startAdvertScheduler({
       connection,
       accountId,
@@ -219,7 +307,11 @@ describe("advert scheduler", () => {
     vi.advanceTimersByTime(60 * 60 * 1000);
     expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(1);
 
-    await scheduler.sendAdvert();
-    expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(2);
+    const manualResult = await scheduler.sendAdvert();
+    expect(manualResult).toBe(false);
+    expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(1);
+
+    release?.();
+    await vi.advanceTimersByTimeAsync(0);
   });
 });

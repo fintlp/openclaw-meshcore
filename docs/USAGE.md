@@ -46,11 +46,13 @@ move: issue #21) — your agent reads them like any file:
 - `meshcore-advert-contacts.json` — the contact book: every known peer's
   full pubkey, advert name, last-seen timestamp, and advertised GPS
   position. Persisted across restarts.
-- `meshcore-discovery.json` — the agent-readable discovery surface: a
-  summary of every known contact with `prefix`, `name`, `source`
-  (`advert` | `contact-sync`), `discoveredAt`, `lastAdvert`, and
-  `hasPosition`, plus totals by source. Rewritten automatically whenever
-  the contact book changes.
+- `meshcore-discovery.json` (default account) or
+  `meshcore-discovery.<accountId>.json` (named accounts) — the
+  agent-readable discovery surface: a summary of every known contact for
+  that account with `prefix`, `name`, `source` (`advert` |
+  `contact-sync`), `discoveredAt`, `lastAdvert`, and `hasPosition`, plus
+  totals by source. Rewritten automatically whenever the contact book
+  changes.
 - `meshcore-group-log.jsonl` — the digest log (see below), one JSON line
   per admitted group message, rotated at 1000 lines.
 
@@ -76,7 +78,9 @@ into a mesh-facing agent.
 `meshcore-discovery.json` is the zero-airtime way for an agent to answer
 "who is on the mesh?". It is rebuilt from the contact book every time a
 contact is added or updated, so it is always consistent with
-`meshcore-advert-contacts.json` without exposing full public keys.
+`meshcore-advert-contacts.json` without exposing full public keys. Each
+account gets its own discovery file so contacts from different meshes are
+never merged into one list.
 
 Each entry:
 
@@ -115,8 +119,11 @@ channels: {
 }
 ```
 
-- `advertOnConnect`: sends a single self-advert right after the node
-  connects and any configured position correction has been applied.
+- `advertOnConnect`: sends a self-advert right after the node connects
+  and any configured position correction has been applied. This fires on
+  every reconnect, but it is skipped when a previous advert was sent less
+  than `advertIntervalHours` ago (unless `advertIntervalHours` is 0, in
+  which case it sends on every connect).
 - `advertIntervalHours`: while connected, sends a self-advert on this
   interval. Values greater than 0 are clamped to a minimum of 1 hour.
 - `advertScope`: the MeshCore advert type sent by the node.

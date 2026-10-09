@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   bytesToHex,
@@ -173,7 +173,7 @@ function migrateV1Row(row: { publicKeyHex?: string; name?: string }): ContactBoo
     lastMod: 0,
     lastHeardAt: 0,
     source: "contact-sync",
-    discoveredAt: 0,
+    discoveredAt: Math.floor(Date.now() / 1000),
   };
 }
 
@@ -315,10 +315,16 @@ function emitContactBookChange(accountId?: string): void {
   }
 }
 
+function atomicWriteJson(path: string, data: unknown): void {
+  const tmpPath = `${path}.tmp`;
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(tmpPath, JSON.stringify(data));
+  renameSync(tmpPath, path);
+}
+
 function persistContacts(accountId?: string): void {
   const path = getContactBookPath();
   try {
-    mkdirSync(dirname(path), { recursive: true });
     const payload: ContactBookFileV2 = {
       version: 2,
       contacts: [],
@@ -364,7 +370,7 @@ function persistContacts(accountId?: string): void {
         discoveredAt: entry.discoveredAt,
       });
     }
-    writeFileSync(path, JSON.stringify(payload));
+    atomicWriteJson(path, payload);
     emitContactBookChange(accountId);
   } catch {
     // best-effort persistence
