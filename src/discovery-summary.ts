@@ -13,6 +13,10 @@ import { pluginStateDir } from "./state-dir.js";
  * This file is rewritten automatically whenever the contact book changes.
  * It contains no new data — only a stable, summarised view of what the
  * gateway already learned from passive advert monitoring and contact-sync.
+ *
+ * The file is scoped per account: the default account uses
+ * `meshcore-discovery.json`; named accounts use
+ * `meshcore-discovery.<accountId>.json`.
  */
 export type DiscoveryContact = {
   /** 12-character hex prefix (first 6 bytes of the pubkey). */
@@ -32,6 +36,8 @@ export type DiscoveryContact = {
 export type DiscoverySummary = {
   /** ISO 8601 timestamp when the summary was generated. */
   generatedAt: string;
+  /** Account this summary belongs to (omitted for the default account). */
+  accountId?: string;
   /** Total number of known contacts across all accounts. */
   totalContacts: number;
   /** Contacts grouped by discovery source. */
@@ -50,16 +56,32 @@ export function setDiscoverySummaryPathForTests(path: string | undefined): void 
   testDiscoverySummaryPath = path;
 }
 
-function getDiscoverySummaryPath(): string {
-  return testDiscoverySummaryPath ?? `${pluginStateDir()}/meshcore-discovery.json`;
+const DEFAULT_THROTTLE_MS = 60_000;
+let throttleMs = DEFAULT_THROTTLE_MS;
+
+/** @internal Test-only throttle override. */
+export function setDiscoverySummaryThrottleMsForTests(ms: number): void {
+  throttleMs = ms;
+}
+
+function getDiscoverySummaryPath(accountId?: string): string {
+  if (testDiscoverySummaryPath) {
+    return testDiscoverySummaryPath;
+  }
+  const base = `${pluginStateDir()}/meshcore-discovery`;
+  // Default account keeps the plain filename for backwards compatibility;
+  // named accounts get a scoped file.
+  return accountId && accountId !== "default"
+    ? `${base}.${accountId}.json`
+    : `${base}.json`;
 }
 
 function hasPosition(entry: { advLat: number; advLon: number }): boolean {
   return entry.advLat !== 0 || entry.advLon !== 0;
 }
 
-function buildDiscoverySummary(): DiscoverySummary {
-  const entries = getContactBookEntries();
+function buildDiscoverySummary(accountId?: string): DiscoverySummary {
+  const entries = getContactBookEntries(accountId);
   const contacts: DiscoveryContact[] = entries
     .map((entry) => ({
       prefix: formatContactPrefix(entry),
@@ -73,6 +95,7 @@ function buildDiscoverySummary(): DiscoverySummary {
 
   return {
     generatedAt: new Date().toISOString(),
+    accountId,
     totalContacts: contacts.length,
     totalsBySource: {
       advert: contacts.filter((c) => c.source === "advert").length,
@@ -90,32 +113,57 @@ function atomicWriteJson(path: string, data: unknown): void {
 }
 
 /** Rewrite the discovery summary from the current contact-book state. */
-export function writeDiscoverySummary(): void {
-  atomicWriteJson(getDiscoverySummaryPath(), buildDiscoverySummary());
+export function writeDiscoverySummary(accountId?: string): void {
+  atomicWriteJson(getDiscoverySummaryPath(accountId), buildDiscoverySummary(accountId));
 }
 
 /** Read the persisted discovery summary, if one exists. */
-export function readDiscoverySummary(): DiscoverySummary | undefined {
+export function readDiscoverySummary(accountId?: string): DiscoverySummary | undefined {
   try {
-    return JSON.parse(readFileSync(getDiscoverySummaryPath(), "utf8")) as DiscoverySummary;
+    return JSON.parse(readFileSync(getDiscoverySummaryPath(accountId), "utf8")) as DiscoverySummary;
   } catch {
     return undefined;
   }
 }
 
 let listenerInstalled = false;
+let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+const pendingAccountIds = new Set<string | undefined>();
+
+function flushThrottledWrites(): void {
+  throttleTimer = null;
+  for (const accountId of pendingAccountIds) {
+    try {
+      writeDiscoverySummary(accountId);
+    } catch {
+      // best-effort: a failed write must not break other accounts
+    }
+  }
+  pendingAccountIds.clear();
+}
+
+function scheduleThrottledWrite(accountId?: string): void {
+  pendingAccountIds.add(accountId);
+  if (throttleTimer) {
+    return;
+  }
+  throttleTimer = setTimeout(flushThrottledWrites, throttleMs);
+}
 
 /**
  * Ensure the discovery summary is rewritten on every contact-book change.
  * Safe to call repeatedly; installs at most one listener.
+ *
+ * Writes are throttled (default 60s) so a burst of passive adverts does not
+ * rewrite the summary file on every packet.
  */
 export function ensureDiscoverySummarySync(): void {
   if (listenerInstalled) {
     return;
   }
   listenerInstalled = true;
-  onContactBookChange(() => {
-    writeDiscoverySummary();
+  onContactBookChange((accountId) => {
+    scheduleThrottledWrite(accountId);
   });
 }
 
@@ -123,4 +171,10 @@ export function ensureDiscoverySummarySync(): void {
 export function resetDiscoverySummaryStateForTests(): void {
   testDiscoverySummaryPath = undefined;
   listenerInstalled = false;
+  if (throttleTimer) {
+    clearTimeout(throttleTimer);
+    throttleTimer = null;
+  }
+  pendingAccountIds.clear();
+  throttleMs = DEFAULT_THROTTLE_MS;
 }
