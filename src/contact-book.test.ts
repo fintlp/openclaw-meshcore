@@ -12,6 +12,7 @@ import {
   resolveContactByPrefix,
   resolveContactPubkeyByPrefix,
   setContactBookPathForTests,
+  type ContactSource,
 } from "./contact-book.js";
 import { bytesToHex, hexToBytes } from "./protocol.js";
 
@@ -488,6 +489,140 @@ describe("contact book", () => {
     rememberContact({ publicKey: samplePublicKey }, accountId);
 
     expect(getContactByPubkey(samplePublicKey, accountId)!.lastHeardAt).toBe(3);
+  });
+
+  it("sets source=advert and discoveredAt on first advert sighting", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000_000);
+
+    rememberContact(makeFullAdvert(), accountId);
+
+    const entry = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(entry.source).toBe("advert" satisfies ContactSource);
+    expect(entry.discoveredAt).toBe(10_000);
+  });
+
+  it("sets source=contact-sync and discoveredAt for SelfInfo", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(20_000_000);
+
+    rememberSelfInfo(
+      {
+        publicKey: samplePublicKey,
+        name: "MyNode",
+        advLat: 12345000,
+        advLon: -54321000,
+      },
+      accountId,
+    );
+
+    const entry = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(entry.source).toBe("contact-sync" satisfies ContactSource);
+    expect(entry.discoveredAt).toBe(20_000);
+  });
+
+  it("preserves source and discoveredAt across subsequent remembers", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000_000);
+    rememberContact(makeFullAdvert(), accountId);
+
+    vi.setSystemTime(20_000_000);
+    rememberContact(
+      {
+        publicKey: samplePublicKey,
+        advName: "UpdatedName",
+        lastAdvert: 2_000_000_000,
+      },
+      accountId,
+    );
+
+    const entry = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(entry.source).toBe("advert");
+    expect(entry.discoveredAt).toBe(10_000);
+  });
+
+  it("backfills source=contact-sync and discoveredAt=lastAdvert when loading a v2 file without them", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(50_000_000);
+
+    const path = join(tmpdir(), "meshcore-contact-book-no-source.json");
+    setContactBookPathForTests(path);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 2,
+        contacts: [
+          {
+            publicKeyHex: bytesToHex(samplePublicKey),
+            type: 1,
+            flags: 2,
+            outPathLen: 2,
+            outPathHex: "00".repeat(64),
+            advName: "LegacySource",
+            lastAdvert: 30_000,
+            advLat: 11111111,
+            advLon: 22222222,
+            lastMod: 99,
+          },
+        ],
+      }),
+    );
+
+    resetContactBookForTests();
+
+    const loaded = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(loaded.source).toBe("contact-sync");
+    expect(loaded.discoveredAt).toBe(30_000);
+  });
+
+  it("backfills discoveredAt=now when loading a v2 file with no source and no lastAdvert", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(60_000_000);
+
+    const path = join(tmpdir(), "meshcore-contact-book-no-source-no-advert.json");
+    setContactBookPathForTests(path);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 2,
+        contacts: [
+          {
+            publicKeyHex: bytesToHex(samplePublicKey),
+            type: 0,
+            flags: 0,
+            outPathLen: 0,
+            outPathHex: "00".repeat(64),
+            advName: "NoAdvert",
+            lastAdvert: 0,
+            advLat: 0,
+            advLon: 0,
+            lastMod: 0,
+          },
+        ],
+      }),
+    );
+
+    resetContactBookForTests();
+
+    const loaded = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(loaded.source).toBe("contact-sync");
+    expect(loaded.discoveredAt).toBe(60_000);
+  });
+
+  it("round-trips source and discoveredAt through persistence", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(12_000_000);
+    rememberContact(makeFullAdvert(), accountId);
+    vi.useRealTimers();
+
+    resetContactBookForTests();
+    const entry = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(entry.source).toBe("advert");
+    expect(entry.discoveredAt).toBe(12_000);
+
+    const raw = JSON.parse(readFileSync(contactBookPath, "utf8"));
+    expect(raw.contacts[0].source).toBe("advert");
+    expect(raw.contacts[0].discoveredAt).toBe(12_000);
   });
 
   it("formats the 12-hex contact prefix", () => {

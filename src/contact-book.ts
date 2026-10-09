@@ -23,6 +23,8 @@ import { pluginStateDir } from "./state-dir.js";
  * Issue #11: contact book: capture full advert metadata.
  * Issue #12: contact book: decimal-degree coordinates.
  */
+export type ContactSource = "advert" | "contact-sync";
+
 export type ContactBookEntry = {
   publicKey: Uint8Array;
   type: number;
@@ -39,6 +41,10 @@ export type ContactBookEntry = {
   lon?: number;
   lastMod: number;
   lastHeardAt: number;
+  /** How this contact was first discovered. */
+  source: ContactSource;
+  /** Epoch seconds when this contact was first seen by this gateway. */
+  discoveredAt: number;
 };
 
 /** Contacts keyed by accountId, then by full 64-character pubkey hex. */
@@ -122,6 +128,10 @@ type PersistedContactV2 = {
   lon: number;
   lastMod: number;
   lastHeardAt: number;
+  /** How this contact was first discovered. */
+  source: ContactSource;
+  /** Epoch seconds when this contact was first seen by this gateway. */
+  discoveredAt: number;
 };
 
 type ContactBookFileV2 = {
@@ -162,6 +172,8 @@ function migrateV1Row(row: { publicKeyHex?: string; name?: string }): ContactBoo
     advLon: 0,
     lastMod: 0,
     lastHeardAt: 0,
+    source: "contact-sync",
+    discoveredAt: 0,
   };
 }
 
@@ -184,6 +196,12 @@ function rowToEntry(row: PersistedContactV2): ContactBookEntry | undefined {
     return undefined;
   }
   try {
+    const lastAdvert = Number(row.lastAdvert ?? 0);
+    const source: ContactSource = row.source === "advert" ? "advert" : "contact-sync";
+    const discoveredAt =
+      typeof row.discoveredAt === "number" && Number.isFinite(row.discoveredAt) && row.discoveredAt > 0
+        ? row.discoveredAt
+        : (lastAdvert > 0 ? lastAdvert : Math.floor(Date.now() / 1000));
     return {
       publicKey: hexToBytes(hex),
       type: Number(row.type ?? 0),
@@ -191,11 +209,13 @@ function rowToEntry(row: PersistedContactV2): ContactBookEntry | undefined {
       outPathLen: Number(row.outPathLen ?? 0),
       outPath: parseOutPathHex(row.outPathHex),
       advName: String(row.advName ?? ""),
-      lastAdvert: Number(row.lastAdvert ?? 0),
+      lastAdvert,
       advLat: Number(row.advLat ?? 0),
       advLon: Number(row.advLon ?? 0),
       lastMod: Number(row.lastMod ?? 0),
       lastHeardAt: Number(row.lastHeardAt ?? 0),
+      source,
+      discoveredAt,
     };
   } catch (error) {
     console.error(`[meshcore contact-book] skipping corrupt contact row ${hex}: ${String(error)}`);
@@ -271,7 +291,31 @@ function ensureLoaded(): void {
   loadContacts();
 }
 
-function persistContacts(): void {
+type ContactBookChangeListener = (accountId?: string) => void;
+const changeListeners: ContactBookChangeListener[] = [];
+
+/** @internal Register a callback invoked after each contact-book write. */
+export function onContactBookChange(listener: ContactBookChangeListener): () => void {
+  changeListeners.push(listener);
+  return () => {
+    const index = changeListeners.indexOf(listener);
+    if (index >= 0) {
+      changeListeners.splice(index, 1);
+    }
+  };
+}
+
+function emitContactBookChange(accountId?: string): void {
+  for (const listener of changeListeners) {
+    try {
+      listener(accountId);
+    } catch {
+      // best-effort: a failed listener must not break persistence
+    }
+  }
+}
+
+function persistContacts(accountId?: string): void {
   const path = getContactBookPath();
   try {
     mkdirSync(dirname(path), { recursive: true });
@@ -279,11 +323,11 @@ function persistContacts(): void {
       version: 2,
       contacts: [],
     };
-    for (const [accountId, map] of contactBooks) {
+    for (const [entryAccountId, map] of contactBooks) {
       for (const [, entry] of map) {
         payload.contacts.push({
           publicKeyHex: bytesToHex(entry.publicKey).toLowerCase(),
-          accountId,
+          accountId: entryAccountId,
           type: entry.type,
           flags: entry.flags,
           outPathLen: entry.outPathLen,
@@ -296,6 +340,8 @@ function persistContacts(): void {
           lon: toDecimalDegrees(entry.advLon),
           lastMod: entry.lastMod,
           lastHeardAt: entry.lastHeardAt,
+          source: entry.source,
+          discoveredAt: entry.discoveredAt,
         });
       }
     }
@@ -314,9 +360,12 @@ function persistContacts(): void {
         lon: toDecimalDegrees(entry.advLon),
         lastMod: entry.lastMod,
         lastHeardAt: entry.lastHeardAt,
+        source: entry.source,
+        discoveredAt: entry.discoveredAt,
       });
     }
     writeFileSync(path, JSON.stringify(payload));
+    emitContactBookChange(accountId);
   } catch {
     // best-effort persistence
   }
@@ -379,10 +428,12 @@ export function rememberContact(
       ? existing!.lastMod
       : (entry.lastMod ?? existing?.lastMod ?? 0),
     lastHeardAt: nowSeconds,
+    source: entry.source ?? existing?.source ?? "advert",
+    discoveredAt: existing?.discoveredAt ?? entry.discoveredAt ?? nowSeconds,
   };
 
   map.set(hex, merged);
-  persistContacts();
+  persistContacts(accountId);
 }
 
 /**
@@ -406,6 +457,8 @@ export function rememberSelfInfo(
       advName: selfInfo.name,
       advLat: selfInfo.advLat,
       advLon: selfInfo.advLon,
+      source: "contact-sync",
+      discoveredAt: Math.floor(Date.now() / 1000),
     },
     accountId,
   );
@@ -500,4 +553,5 @@ export function resetContactBookForTests(): void {
   contactBooks.clear();
   legacyContacts.clear();
   cacheLoaded = false;
+  changeListeners.length = 0;
 }

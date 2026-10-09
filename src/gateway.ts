@@ -2,6 +2,7 @@ import { runStoppablePassiveMonitor } from "openclaw/plugin-sdk/extension-shared
 import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/status-helpers";
 import type { ResolvedMeshcoreAccount } from "./accounts.js";
 import { createAccountStatusSink } from "./channel-api.js";
+import { ensureDiscoverySummarySync } from "./discovery-summary.js";
 import { monitorMeshcoreProvider } from "./monitor.js";
 import { readNodeStatusSnapshot, updateNodeStatusOps } from "./node-status.js";
 import { formatMeshcoreEndpoint } from "./transport.js";
@@ -32,6 +33,10 @@ export async function startMeshcoreGatewayAccount(ctx: {
   ctx.log?.info?.(
     `[${account.accountId}] starting MeshCore provider (tcp) at ${formatMeshcoreEndpoint(account)}`,
   );
+
+  // Ensure the agent-readable discovery surface stays in sync with the contact
+  // book. The listener is installed at most once across all accounts.
+  ensureDiscoverySummarySync();
 
   // Track gateway-account restarts so the node-status snapshot can report
   // reconnectCount / lastRestartAt / lastRestartReason (issue #14).
