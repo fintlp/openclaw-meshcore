@@ -169,4 +169,29 @@ describe("node status snapshot", () => {
   it("returns undefined when no snapshot has been written", () => {
     expect(readNodeStatusSnapshot()).toBeUndefined();
   });
+
+  it("includes battery voltage when provided", () => {
+    writeNodeStatusSnapshot(makeSelfInfo(), {
+      connectionState: "connected",
+      since: 1_700_000_000_000,
+      reconnectCount: 1,
+    }, undefined, 4200);
+
+    const snapshot = readNodeStatusSnapshot()!;
+    expect(snapshot.batteryMv).toBe(4200);
+  });
+
+  it("preserves battery voltage on operational update", () => {
+    writeNodeStatusSnapshot(makeSelfInfo(), {
+      connectionState: "connected",
+      since: 1_700_000_000_000,
+      reconnectCount: 1,
+    }, undefined, 3900);
+
+    updateNodeStatusOps({ connectionState: "disconnected" });
+
+    const snapshot = readNodeStatusSnapshot()!;
+    expect(snapshot.batteryMv).toBe(3900);
+    expect(snapshot.connectionState).toBe("disconnected");
+  });
 });
