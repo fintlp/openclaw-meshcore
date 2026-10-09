@@ -23,7 +23,7 @@ import {
 } from "./device-client.js";
 import { appendGroupLogEntry } from "./group-log.js";
 import { isOutboundEcho, rememberOutboundEcho } from "./echo-dedupe.js";
-import { updateNodeStatusOps } from "./node-status.js";
+import { readNodeStatusSnapshot, updateNodeStatusOps } from "./node-status.js";
 import { handleMeshcoreInbound } from "./inbound.js";
 import {
   formatMeshcoreChannelTarget,
@@ -637,6 +637,22 @@ export function monitorMeshcoreProvider(
     if (account.config.advertOnConnect) {
       void (async () => {
         try {
+          // advertOnConnect fires on every reconnect, but we skip it when the
+          // last advert is still fresh relative to the configured interval so
+          // we do not spam the mesh on flaky connections.
+          const snapshot = readNodeStatusSnapshot(account.accountId);
+          const lastAdvertAt = snapshot?.lastAdvertAt;
+          const intervalHours = account.config.advertIntervalHours ?? 0;
+          if (lastAdvertAt && intervalHours > 0) {
+            const elapsedHours =
+              (Date.now() - new Date(lastAdvertAt).getTime()) / (60 * 60 * 1000);
+            if (elapsedHours < intervalHours) {
+              logger.info(
+                `[${account.accountId}] connect advert skipped (last advert ${elapsedHours.toFixed(1)}h ago, interval ${intervalHours}h)`,
+              );
+              return;
+            }
+          }
           await advertScheduler!.sendAdvert();
         } catch (error) {
           logger.info(
