@@ -1,12 +1,12 @@
 {
   "name": "@fintlp/openclaw-meshcore",
-  "version": "2026.10.1",
+  "version": "2026.10.3",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "@fintlp/openclaw-meshcore",
-      "version": "2026.10.1",
+      "version": "2026.10.3",
       "license": "MIT",
       "dependencies": {
         "@liamcottle/meshcore.js": "1.15.0",

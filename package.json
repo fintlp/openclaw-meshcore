@@ -1,6 +1,6 @@
 {
   "name": "@fintlp/openclaw-meshcore",
-  "version": "2026.10.2",
+  "version": "2026.10.3",
   "description": "OpenClaw channel plugin for MeshCore LoRa nodes via Companion Protocol over TCP",
   "repository": {
     "type": "git",
