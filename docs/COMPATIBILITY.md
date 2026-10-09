@@ -32,7 +32,7 @@ Verified combinations, with the date and evidence class. "Verified" = exercised 
 
 ## Wire limits (firmware 1.16)
 
-- **127-byte text frame cap** — longer text is chunked by the plugin (`textChunkLimit` default 127). Raising the limit re-introduces silent tail loss.
+- **127-byte text frame cap** — longer text is chunked by the plugin (`textChunkLimit` default 127). A limit configured above 127 is clamped back to 127 bytes; an oversized frame causes the node to **kick the TCP companion session** rather than truncating silently (observed live 2026-10-09 with MeshCore companion 1.16-class firmware).
 - **Group channels: receive-only** by design, at the plugin level. Not a firmware limitation.
 
 ## What we recommend for new deployments (2026-10)
