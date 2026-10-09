@@ -111,7 +111,7 @@ type SendMeshcoreResult = {
 
 // Empirical (issue #5): node firmware 1.16 truncates text frames at 127 bytes
 // on the wire; chunking larger silently loses each chunk's tail at the joins.
-const DEFAULT_CHUNK_LIMIT = 127;
+export const MESHCORE_WIRE_CHUNK_LIMIT = 127;
 
 function recordMeshcoreOutboundActivity(accountId: string): void {
   try {
@@ -180,6 +180,7 @@ function chunkText(text: string, limit: number): string[] {
 
 function prefixLengthForChunkCount(count: number): number {
   // Worst-case prefix is "[N/N] "; both numbers have the same digit count.
+  // Invariant: index <= count implies digit-width(index) <= digit-width(count).
   return utf8ByteLength(`[${count}/${count}] `);
 }
 
@@ -246,8 +247,8 @@ export async function sendMessageMeshcore(
   // 127 bytes (live-proven 2026-10-09), so values above the wire cap are
   // clamped even if an operator sets them.
   const chunkLimit = Math.min(
-    account.config.textChunkLimit ?? DEFAULT_CHUNK_LIMIT,
-    DEFAULT_CHUNK_LIMIT,
+    account.config.textChunkLimit ?? MESHCORE_WIRE_CHUNK_LIMIT,
+    MESHCORE_WIRE_CHUNK_LIMIT,
   );
   const chunkNumbering = account.config.chunkNumbering ?? true;
   const chunks = chunkTextWithNumbering(text, chunkLimit, chunkNumbering);

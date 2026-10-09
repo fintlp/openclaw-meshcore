@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { meshcorePlugin } from "./channel.js";
 import { clearOutboundEchoCache } from "./echo-dedupe.js";
+import { MESHCORE_WIRE_CHUNK_LIMIT } from "./send.js";
 import { clearPacingStateForTests } from "./pacing.js";
 import { clearSendConfirmedStateForTests } from "./device-client.js";
 import type { CoreConfig } from "./types.js";
@@ -70,6 +71,15 @@ describe("meshcorePlugin outbound sendText (host-chunking suppression, issue #39
     vi.clearAllMocks();
     clearPacingStateForTests();
     clearSendConfirmedStateForTests();
+  });
+
+  it("regression: registered outbound adapter keeps chunker:null and textChunkLimit=127 (issue #39)", () => {
+    // The host must not pre-chunk, but it still reads textChunkLimit for its
+    // block-streaming layer. Losing the field silently widens live-reply
+    // coalescing to the host default (~1200). See outbound-base.ts.
+    const outbound = meshcorePlugin.outbound as Record<string, unknown>;
+    expect(outbound.chunker).toBeNull();
+    expect(outbound.textChunkLimit).toBe(MESHCORE_WIRE_CHUNK_LIMIT);
   });
 
   it("receives the full text from the host and emits ≤127-byte numbered chunks", async () => {
