@@ -697,6 +697,127 @@ describe("contact book", () => {
     expect(row.lon).toBe(10);
   });
 
+  describe("contact book cap and eviction (issue #27)", () => {
+    function makeKey(index: number): Uint8Array {
+      const hex = index.toString(16).padStart(64, "0");
+      return hexToBytes(hex);
+    }
+
+    it("enforces a configured max entry count", () => {
+      for (let i = 1; i <= 5; i++) {
+        rememberContact(
+          {
+            publicKey: makeKey(i),
+            advName: `Node${i}`,
+            lastAdvert: i * 1000,
+          },
+          accountId,
+          3,
+        );
+      }
+
+      const entries = getContactBookEntries(accountId);
+      expect(entries).toHaveLength(3);
+      // The three newest (highest lastAdvert) entries should remain.
+      expect(entries.map((e) => e.advName).sort()).toEqual(["Node3", "Node4", "Node5"]);
+    });
+
+    it("evicts the stalest advert-sourced entry by lastAdvert then discoveredAt", () => {
+      vi.useFakeTimers();
+      const base = 1_000_000;
+
+      // Three advert entries with the same lastAdvert but different discovery times.
+      for (let i = 1; i <= 3; i++) {
+        vi.setSystemTime(base + i * 1000);
+        rememberContact(
+          {
+            publicKey: makeKey(i),
+            advName: `Stale${i}`,
+            lastAdvert: base,
+          },
+          accountId,
+          2,
+        );
+      }
+
+      const entries = getContactBookEntries(accountId);
+      expect(entries).toHaveLength(2);
+      // Stale1 (oldest discoveredAt) is evicted.
+      expect(entries.some((e) => e.advName === "Stale1")).toBe(false);
+      expect(entries.map((e) => e.advName).sort()).toEqual(["Stale2", "Stale3"]);
+      vi.useRealTimers();
+    });
+
+    it("never evicts contact-sync sourced entries even when over cap", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(10_000);
+
+      // Fill beyond the cap with contact-sync entries only.
+      for (let i = 1; i <= 3; i++) {
+        rememberSelfInfo(
+          {
+            publicKey: makeKey(i),
+            name: `Sync${i}`,
+            advLat: 0,
+            advLon: 0,
+          },
+          accountId,
+          2,
+        );
+      }
+
+      const entries = getContactBookEntries(accountId);
+      // Sync entries are protected, so the cap is allowed to overshoot.
+      expect(entries).toHaveLength(3);
+      expect(entries.every((e) => e.source === "contact-sync")).toBe(true);
+      vi.useRealTimers();
+    });
+
+    it("prefers evicting advert entries before protected sync entries when mixed", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1000);
+      rememberSelfInfo(
+        {
+          publicKey: makeKey(1),
+          name: "Sync",
+          advLat: 0,
+          advLon: 0,
+        },
+        accountId,
+        2,
+      );
+
+      vi.setSystemTime(2000);
+      rememberContact(
+        {
+          publicKey: makeKey(2),
+          advName: "OldAdvert",
+          lastAdvert: 100,
+        },
+        accountId,
+        2,
+      );
+
+      vi.setSystemTime(3000);
+      rememberContact(
+        {
+          publicKey: makeKey(3),
+          advName: "NewAdvert",
+          lastAdvert: 200,
+        },
+        accountId,
+        2,
+      );
+
+      const entries = getContactBookEntries(accountId);
+      expect(entries).toHaveLength(2);
+      expect(entries.some((e) => e.advName === "Sync")).toBe(true);
+      expect(entries.some((e) => e.advName === "OldAdvert")).toBe(false);
+      expect(entries.some((e) => e.advName === "NewAdvert")).toBe(true);
+      vi.useRealTimers();
+    });
+  });
+
   it("survives a v2 row with malformed outPathHex without losing the pubkey", () => {
     const goodKey = hexToBytes(
       "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",

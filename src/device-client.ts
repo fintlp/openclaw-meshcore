@@ -445,6 +445,7 @@ export type MeshcoreConnectOptions = {
   lastRestartAt?: number;
   advertLat?: number;
   advertLon?: number;
+  contactBookMaxEntries?: number;
 };
 
 export async function connectMeshcoreDevice(params: MeshcoreConnectOptions): Promise<MeshcoreDeviceHandle> {
@@ -514,7 +515,7 @@ export async function connectMeshcoreDevice(params: MeshcoreConnectOptions): Pro
   try {
     const selfInfoRaw = await selfInfoFetcher.fetch();
     handle.selfInfo = normalizeSelfInfo(selfInfoRaw);
-    rememberSelfInfo(handle.selfInfo, handle.accountId);
+    rememberSelfInfo(handle.selfInfo, handle.accountId, params.contactBookMaxEntries);
     writeNodeStatusSnapshot(
       handle.selfInfo,
       {
@@ -626,6 +627,7 @@ export async function connectMeshcoreDevice(params: MeshcoreConnectOptions): Pro
       void connection.sendCommandGetBatteryVoltage();
     });
     handle.batteryMv = Number(batteryRaw.batteryMilliVolts ?? 0);
+    updateNodeStatusOps({ batteryMv: handle.batteryMv }, params.accountId);
   } catch {
     // Battery is optional.
   }
