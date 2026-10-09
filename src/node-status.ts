@@ -50,6 +50,8 @@ export type NodeStatusSnapshot = {
   lastRestartAt?: string;
   /** Account this snapshot belongs to (omitted for the default account). */
   accountId?: string;
+  /** Battery voltage in millivolts, if reported by the node. */
+  batteryMv?: number;
   /** ISO 8601 timestamp of the most recent self-advert sent by the gateway. */
   lastAdvertAt?: string;
   /** Scope of the most recent self-advert ("zero-hop" or "flood"). */
@@ -107,6 +109,7 @@ export function buildNodeStatusSnapshot(
     lastRestartAt?: number;
   },
   accountId?: string,
+  batteryMv?: number,
 ): NodeStatusSnapshot {
   const crDenominator = selfInfo.radioCr;
   return {
@@ -136,6 +139,7 @@ export function buildNodeStatusSnapshot(
     lastRestartReason: ops.lastRestartReason,
     lastRestartAt: ops.lastRestartAt !== undefined ? toIso(ops.lastRestartAt) : undefined,
     accountId,
+    batteryMv,
   };
 }
 
@@ -150,10 +154,11 @@ export function writeNodeStatusSnapshot(
     lastRestartAt?: number;
   },
   accountId?: string,
+  batteryMv?: number,
 ): void {
   atomicWriteJson(
     getNodeStatusPath(accountId),
-    buildNodeStatusSnapshot(selfInfo, ops, accountId),
+    buildNodeStatusSnapshot(selfInfo, ops, accountId, batteryMv),
   );
 }
 
@@ -169,6 +174,7 @@ export function updateNodeStatusOps(
       | "lastRestartAt"
       | "lastAdvertAt"
       | "advertScope"
+      | "batteryMv"
     >
   >,
   accountId?: string,
@@ -182,6 +188,7 @@ export function updateNodeStatusOps(
   if (ops.lastRestartAt !== undefined) next.lastRestartAt = ops.lastRestartAt;
   if (ops.lastAdvertAt !== undefined) next.lastAdvertAt = ops.lastAdvertAt;
   if (ops.advertScope !== undefined) next.advertScope = ops.advertScope;
+  if (ops.batteryMv !== undefined) next.batteryMv = ops.batteryMv;
   atomicWriteJson(getNodeStatusPath(accountId), next);
 }
 

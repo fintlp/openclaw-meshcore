@@ -26,6 +26,7 @@ import {
   normalizeMeshcoreAllowEntry,
 } from "./normalize.js";
 import { resolveMeshcoreGroupMatch, resolveMeshcoreRequireMention } from "./policy.js";
+import { readNodeStatusSnapshot } from "./node-status.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
 
@@ -109,6 +110,45 @@ async function deliverMeshcoreReply(params: {
       params.statusSink?.({ lastOutboundAt: Date.now() });
     },
   });
+}
+
+const COMMAND_REPLIES = new Set(["!ping", "!status"]);
+
+function formatStatusReply(snapshot: ReturnType<typeof readNodeStatusSnapshot>): string {
+  if (!snapshot) {
+    return "status unavailable";
+  }
+  const parts: string[] = [];
+  parts.push(snapshot.connectionState ?? "unknown");
+  if (snapshot.name) {
+    parts.push(`name:${snapshot.name}`);
+  }
+  if (snapshot.batteryMv) {
+    parts.push(`bat:${(snapshot.batteryMv / 1000).toFixed(2)}V`);
+  }
+  if (snapshot.position?.lat !== undefined && snapshot.position?.lon !== undefined) {
+    parts.push(`pos:${snapshot.position.lat.toFixed(4)},${snapshot.position.lon.toFixed(4)}`);
+  }
+  if (snapshot.lastAdvertAt) {
+    const ageMin = Math.floor((Date.now() - new Date(snapshot.lastAdvertAt).getTime()) / 60000);
+    parts.push(`adv:${ageMin}m`);
+  }
+  if (snapshot.reconnectCount !== undefined) {
+    parts.push(`reconnects:${snapshot.reconnectCount}`);
+  }
+  return parts.join(" ");
+}
+
+function buildCommandReply(command: string, accountId: string): string | undefined {
+  if (command === "!ping") {
+    const snapshot = readNodeStatusSnapshot(accountId);
+    const name = snapshot?.name;
+    return name ? `pong ${name}` : "pong";
+  }
+  if (command === "!status") {
+    return formatStatusReply(readNodeStatusSnapshot(accountId));
+  }
+  return undefined;
 }
 
 export async function handleMeshcoreInbound(params: {
@@ -234,6 +274,31 @@ export async function handleMeshcoreInbound(params: {
     },
   });
   const commandAuthorized = access.commandAccess.authorized;
+
+  // Plugin-level !ping / !status replies: answered directly for DMs that pass
+  // the same admission gate as a normal dispatch. Unknown/pairing-required
+  // senders fall through to the normal pairing flow so we never leak gateway
+  // internals to strangers.
+  const commandRepliesEnabled = account.config.commandRepliesEnabled ?? true;
+  if (
+    commandRepliesEnabled &&
+    !message.isGroup &&
+    access.ingress.admission === "dispatch" &&
+    COMMAND_REPLIES.has(rawBody)
+  ) {
+    const replyText = buildCommandReply(rawBody, account.accountId);
+    if (replyText !== undefined) {
+      await deliverMeshcoreReply({
+        payload: { text: replyText },
+        cfg: config,
+        target: message.senderNodeId,
+        accountId: account.accountId,
+        sendReply: params.sendReply,
+        statusSink: params.statusSink,
+      });
+      return;
+    }
+  }
 
   if (access.ingress.admission === "pairing-required") {
     await pairing.issueChallenge({

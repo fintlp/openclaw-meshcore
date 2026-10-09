@@ -41,7 +41,24 @@ const expectedAdvertConfig = {
   },
 } as const;
 
+const expectedNewConfig = {
+  chunkNumbering: {
+    default: true,
+    type: "boolean",
+  },
+  commandRepliesEnabled: {
+    default: true,
+    type: "boolean",
+  },
+  contactBookMaxEntries: {
+    default: 500,
+    type: "integer",
+    minimum: 0,
+  },
+} as const;
+
 type AdvertConfigKey = keyof typeof expectedAdvertConfig;
+type NewConfigKey = keyof typeof expectedNewConfig;
 
 const expectedSendPacingDefaults = {
   enabled: true,
@@ -84,6 +101,108 @@ function getAdvertConfigCopies(
     result[key] = value as Record<string, unknown>;
   }
   return result;
+}
+
+function getNewConfigCopies(
+  properties: Record<string, unknown>,
+): Record<NewConfigKey, Record<string, unknown>> | undefined {
+  const result = {} as Record<NewConfigKey, Record<string, unknown>>;
+  for (const key of Object.keys(expectedNewConfig) as NewConfigKey[]) {
+    const value = properties[key];
+    if (!value || typeof value !== "object") {
+      return undefined;
+    }
+    result[key] = value as Record<string, unknown>;
+  }
+  return result;
+}
+
+function checkConfigCopiesDrift<
+  K extends string,
+  T extends Record<K, { default: unknown; type: string; minimum?: number; enum?: readonly string[] }>,
+>({
+  expected,
+  rootCopy,
+  accountCopy,
+  uiHints,
+  zodDefaults,
+}: {
+  expected: T;
+  rootCopy: Record<K, Record<string, unknown>> | undefined;
+  accountCopy: Record<K, Record<string, unknown>> | undefined;
+  uiHints: Record<string, { label?: string; help?: string }>;
+  zodDefaults: Record<K, unknown> | undefined;
+}): string[] {
+  const issues: string[] = [];
+
+  for (const key of Object.keys(expected) as K[]) {
+    const hint = uiHints[key];
+    if (!hint) {
+      issues.push(`missing config-ui-hint for ${key}`);
+      continue;
+    }
+    if (typeof hint.label !== "string" || hint.label.length === 0) {
+      issues.push(`config-ui-hint ${key} missing label`);
+    }
+    if (typeof hint.help !== "string" || hint.help.length === 0) {
+      issues.push(`config-ui-hint ${key} missing help`);
+    }
+  }
+
+  for (const copyName of ["root", "account"] as const) {
+    const copy = copyName === "root" ? rootCopy : accountCopy;
+    for (const key of Object.keys(expected) as K[]) {
+      const expectedSpec = expected[key];
+      const actual = copy?.[key];
+      if (!actual) {
+        issues.push(`${copyName} ${key} missing`);
+        continue;
+      }
+
+      if (actual.default !== expectedSpec.default) {
+        issues.push(
+          `${copyName} ${key} default mismatch: expected ${JSON.stringify(expectedSpec.default)}, got ${JSON.stringify(actual.default)}`,
+        );
+      }
+      if (actual.type !== expectedSpec.type) {
+        issues.push(
+          `${copyName} ${key} type mismatch: expected ${JSON.stringify(expectedSpec.type)}, got ${JSON.stringify(actual.type)}`,
+        );
+      }
+      if ("minimum" in expectedSpec && actual.minimum !== expectedSpec.minimum) {
+        issues.push(
+          `${copyName} ${key} minimum mismatch: expected ${JSON.stringify(expectedSpec.minimum)}, got ${JSON.stringify(actual.minimum)}`,
+        );
+      }
+      if ("enum" in expectedSpec) {
+        const actualEnum = actual.enum;
+        if (
+          !Array.isArray(actualEnum) ||
+          JSON.stringify([...actualEnum].sort()) !== JSON.stringify([...expectedSpec.enum].sort())
+        ) {
+          issues.push(
+            `${copyName} ${key} enum mismatch: expected ${JSON.stringify(expectedSpec.enum)}, got ${JSON.stringify(actualEnum)}`,
+          );
+        }
+      }
+      if (zodDefaults) {
+        const zodDefault = zodDefaults[key];
+        if (zodDefault !== expectedSpec.default) {
+          issues.push(
+            `zod default for ${key} mismatch: expected ${JSON.stringify(expectedSpec.default)}, got ${JSON.stringify(zodDefault)}`,
+          );
+        }
+      }
+    }
+  }
+
+  for (const key of Object.keys(expected) as K[]) {
+    if (JSON.stringify(rootCopy?.[key]) !== JSON.stringify(accountCopy?.[key])) {
+      issues.push(`root/account ${key} mismatch`);
+    }
+  }
+
+  return issues;
 }
 
 function checkAdvertConfigDrift(manifest: Record<string, unknown>): string[] {
@@ -136,72 +255,74 @@ function checkAdvertConfigDrift(manifest: Record<string, unknown>): string[] {
     issues.push("could not parse zod defaults for advert config");
   }
 
-  // UI hints.
-  for (const key of Object.keys(expectedAdvertConfig) as AdvertConfigKey[]) {
-    const hint = meshcoreChannelConfigUiHints[key];
-    if (!hint) {
-      issues.push(`missing config-ui-hint for ${key}`);
-      continue;
-    }
-    if (typeof hint.label !== "string" || hint.label.length === 0) {
-      issues.push(`config-ui-hint ${key} missing label`);
-    }
-    if (typeof hint.help !== "string" || hint.help.length === 0) {
-      issues.push(`config-ui-hint ${key} missing help`);
-    }
-  }
-
-  for (const copyName of ["root", "account"] as const) {
-    const copy = copyName === "root" ? rootAdvert : accountAdvert;
-    for (const key of Object.keys(expectedAdvertConfig) as AdvertConfigKey[]) {
-      const expected = expectedAdvertConfig[key];
-      const actual = copy[key];
-
-      if (actual.default !== expected.default) {
-        issues.push(
-          `${copyName} ${key} default mismatch: expected ${JSON.stringify(expected.default)}, got ${JSON.stringify(actual.default)}`,
-        );
-      }
-      if (actual.type !== expected.type) {
-        issues.push(
-          `${copyName} ${key} type mismatch: expected ${JSON.stringify(expected.type)}, got ${JSON.stringify(actual.type)}`,
-        );
-      }
-      if ("minimum" in expected && actual.minimum !== expected.minimum) {
-        issues.push(
-          `${copyName} ${key} minimum mismatch: expected ${JSON.stringify(expected.minimum)}, got ${JSON.stringify(actual.minimum)}`,
-        );
-      }
-      if ("enum" in expected) {
-        const actualEnum = actual.enum;
-        if (
-          !Array.isArray(actualEnum) ||
-          JSON.stringify([...actualEnum].sort()) !== JSON.stringify([...expected.enum].sort())
-        ) {
-          issues.push(
-            `${copyName} ${key} enum mismatch: expected ${JSON.stringify(expected.enum)}, got ${JSON.stringify(actualEnum)}`,
-          );
-        }
-      }
-      if (zodDefaults) {
-        const zodDefault = zodDefaults[key];
-        if (zodDefault !== expected.default) {
-          issues.push(
-            `zod default for ${key} mismatch: expected ${JSON.stringify(expected.default)}, got ${JSON.stringify(zodDefault)}`,
-          );
-        }
-      }
-    }
-  }
-
-  // Root and account copies must be identical for these shared keys.
-  for (const key of Object.keys(expectedAdvertConfig) as AdvertConfigKey[]) {
-    if (JSON.stringify(rootAdvert[key]) !== JSON.stringify(accountAdvert[key])) {
-      issues.push(`root/account ${key} mismatch`);
-    }
-  }
+  const advertIssues = checkConfigCopiesDrift({
+    expected: expectedAdvertConfig,
+    rootCopy: rootAdvert,
+    accountCopy: accountAdvert,
+    uiHints: meshcoreChannelConfigUiHints,
+    zodDefaults,
+  });
+  issues.push(...advertIssues);
 
   return issues;
+}
+
+function checkNewConfigDrift(manifest: Record<string, unknown>): string[] {
+  const issues: string[] = [];
+
+  const meshcoreSchema = (manifest.channelConfigs as Record<string, Record<string, unknown> | undefined>)
+    ?.meshcore?.schema as Record<string, unknown> | undefined;
+  if (!meshcoreSchema) {
+    return ["missing channelConfigs.meshcore.schema"];
+  }
+
+  const rootProperties = meshcoreSchema.properties as Record<string, unknown> | undefined;
+  const accountProperties = (
+    (rootProperties?.accounts as Record<string, unknown> | undefined)
+      ?.additionalProperties as Record<string, unknown> | undefined
+  )?.properties as Record<string, unknown> | undefined;
+
+  if (!rootProperties) {
+    issues.push("missing root schema properties");
+  }
+  if (!accountProperties) {
+    issues.push("missing account schema properties");
+  }
+  if (!rootProperties || !accountProperties) {
+    return issues;
+  }
+
+  const rootNew = getNewConfigCopies(rootProperties);
+  const accountNew = getNewConfigCopies(accountProperties);
+  if (!rootNew) {
+    issues.push("root new config missing or malformed");
+  }
+  if (!accountNew) {
+    issues.push("account new config missing or malformed");
+  }
+  if (!rootNew || !accountNew) {
+    return issues;
+  }
+
+  const zodParsed = MeshcoreConfigSchema.safeParse({ host: "192.168.1.10" });
+  const zodDefaults = zodParsed.success
+    ? {
+        chunkNumbering: zodParsed.data.chunkNumbering,
+        commandRepliesEnabled: zodParsed.data.commandRepliesEnabled,
+        contactBookMaxEntries: zodParsed.data.contactBookMaxEntries,
+      }
+    : undefined;
+  if (!zodDefaults) {
+    issues.push("could not parse zod defaults for new config");
+  }
+
+  return checkConfigCopiesDrift({
+    expected: expectedNewConfig,
+    rootCopy: rootNew,
+    accountCopy: accountNew,
+    uiHints: meshcoreChannelConfigUiHints,
+    zodDefaults,
+  });
 }
 
 function checkManifestDrift(manifest: Record<string, unknown>): string[] {
@@ -256,6 +377,10 @@ function checkManifestDrift(manifest: Record<string, unknown>): string[] {
 
   // 4. advert config defaults/shape across zod, manifest, and UI hints.
   issues.push(...checkAdvertConfigDrift(manifest));
+
+  // 5. new batch-3 config keys (chunkNumbering, commandRepliesEnabled,
+  //    contactBookMaxEntries) across all four config surfaces.
+  issues.push(...checkNewConfigDrift(manifest));
 
   // 5. sendPacing shape and defaults across both copies.
   const { root: rootPacing, account: accountPacing } = getSendPacingCopies(manifest);

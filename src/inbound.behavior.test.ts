@@ -1,8 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleMeshcoreInbound } from "./inbound.js";
+import {
+  resetNodeStatusStateForTests,
+  setNodeStatusPathForTests,
+  writeNodeStatusSnapshot,
+} from "./node-status.js";
 import { clearMeshcoreRuntime, getMeshcoreRuntime, setMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig, MeshcoreInboundMessage, ResolvedMeshcoreAccount } from "./types.js";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { hexToBytes } from "./protocol.js";
 
 const {
   buildMentionRegexesMock,
@@ -93,8 +102,53 @@ function createBaseRuntime() {
 
 const shouldHandleTextCommandsMock = vi.fn(() => false);
 
+function makeNodeStatusPath(): string {
+  const dir = mkdtempSync(join(tmpdir(), "meshcore-inbound-status-"));
+  return join(dir, "node-status.json");
+}
+
+function makeRuntimeWithDispatch(inboundRunMock = vi.fn(async () => ({ dispatched: true }))) {
+  return {
+    ...createBaseRuntime(),
+    channel: {
+      ...createBaseRuntime().channel,
+      routing: {
+        resolveAgentRoute: vi.fn(() => ({
+          agentId: "meshcore",
+          sessionKey: "meshcore:!aabbccdd1122",
+          accountId: "default",
+        })),
+      },
+      reply: {
+        finalizeInboundContext: vi.fn((ctx) => ctx),
+        resolveEnvelopeFormatOptions: vi.fn(() => ({})),
+        formatAgentEnvelope: vi.fn(({ body }) => ({
+          storePath: "/tmp/sessions.json",
+          body,
+        })),
+        dispatchReplyWithBufferedBlockDispatcher: vi.fn(),
+      },
+      inbound: {
+        run: inboundRunMock,
+      },
+      session: {
+        recordInboundSession: vi.fn(),
+        resolveStorePath: vi.fn(() => "/tmp/sessions.json"),
+        readSessionUpdatedAt: vi.fn(() => undefined),
+      },
+      activity: {
+        record: vi.fn(),
+      },
+    },
+  };
+}
+
 describe("meshcore inbound behavior", () => {
+  let nodeStatusPath: string;
+
   beforeEach(() => {
+    nodeStatusPath = makeNodeStatusPath();
+    setNodeStatusPathForTests(nodeStatusPath);
     readAllowFromStoreMock.mockReset().mockResolvedValue([]);
     upsertPairingRequestMock.mockReset().mockResolvedValue({ code: "CODE", created: true });
     shouldHandleTextCommandsMock.mockReset().mockReturnValue(false);
@@ -106,6 +160,7 @@ describe("meshcore inbound behavior", () => {
 
   afterEach(() => {
     clearMeshcoreRuntime();
+    resetNodeStatusStateForTests();
   });
 
   it("issues pairing challenge for unknown DM senders when dmPolicy=pairing", async () => {
@@ -126,39 +181,7 @@ describe("meshcore inbound behavior", () => {
   it("dispatches DM from allowlisted sender", async () => {
     const sendReply = vi.fn(async () => undefined);
     const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
-    setMeshcoreRuntime({
-      ...createBaseRuntime(),
-      channel: {
-        ...createBaseRuntime().channel,
-        routing: {
-          resolveAgentRoute: vi.fn(() => ({
-            agentId: "meshcore",
-            sessionKey: "meshcore:!aabbccdd1122",
-            accountId: "default",
-          })),
-        },
-        reply: {
-          finalizeInboundContext: vi.fn((ctx) => ctx),
-          resolveEnvelopeFormatOptions: vi.fn(() => ({})),
-          formatAgentEnvelope: vi.fn(({ body }) => ({
-            storePath: "/tmp/sessions.json",
-            body,
-          })),
-          dispatchReplyWithBufferedBlockDispatcher: vi.fn(),
-        },
-        inbound: {
-          run: inboundRunMock,
-        },
-        session: {
-          recordInboundSession: vi.fn(),
-          resolveStorePath: vi.fn(() => "/tmp/sessions.json"),
-          readSessionUpdatedAt: vi.fn(() => undefined),
-        },
-        activity: {
-          record: vi.fn(),
-        },
-      },
-    } as never);
+    setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
 
     await handleMeshcoreInbound({
       message: createMessage({
@@ -387,5 +410,246 @@ describe("meshcore inbound behavior", () => {
     });
 
     expect(onAdmittedGroup).not.toHaveBeenCalled();
+  });
+
+  describe("plugin-level command replies (issue #29)", () => {
+    it("answers !ping directly for a paired/allowlisted sender", async () => {
+      const sendReply = vi.fn(async () => undefined);
+      const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+      setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+
+      writeNodeStatusSnapshot(
+        {
+          type: 1,
+          txPower: 22,
+          maxTxPower: 23,
+          publicKey: hexToBytes(
+            "aabbccdd11223344556677889900aabbccddeeff00112233445566778899aabb",
+          ),
+          advLat: 48858900,
+          advLon: 2294500,
+          reserved: new Uint8Array(16),
+          manualAddContacts: 0,
+          radioFreq: 869_618_000,
+          radioBw: 62_500,
+          radioSf: 8,
+          radioCr: 8,
+          name: "GatewayNode",
+        },
+        {
+          connectionState: "connected",
+          since: 1_700_000_000_000,
+          reconnectCount: 1,
+        },
+      );
+
+      await handleMeshcoreInbound({
+        message: createMessage({
+          senderNodeId: "!aabbccdd1122",
+          target: "!aabbccdd1122",
+          text: "!ping",
+        }),
+        account: createAccount({
+          config: {
+            dmPolicy: "allowlist",
+            allowFrom: ["!aabbccdd1122"],
+            groupPolicy: "disabled",
+            groupAllowFrom: [],
+            channels: [0],
+          },
+        }),
+        config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+        runtime: createRuntimeEnv(),
+        sendReply,
+      });
+
+      expect(sendReply).toHaveBeenCalledTimes(1);
+      expect(sendReply).toHaveBeenCalledWith("!aabbccdd1122", "pong GatewayNode", undefined);
+      expect(inboundRunMock).not.toHaveBeenCalled();
+    });
+
+    it("answers !status directly for a paired/allowlisted sender", async () => {
+      const sendReply = vi.fn(async () => undefined);
+      const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+      setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+
+      writeNodeStatusSnapshot(
+        {
+          type: 1,
+          txPower: 22,
+          maxTxPower: 23,
+          publicKey: hexToBytes(
+            "aabbccdd11223344556677889900aabbccddeeff00112233445566778899aabb",
+          ),
+          advLat: 48858900,
+          advLon: 2294500,
+          reserved: new Uint8Array(16),
+          manualAddContacts: 0,
+          radioFreq: 869_618_000,
+          radioBw: 62_500,
+          radioSf: 8,
+          radioCr: 8,
+          name: "GatewayNode",
+        },
+        {
+          connectionState: "connected",
+          since: 1_700_000_000_000,
+          reconnectCount: 2,
+        },
+      );
+
+      await handleMeshcoreInbound({
+        message: createMessage({
+          senderNodeId: "!aabbccdd1122",
+          target: "!aabbccdd1122",
+          text: "!status",
+        }),
+        account: createAccount({
+          config: {
+            dmPolicy: "allowlist",
+            allowFrom: ["!aabbccdd1122"],
+            groupPolicy: "disabled",
+            groupAllowFrom: [],
+            channels: [0],
+          },
+        }),
+        config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+        runtime: createRuntimeEnv(),
+        sendReply,
+      });
+
+      expect(sendReply).toHaveBeenCalledTimes(1);
+      const reply = sendReply.mock.calls[0][1] as string;
+      expect(reply).toMatch(/^connected /);
+      expect(reply).toContain("name:GatewayNode");
+      expect(reply).toContain("reconnects:2");
+      expect(inboundRunMock).not.toHaveBeenCalled();
+    });
+
+    it("does not answer commands from an unknown sender (pairing flow instead)", async () => {
+      const sendReply = vi.fn(async () => undefined);
+      const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+      setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+
+      await handleMeshcoreInbound({
+        message: createMessage({
+          senderNodeId: "!aabbccdd1122",
+          target: "!aabbccdd1122",
+          text: "!ping",
+        }),
+        account: createAccount({
+          config: {
+            dmPolicy: "pairing",
+            allowFrom: [],
+            groupPolicy: "disabled",
+            groupAllowFrom: [],
+            channels: [0],
+          },
+        }),
+        config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+        runtime: createRuntimeEnv(),
+        sendReply,
+      });
+
+      expect(upsertPairingRequestMock).toHaveBeenCalled();
+      expect(sendReply).toHaveBeenCalled();
+      const reply = sendReply.mock.calls[0][1] as string;
+      expect(reply).not.toMatch(/^pong/);
+      expect(inboundRunMock).not.toHaveBeenCalled();
+    });
+
+    it("requires an exact command match", async () => {
+      const sendReply = vi.fn(async () => undefined);
+      const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+      setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+
+      await handleMeshcoreInbound({
+        message: createMessage({
+          senderNodeId: "!aabbccdd1122",
+          target: "!aabbccdd1122",
+          text: "!ping please",
+        }),
+        account: createAccount({
+          config: {
+            dmPolicy: "allowlist",
+            allowFrom: ["!aabbccdd1122"],
+            groupPolicy: "disabled",
+            groupAllowFrom: [],
+            channels: [0],
+          },
+        }),
+        config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+        runtime: createRuntimeEnv(),
+        sendReply,
+      });
+
+      expect(sendReply).not.toHaveBeenCalled();
+      expect(inboundRunMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores commands in group channels", async () => {
+      const sendReply = vi.fn(async () => undefined);
+      const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+      setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+
+      await handleMeshcoreInbound({
+        message: createMessage({
+          isGroup: true,
+          target: "channel:0",
+          senderNodeId: "channel:0",
+          text: "!ping",
+        }),
+        account: createAccount({
+          config: {
+            dmPolicy: "pairing",
+            allowFrom: [],
+            groupPolicy: "allowlist",
+            groupAllowFrom: [],
+            channels: [0],
+            groups: {
+              "channel:0": {
+                requireMention: false,
+              },
+            },
+          },
+        }),
+        config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+        runtime: createRuntimeEnv(),
+        sendReply,
+      });
+
+      expect(sendReply).not.toHaveBeenCalled();
+      expect(inboundRunMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("can be disabled via config", async () => {
+      const sendReply = vi.fn(async () => undefined);
+      const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+      setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+
+      await handleMeshcoreInbound({
+        message: createMessage({
+          senderNodeId: "!aabbccdd1122",
+          target: "!aabbccdd1122",
+          text: "!ping",
+        }),
+        account: createAccount({
+          config: {
+            dmPolicy: "allowlist",
+            allowFrom: ["!aabbccdd1122"],
+            groupPolicy: "disabled",
+            groupAllowFrom: [],
+            channels: [0],
+            commandRepliesEnabled: false,
+          },
+        }),
+        config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+        runtime: createRuntimeEnv(),
+        sendReply,
+      });
+
+      expect(sendReply).not.toHaveBeenCalled();
+      expect(inboundRunMock).toHaveBeenCalledTimes(1);
+    });
   });
 });
