@@ -178,6 +178,40 @@ function chunkText(text: string, limit: number): string[] {
   return chunks;
 }
 
+function prefixLengthForChunkCount(count: number): number {
+  // Worst-case prefix is "[N/N] "; both numbers have the same digit count.
+  return utf8ByteLength(`[${count}/${count}] `);
+}
+
+/**
+ * Chunk text and prepend "[n/N] " to each chunk when numbering is enabled.
+ * The prefix is budgeted inside the wire limit, and single-chunk messages
+ * are never prefixed.
+ */
+function chunkTextWithNumbering(
+  text: string,
+  limit: number,
+  numberingEnabled: boolean,
+): string[] {
+  let chunks = chunkText(text, limit);
+  if (!numberingEnabled || chunks.length <= 1) {
+    return chunks;
+  }
+
+  // The prefix length depends on the final chunk count. Re-chunk with a
+  // reduced limit until the count stabilizes; the worst-case prefix for that
+  // count is then safe for every chunk.
+  while (true) {
+    const count = chunks.length;
+    const prefixLen = prefixLengthForChunkCount(count);
+    const resized = chunkText(text, Math.max(1, limit - prefixLen));
+    if (resized.length === count) {
+      return resized.map((chunk, index) => `[${index + 1}/${count}] ${chunk}`);
+    }
+    chunks = resized;
+  }
+}
+
 function resolveTarget(to: string, opts?: SendMeshcoreOptions): string {
   const fromArg = normalizeMeshcoreMessagingTarget(to);
   if (fromArg) {
@@ -209,7 +243,8 @@ export async function sendMessageMeshcore(
 
   const target = resolveTarget(to, opts);
   const chunkLimit = account.config.textChunkLimit ?? DEFAULT_CHUNK_LIMIT;
-  const chunks = chunkText(text, chunkLimit);
+  const chunkNumbering = account.config.chunkNumbering ?? true;
+  const chunks = chunkTextWithNumbering(text, chunkLimit, chunkNumbering);
   if (chunks.length === 0) {
     throw new Error("Message must be non-empty for MeshCore sends");
   }
