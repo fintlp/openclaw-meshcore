@@ -405,6 +405,23 @@
         "session"
       ]
     },
+    "advertOnConnect": {
+      "default": false,
+      "type": "boolean"
+    },
+    "advertIntervalHours": {
+      "default": 0,
+      "type": "number",
+      "minimum": 0
+    },
+    "advertScope": {
+      "default": "zero-hop",
+      "type": "string",
+      "enum": [
+        "zero-hop",
+        "flood"
+      ]
+    },
     "accounts": {
       "type": "object",
       "propertyNames": {
@@ -1242,6 +1259,23 @@
           "enum": [
             "digest",
             "session"
+          ]
+        },
+        "advertOnConnect": {
+          "default": false,
+          "type": "boolean"
+        },
+        "advertIntervalHours": {
+          "default": 0,
+          "type": "number",
+          "minimum": 0
+        },
+        "advertScope": {
+          "default": "zero-hop",
+          "type": "string",
+          "enum": [
+            "zero-hop",
+            "flood"
           ]
         }
       },

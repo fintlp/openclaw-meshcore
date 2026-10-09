@@ -234,6 +234,71 @@ describe("meshcore config schema", () => {
     expect(config.groupMonitorMode).toBe("digest");
   });
 
+  it("defaults advertOnConnect to false, advertIntervalHours to 0, advertScope to zero-hop", () => {
+    const config = expectValidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+      }),
+    );
+    expect(config.advertOnConnect).toBe(false);
+    expect(config.advertIntervalHours).toBe(0);
+    expect(config.advertScope).toBe("zero-hop");
+  });
+
+  it("accepts advert config overrides", () => {
+    const config = expectValidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        advertOnConnect: true,
+        advertIntervalHours: 6,
+        advertScope: "flood",
+      }),
+    );
+    expect(config.advertOnConnect).toBe(true);
+    expect(config.advertIntervalHours).toBe(6);
+    expect(config.advertScope).toBe("flood");
+  });
+
+  it("clamps advertIntervalHours below 1 up to 1", () => {
+    const config = expectValidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        advertIntervalHours: 0.5,
+      }),
+    );
+    expect(config.advertIntervalHours).toBe(1);
+  });
+
+  it("preserves advertIntervalHours=0 as disabled", () => {
+    const config = expectValidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        advertIntervalHours: 0,
+      }),
+    );
+    expect(config.advertIntervalHours).toBe(0);
+  });
+
+  it("rejects negative advertIntervalHours", () => {
+    const issues = expectInvalidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        advertIntervalHours: -1,
+      }),
+    );
+    expect(issues.some((issue) => issue.path.join(".") === "advertIntervalHours")).toBe(true);
+  });
+
+  it("rejects invalid advertScope", () => {
+    const issues = expectInvalidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        advertScope: "mesh-wide",
+      }) as ReturnType<typeof MeshcoreConfigSchema.safeParse>,
+    );
+    expect(issues.some((issue) => issue.path.join(".") === "advertScope")).toBe(true);
+  });
+
   it("accepts groupMonitorMode session", () => {
     const config = expectValidConfig(
       MeshcoreConfigSchema.safeParse({

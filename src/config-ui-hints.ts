@@ -53,4 +53,16 @@ export const meshcoreChannelConfigUiHints = {
     label: "Group Monitor Mode",
     help: '"digest" (default) writes admitted group messages to state/meshcore-group-log.jsonl without waking sessions. "session" routes them to agent sessions as before. Groups remain receive-only in both modes.',
   },
+  advertOnConnect: {
+    label: "Advert on Connect",
+    help: "Send one self-advert immediately after the node connects (default: false). Respect shared airtime — see docs/USAGE.md.",
+  },
+  advertIntervalHours: {
+    label: "Advert Interval (hours)",
+    help: "Hours between scheduled self-adverts while connected. 0 disables scheduled adverts (default). Values greater than 0 are clamped to a minimum of 1 hour.",
+  },
+  advertScope: {
+    label: "Advert Scope",
+    help: '"zero-hop" (default) advertises only to nodes in direct radio range. "flood" advertises mesh-wide and consumes shared airtime on every relay — use sparingly.',
+  },
 } satisfies Record<string, ChannelConfigUiHint>;

@@ -36,15 +36,21 @@ tool-restricted agent — see the README safety section).
 
 ## What the agent can see and do
 
-The plugin maintains three state files under `~/.openclaw/state/` (planned
+The plugin maintains four state files under `~/.openclaw/state/` (planned
 move: issue #21) — your agent reads them like any file:
 
 - `meshcore-node-status.json` — the node's SelfInfo snapshot: name, pubkey,
   radio parameters (freq/BW/SF/CR), TX power, advertised position,
-  connection state, reconnect count. Refreshed on every connect.
+  connection state, reconnect count, and the most recent self-advert
+  (`lastAdvertAt`, `advertScope`). Refreshed on every connect.
 - `meshcore-advert-contacts.json` — the contact book: every known peer's
   full pubkey, advert name, last-seen timestamp, and advertised GPS
   position. Persisted across restarts.
+- `meshcore-discovery.json` — the agent-readable discovery surface: a
+  summary of every known contact with `prefix`, `name`, `source`
+  (`advert` | `contact-sync`), `discoveredAt`, `lastAdvert`, and
+  `hasPosition`, plus totals by source. Rewritten automatically whenever
+  the contact book changes.
 - `meshcore-group-log.jsonl` — the digest log (see below), one JSON line
   per admitted group message, rotated at 1000 lines.
 
@@ -64,6 +70,70 @@ different risk class**: mesh DM identity is convenience-grade (48-bit
 prefix, public adverts), so garage/lock/alarm actions belong behind a
 second factor or off the mesh entirely. Read it before wiring any tool
 into a mesh-facing agent.
+
+## Discovery surface
+
+`meshcore-discovery.json` is the zero-airtime way for an agent to answer
+"who is on the mesh?". It is rebuilt from the contact book every time a
+contact is added or updated, so it is always consistent with
+`meshcore-advert-contacts.json` without exposing full public keys.
+
+Each entry:
+
+```json
+{
+  "prefix": "aabbccdd1122",
+  "name": "TestNode",
+  "source": "advert",
+  "discoveredAt": 1234567890,
+  "lastAdvert": 1234567890,
+  "hasPosition": true
+}
+```
+
+- `source`: `advert` when the contact was first seen from a passive
+  `Advert`/`NewAdvert` push; `contact-sync` when it came from a node
+  contact-list sync or SelfInfo.
+- `discoveredAt`: epoch seconds when this gateway first learned about the
+  contact. Existing contact-book entries without this field are backfilled
+  to `contact-sync` with `discoveredAt` set to their `lastAdvert` (or the
+  current time if no advert timestamp is known).
+- `hasPosition`: true when non-zero coordinates are known.
+
+## Active/scheduled self-adverts
+
+The plugin can transmit self-adverts on your behalf. Because every advert
+consumes shared LoRa airtime, the defaults are conservative:
+
+```jsonc
+channels: {
+  meshcore: {
+    advertOnConnect: false,       // send one advert immediately after connect
+    advertIntervalHours: 0,       // hours between scheduled adverts; 0 = off
+    advertScope: "zero-hop",      // "zero-hop" or "flood"
+  }
+}
+```
+
+- `advertOnConnect`: sends a single self-advert right after the node
+  connects and any configured position correction has been applied.
+- `advertIntervalHours`: while connected, sends a self-advert on this
+  interval. Values greater than 0 are clamped to a minimum of 1 hour.
+- `advertScope`: the MeshCore advert type sent by the node.
+  - `"zero-hop"` (default) reaches only nodes in direct radio range.
+    This is the polite, airtime-cheap default.
+  - `"flood"` propagates across the whole mesh. Every relay retransmits
+    it, so it consumes airtime for every node in the mesh — not just your
+    immediate neighbours. Use it sparingly, and never with a short
+    interval.
+
+> **Airtime citizenship warning.** LoRa spectrum is a shared commons. A
+> flooded advert on a 1-hour interval will be heard and relayed by every
+> node that can reach you, directly or indirectly. Prefer `"zero-hop"`
+> unless you have a concrete reason to announce yourself mesh-wide, and
+> keep intervals long. The node-status snapshot records `lastAdvertAt` and
+> `advertScope` so you (and your agent) can audit how often the gateway is
+> advertising.
 
 ## Group monitoring (digest mode)
 

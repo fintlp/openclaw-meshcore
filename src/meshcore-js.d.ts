@@ -90,6 +90,10 @@ declare module "@liamcottle/meshcore.js" {
     getContacts(): Promise<Array<Record<string, unknown>>>;
     getWaitingMessages(): Promise<Array<Record<string, unknown>> | null>;
     syncNextMessage(): Promise<Record<string, unknown> | null>;
+    /** Send a self-advert limited to direct-range neighbours. */
+    sendZeroHopAdvert(): Promise<void>;
+    /** Send a self-advert that is flooded across the mesh. */
+    sendFloodAdvert(): Promise<void>;
 
     // NOTE: the library emits most response events by numeric code
     // (Constants.ResponseCodes / PushCodes), not by friendly name.
