@@ -54,8 +54,14 @@ that is exactly what happened to our first attempt.
 npm run build                       # fresh dist/ (prepack also does this)
 clawhub package validate .          # inspector: expect PASS, only the intentional warning above
 clawhub package publish . --dry-run # shows exact payload + source commit; nothing is published
-clawhub package publish .           # real release
+# changelog: the versions page reads --changelog text (NO retroactive edit exists —
+# forget it and the release shows "No changelog provided" forever). Source: CHANGELOG.md.
+clawhub package publish . --changelog "$(awk '/^## <VERSION>/{f=1;next} /^## /{f=0} f' CHANGELOG.md)"
 ```
+
+- Keep CHANGELOG.md current as features land (it is the canonical source for
+  the `--changelog` text); versions before 2026.10.4 predate the flag and
+  permanently show no changelog on the registry.
 
 - The publish reads the **GitHub source** (`github:fintlp/openclaw-meshcore@main`),
   so commit + push everything first — the dry-run prints the exact commit it
