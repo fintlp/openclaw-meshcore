@@ -322,6 +322,35 @@ function atomicWriteJson(path: string, data: unknown): void {
   renameSync(tmpPath, path);
 }
 
+function evictStalestAdvertContact(map: Map<string, ContactBookEntry>, maxEntries: number): void {
+  if (maxEntries <= 0 || map.size <= maxEntries) {
+    return;
+  }
+  const evictionPool: ContactBookEntry[] = [];
+  for (const entry of map.values()) {
+    if (entry.source === "advert") {
+      evictionPool.push(entry);
+    }
+  }
+  if (evictionPool.length === 0) {
+    // All remaining entries are contact-sync sourced; never evict them.
+    return;
+  }
+  evictionPool.sort((a, b) => {
+    if (a.lastAdvert !== b.lastAdvert) {
+      return a.lastAdvert - b.lastAdvert;
+    }
+    return a.discoveredAt - b.discoveredAt;
+  });
+  const evictCount = Math.min(evictionPool.length, map.size - maxEntries);
+  for (let i = 0; i < evictCount; i++) {
+    const hex = publicKeyHexFromBytes(evictionPool[i].publicKey);
+    if (hex) {
+      map.delete(hex);
+    }
+  }
+}
+
 function persistContacts(accountId?: string): void {
   const path = getContactBookPath();
   try {
@@ -380,6 +409,7 @@ function persistContacts(accountId?: string): void {
 export function rememberContact(
   entry: Partial<Omit<ContactBookEntry, "publicKey">> & { publicKey: Uint8Array },
   accountId: string,
+  maxEntries?: number,
 ): void {
   ensureLoaded();
   const hex = publicKeyHexFromBytes(entry.publicKey);
@@ -439,6 +469,7 @@ export function rememberContact(
   };
 
   map.set(hex, merged);
+  evictStalestAdvertContact(map, maxEntries ?? 0);
   persistContacts(accountId);
 }
 
@@ -456,6 +487,7 @@ export function rememberSelfInfo(
     advLon: number;
   },
   accountId: string,
+  maxEntries?: number,
 ): void {
   rememberContact(
     {
@@ -467,6 +499,7 @@ export function rememberSelfInfo(
       discoveredAt: Math.floor(Date.now() / 1000),
     },
     accountId,
+    maxEntries,
   );
 }
 

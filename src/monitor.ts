@@ -249,6 +249,7 @@ export function monitorMeshcoreProvider(
       lastRestartAt: opts.lastRestartAt,
       advertLat: account.config.advertLat,
       advertLon: account.config.advertLon,
+      contactBookMaxEntries: account.config.contactBookMaxEntries,
     });
 
     const allowedChannels = new Set(account.config.channels ?? [0]);
@@ -526,6 +527,7 @@ export function monitorMeshcoreProvider(
             lastMod: typeof advert.lastMod === "number" ? advert.lastMod : undefined,
           },
           account.accountId,
+          account.config.contactBookMaxEntries,
         );
       } catch {
         // best-effort cache
@@ -609,6 +611,7 @@ export function monitorMeshcoreProvider(
       getContacts: async () => handle.connection.getContacts(),
       rememberContact,
       accountId: account.accountId,
+      contactBookMaxEntries: account.config.contactBookMaxEntries,
       log: (message) => logger.info(message),
       debugLog: (message) => {
         if (core.logging.shouldLogVerbose()) {

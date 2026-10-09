@@ -5,8 +5,10 @@ export type ContactSyncDeps = {
   rememberContact: (
     entry: Partial<Omit<ContactBookEntry, "publicKey">> & { publicKey: Uint8Array },
     accountId: string,
+    maxEntries?: number,
   ) => void;
   accountId: string;
+  contactBookMaxEntries?: number;
   log: (message: string) => void;
   debugLog?: (message: string) => void;
 };
@@ -97,6 +99,7 @@ export async function syncContactsFromNode(deps: ContactSyncDeps): Promise<void>
           lastMod: typeof contact.lastMod === "number" ? contact.lastMod : undefined,
         },
         deps.accountId,
+        deps.contactBookMaxEntries,
       );
     }
   } catch (error) {
