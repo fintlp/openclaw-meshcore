@@ -2,6 +2,7 @@ import { Constants } from "@liamcottle/meshcore.js";
 import { resolveLoggerBackedRuntime } from "openclaw/plugin-sdk/extension-shared";
 import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/status-helpers";
 import { resolveMeshcoreAccount } from "./accounts.js";
+import { startAdvertScheduler } from "./advert-scheduler.js";
 import { createAccountStatusSink } from "./channel-api.js";
 import {
   contactHasMissingMetadata,
@@ -284,10 +285,13 @@ export function monitorMeshcoreProvider(
       throttleMs: 60_000,
     });
 
+    let advertScheduler: ReturnType<typeof startAdvertScheduler> | undefined;
+
     const doCleanup = () => {
       if (settled) return;
       settled = true;
       contactSync.dispose();
+      advertScheduler?.dispose();
       for (const unsubscribe of unsubscribers) {
         unsubscribe();
       }
@@ -616,6 +620,31 @@ export function monitorMeshcoreProvider(
     logger.info(
       `[${account.accountId}] connected to MeshCore at ${formatMeshcoreEndpoint({ host: account.host, port: account.port })}`,
     );
+
+    // Start scheduled/connected adverts after the handshake (position admin
+    // already applied during connect). This respects the configured scope and
+    // airtime settings documented in USAGE.md.
+    advertScheduler = startAdvertScheduler({
+      connection: handle.connection,
+      accountId: account.accountId,
+      config: {
+        advertOnConnect: account.config.advertOnConnect ?? false,
+        advertIntervalHours: account.config.advertIntervalHours ?? 0,
+        advertScope: account.config.advertScope ?? "zero-hop",
+      },
+      log: (message) => logger.info(message),
+    });
+    if (account.config.advertOnConnect) {
+      void (async () => {
+        try {
+          await advertScheduler!.sendAdvert();
+        } catch (error) {
+          logger.info(
+            `[${account.accountId}] connect advert failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      })();
+    }
 
     return new Promise<{ stop: () => void }>((resolve, reject) => {
       resolveMonitor = resolve;

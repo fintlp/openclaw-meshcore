@@ -50,6 +50,10 @@ export type NodeStatusSnapshot = {
   lastRestartAt?: string;
   /** Account this snapshot belongs to (omitted for the default account). */
   accountId?: string;
+  /** ISO 8601 timestamp of the most recent self-advert sent by the gateway. */
+  lastAdvertAt?: string;
+  /** Scope of the most recent self-advert ("zero-hop" or "flood"). */
+  advertScope?: "zero-hop" | "flood";
 };
 
 let testNodeStatusPath: string | undefined;
@@ -158,7 +162,13 @@ export function updateNodeStatusOps(
   ops: Partial<
     Pick<
       NodeStatusSnapshot,
-      "connectionState" | "since" | "reconnectCount" | "lastRestartReason" | "lastRestartAt"
+      | "connectionState"
+      | "since"
+      | "reconnectCount"
+      | "lastRestartReason"
+      | "lastRestartAt"
+      | "lastAdvertAt"
+      | "advertScope"
     >
   >,
   accountId?: string,
@@ -170,6 +180,8 @@ export function updateNodeStatusOps(
   if (ops.reconnectCount !== undefined) next.reconnectCount = ops.reconnectCount;
   if (ops.lastRestartReason !== undefined) next.lastRestartReason = ops.lastRestartReason;
   if (ops.lastRestartAt !== undefined) next.lastRestartAt = ops.lastRestartAt;
+  if (ops.lastAdvertAt !== undefined) next.lastAdvertAt = ops.lastAdvertAt;
+  if (ops.advertScope !== undefined) next.advertScope = ops.advertScope;
   atomicWriteJson(getNodeStatusPath(accountId), next);
 }
 

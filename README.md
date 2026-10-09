@@ -179,6 +179,9 @@ You can also set the environment variable `MESHCORE_HOST` for the default accoun
 | `advertLat` | number (-90..90) | — | Override the node's advertised latitude. Requires `advertLon` and a difference >1e-5° from current position. |
 | `advertLon` | number (-180..180) | — | Override the node's advertised longitude. Requires `advertLat` and a difference >1e-5° from current position. |
 | `groupMonitorMode` | `"digest" \| "session"` | `"digest"` | Group/broadcast monitoring mode. `"digest"` writes admitted group messages to `state/meshcore-group-log.jsonl` without waking sessions; `"session"` routes them to agent sessions. Groups remain receive-only in both modes. |
+| `advertOnConnect` | boolean | `false` | Send one self-advert immediately after the node connects. |
+| `advertIntervalHours` | number ≥ 0 | `0` | Hours between scheduled self-adverts while connected. `0` disables scheduled adverts. Values > 0 are clamped to a minimum of 1 hour. |
+| `advertScope` | `"zero-hop" \| "flood"` | `"zero-hop"` | Self-advert scope. `"zero-hop"` reaches only direct-range neighbours; `"flood"` propagates mesh-wide and consumes shared airtime on every relay. |
 
 #### `sendPacing`
 

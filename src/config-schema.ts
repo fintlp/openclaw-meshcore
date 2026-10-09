@@ -80,6 +80,13 @@ const MeshcoreAccountSchemaBase = z
     advertLon: z.number().min(-180).max(180).optional(),
     groupMonitorMode: z.enum(["digest", "session"]).optional().default("digest"),
     logInboundMessageContent: z.boolean().optional(),
+    advertOnConnect: z.boolean().optional().default(false),
+    advertIntervalHours: z.number().min(0).optional().default(0).transform((value) => {
+      // 0 means disabled; any positive value is clamped to a minimum of 1 hour.
+      if (value === 0) return 0;
+      return Math.max(1, value);
+    }),
+    advertScope: z.enum(["zero-hop", "flood"]).optional().default("zero-hop"),
   })
   .strict();
 

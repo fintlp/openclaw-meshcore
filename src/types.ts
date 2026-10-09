@@ -64,6 +64,12 @@ export type MeshcoreAccountConfig = {
   advertLon?: number;
   /** Group/broadcast monitoring mode. "digest" appends admitted group messages to a JSONL log without waking sessions (default). "session" routes them to agent sessions as before. */
   groupMonitorMode?: "digest" | "session";
+  /** Send a self-advert immediately after connecting (default: false). */
+  advertOnConnect?: boolean;
+  /** Hours between scheduled self-adverts while connected. 0 disables scheduled adverts (default). Values >0 are clamped to a minimum of 1 hour. */
+  advertIntervalHours?: number;
+  /** Self-advert scope: "zero-hop" (direct-range only, default) or "flood" (mesh-wide). */
+  advertScope?: "zero-hop" | "flood";
 };
 
 type MeshcoreConfig = MeshcoreAccountConfig & {
