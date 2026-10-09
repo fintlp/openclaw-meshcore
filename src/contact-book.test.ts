@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -266,6 +266,7 @@ describe("contact book", () => {
   });
 
   it("loads a v1 file and migrates it to v2", () => {
+    const beforeNow = Math.floor(Date.now() / 1000);
     const path = join(tmpdir(), "meshcore-contact-book-migration.json");
     setContactBookPathForTests(path);
     writeFileSync(
@@ -291,6 +292,7 @@ describe("contact book", () => {
     expect(entry.advLon).toBe(0);
     expect(entry.lastAdvert).toBe(0);
     expect(entry.lastMod).toBe(0);
+    expect(entry.discoveredAt).toBeGreaterThanOrEqual(beforeNow);
   });
 
   it("adopts legacy rows lazily on first remember or lookup", () => {
@@ -341,6 +343,17 @@ describe("contact book", () => {
     );
     expect(getContactByPubkey(rememberKey, otherAccount)).toBeDefined();
     expect(getContactBookEntries(otherAccount)).toHaveLength(1);
+  });
+
+  it("writes the contact book atomically (tmp + rename)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "meshcore-contact-book-atomic-"));
+    const path = join(dir, "contacts.json");
+    setContactBookPathForTests(path);
+
+    rememberContact(makeFullAdvert(), accountId);
+
+    const files = new Set(readdirSync(dir).filter((f: string) => f.startsWith("contacts")));
+    expect(files).toEqual(new Set(["contacts.json"]));
   });
 
   it("round-trips a v2 file with all fields intact", () => {
