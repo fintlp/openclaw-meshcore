@@ -734,6 +734,26 @@ describe("meshcore config schema", () => {
     expect(issues.some((issue) => issue.path.join(".").startsWith("sendPacing.defaultCr"))).toBe(true);
   });
 
+  it("rejects textChunkLimit below the schema minimum", () => {
+    const issues = expectInvalidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        textChunkLimit: 39,
+      }),
+    );
+    expect(issues.some((issue) => issue.path.join(".") === "textChunkLimit")).toBe(true);
+  });
+
+  it("rejects textChunkLimit above the schema maximum", () => {
+    const issues = expectInvalidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        textChunkLimit: 501,
+      }),
+    );
+    expect(issues.some((issue) => issue.path.join(".") === "textChunkLimit")).toBe(true);
+  });
+
   // Drift-guard: the committed openclaw.plugin.json must be exactly what
   // `npm run sync-manifest` would write. This catches any hand-edits or
   // stale generated schema copies.
