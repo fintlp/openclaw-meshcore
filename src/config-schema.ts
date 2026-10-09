@@ -42,6 +42,7 @@ const MeshcoreAccountSchemaBase = z
     markdown: MarkdownConfigSchema,
     ...ReplyRuntimeConfigSchemaShape,
     textChunkLimit: z.number().int().min(40).max(500).optional(),
+    chunkNumbering: z.boolean().optional().default(true),
     chunkMode: z.enum(["length", "newline"]).optional(),
     blockStreaming: z.boolean().optional(),
     blockStreamingCoalesce: z
@@ -87,6 +88,8 @@ const MeshcoreAccountSchemaBase = z
       return Math.max(1, value);
     }),
     advertScope: z.enum(["zero-hop", "flood"]).optional().default("zero-hop"),
+    commandRepliesEnabled: z.boolean().optional().default(true),
+    contactBookMaxEntries: z.number().int().min(0).optional().default(500),
   })
   .strict();
 

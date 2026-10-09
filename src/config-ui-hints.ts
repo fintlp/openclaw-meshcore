@@ -33,6 +33,10 @@ export const meshcoreChannelConfigUiHints = {
     label: "MeshCore Text Chunk Limit",
     help: "Maximum UTF-8 bytes per outbound mesh text message (default 127 — node firmware truncates frames at 127 bytes on the wire). Long replies are split into chunks and sent as separate messages.",
   },
+  chunkNumbering: {
+    label: "Chunk Numbering",
+    help: "When true (default), multi-chunk DM replies are prefixed with [n/N]. The prefix is budgeted inside the chunk limit so it never pushes a frame over the wire cap. Single-chunk replies are never prefixed.",
+  },
   sendPacing: {
     label: "Send Pacing",
     help: "Outbound chunk pacing: delays between multi-chunk sends by the estimated LoRa frame airtime plus a safety margin, so the node can drain its tx queue. Default enabled; single-chunk sends are unaffected.",
@@ -64,5 +68,13 @@ export const meshcoreChannelConfigUiHints = {
   advertScope: {
     label: "Advert Scope",
     help: '"zero-hop" (default) advertises only to nodes in direct radio range. "flood" advertises mesh-wide and consumes shared airtime on every relay — use sparingly.',
+  },
+  commandRepliesEnabled: {
+    label: "Command Replies",
+    help: "When true (default), exact !ping and !status DMs are answered directly by the plugin without waking an agent session. Only senders that pass the DM gate receive replies; groups are always ignored.",
+  },
+  contactBookMaxEntries: {
+    label: "Contact Book Max Entries",
+    help: "Maximum number of entries persisted in the advert contact book (default 500, 0=unbounded). When full, the oldest advert-sourced entry is evicted; contact-sync entries are never evicted.",
   },
 } satisfies Record<string, ChannelConfigUiHint>;
