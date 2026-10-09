@@ -222,6 +222,10 @@
       "minimum": 40,
       "maximum": 500
     },
+    "chunkNumbering": {
+      "default": true,
+      "type": "boolean"
+    },
     "streaming": {
       "type": "object",
       "properties": {
@@ -421,6 +425,15 @@
         "zero-hop",
         "flood"
       ]
+    },
+    "commandRepliesEnabled": {
+      "default": true,
+      "type": "boolean"
+    },
+    "contactBookMaxEntries": {
+      "default": 500,
+      "type": "integer",
+      "minimum": 0
     },
     "accounts": {
       "type": "object",
@@ -649,6 +662,10 @@
             "type": "integer",
             "minimum": 40,
             "maximum": 500
+          },
+          "chunkNumbering": {
+            "default": true,
+            "type": "boolean"
           },
           "streaming": {
             "type": "object",
@@ -1078,6 +1095,10 @@
           "minimum": 40,
           "maximum": 500
         },
+        "chunkNumbering": {
+          "default": true,
+          "type": "boolean"
+        },
         "streaming": {
           "type": "object",
           "properties": {
@@ -1260,6 +1281,15 @@
             "digest",
             "session"
           ]
+        },
+        "commandRepliesEnabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "contactBookMaxEntries": {
+          "default": 500,
+          "type": "integer",
+          "minimum": 0
         },
         "advertOnConnect": {
           "default": false,

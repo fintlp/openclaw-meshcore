@@ -51,6 +51,8 @@ export type MeshcoreAccountConfig = {
   dmHistoryLimit?: number;
   dms?: Record<string, DmConfig>;
   textChunkLimit?: number;
+  /** When true (default), multi-chunk DM replies are prefixed with [n/N]. Single-chunk replies are never prefixed. */
+  chunkNumbering?: boolean;
   chunkMode?: "length" | "newline";
   blockStreaming?: boolean;
   blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
@@ -70,6 +72,10 @@ export type MeshcoreAccountConfig = {
   advertIntervalHours?: number;
   /** Self-advert scope: "zero-hop" (direct-range only, default) or "flood" (mesh-wide). */
   advertScope?: "zero-hop" | "flood";
+  /** When true (default), the plugin answers exact !ping and !status DMs directly without dispatching an agent session. Only for senders that pass the DM gate. */
+  commandRepliesEnabled?: boolean;
+  /** Maximum number of entries in the persisted advert contact book (default 500, 0=unbounded). */
+  contactBookMaxEntries?: number;
 };
 
 type MeshcoreConfig = MeshcoreAccountConfig & {
