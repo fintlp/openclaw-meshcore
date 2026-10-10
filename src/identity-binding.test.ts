@@ -400,7 +400,7 @@ describe("identity binding", () => {
       resetIdentityBindingStateForTests();
       expect(readPrefixConsistency(samplePublicKey, accountId)).toBe("pubkey-last4");
       const raw = JSON.parse(readFileSync(identityBindingPath, "utf8"));
-      expect(raw.version).toBe(1);
+      expect(raw.version).toBe(2);
       const pubkeyHex = bytesToHex(samplePublicKey).toLowerCase();
       expect(raw.observations[accountId][pubkeyHex].observations).toEqual([
         last4,
@@ -742,7 +742,7 @@ describe("identity binding", () => {
 
       expect(readPrefixConsistency(samplePublicKey, "default")).toBe("pubkey-last4");
 
-      // A subsequent write re-persists in the modern per-account format.
+      // A subsequent write re-persists in the v2 per-account format.
       recordPrefixObservation({
         publicKey: samplePublicKey,
         senderPrefixHex: last4,
@@ -750,6 +750,7 @@ describe("identity binding", () => {
         accountId: "default",
       });
       const rewritten = JSON.parse(readFileSync(identityBindingPath, "utf8"));
+      expect(rewritten.version).toBe(2);
       expect(rewritten.observations.default[pubkeyHex].observations).toHaveLength(4);
     });
   });

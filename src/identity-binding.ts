@@ -150,8 +150,21 @@ type ContactObservationState = {
   observations: string[];
 };
 
+/**
+ * Legacy flat v1 file: observations are keyed directly by 64-character pubkey
+ * hex with no accountId layer. These rows migrate to the default account on
+ * load, matching the contact-book v1→v2 migration pattern.
+ */
 type IdentityBindingFileV1 = {
   version: 1;
+  observations: Record<string, ContactObservationState>;
+};
+
+/**
+ * Current v2 file: per-account isolation, mirroring the contact-book layout.
+ */
+type IdentityBindingFileV2 = {
+  version: 2;
   observations: Record<string, Record<string, ContactObservationState>>;
 };
 
@@ -209,21 +222,15 @@ function isPubkeyHex(key: string): boolean {
   return /^[0-9a-f]{64}$/iu.test(key);
 }
 
-function isLegacyV1Observations(
-  observations: Record<string, unknown>,
-): observations is Record<string, ContactObservationState> {
-  // Legacy v1 rows are keyed directly by 64-character pubkey hex and contain
-  // { observations: string[] }. Modern v1 rows are keyed by accountId.
-  for (const [key, value] of Object.entries(observations)) {
+function isV1Flat(data: IdentityBindingFileV1): boolean {
+  // Legacy flat v1: top-level keys are 64-character pubkey hexes.
+  for (const key of Object.keys(data.observations)) {
     if (!isPubkeyHex(key)) return false;
-    if (!value || typeof value !== "object" || !Array.isArray((value as ContactObservationState).observations)) {
-      return false;
-    }
   }
-  return Object.keys(observations).length > 0;
+  return Object.keys(data.observations).length > 0;
 }
 
-function loadModernV1(data: IdentityBindingFileV1): void {
+function loadV2(data: IdentityBindingFileV2): void {
   for (const [accountId, accountObservations] of Object.entries(data.observations)) {
     if (!accountObservations || typeof accountObservations !== "object") continue;
     const map = getAccountMap(accountId);
@@ -236,9 +243,9 @@ function loadModernV1(data: IdentityBindingFileV1): void {
   }
 }
 
-function loadLegacyV1(observations: Record<string, ContactObservationState>): void {
+function migrateV1Flat(data: IdentityBindingFileV1): void {
   const map = getAccountMap(DEFAULT_ACCOUNT_ID);
-  for (const [pubkeyHex, entry] of Object.entries(observations)) {
+  for (const [pubkeyHex, entry] of Object.entries(data.observations)) {
     const normalized = normalizeObservationEntry(entry);
     if (normalized) {
       map.set(pubkeyHex.toLowerCase(), normalized);
@@ -251,20 +258,25 @@ function ensureLoaded(): void {
   stateLoaded = true;
   try {
     const raw = JSON.parse(readFileSync(getIdentityBindingPath(), "utf8")) as unknown;
-    if (
-      !raw ||
-      typeof raw !== "object" ||
-      (raw as Record<string, unknown>).version !== 1 ||
-      typeof (raw as Record<string, unknown>).observations !== "object"
-    ) {
+    if (!raw || typeof raw !== "object" || typeof (raw as Record<string, unknown>).observations !== "object") {
       return;
     }
-    const data = raw as IdentityBindingFileV1;
-    const observations = data.observations as Record<string, unknown>;
-    if (isLegacyV1Observations(observations)) {
-      loadLegacyV1(observations);
-    } else {
-      loadModernV1(data);
+    const version = (raw as Record<string, unknown>).version;
+    if (version === 2) {
+      loadV2(raw as IdentityBindingFileV2);
+      return;
+    }
+    if (version === 1) {
+      // Some earlier cycle-2 builds wrote v1 files that were already nested.
+      // Detect shape: flat rows migrate to the default account; nested rows
+      // load directly so they upgrade to v2 on the next write.
+      const v1 = raw as IdentityBindingFileV1;
+      if (isV1Flat(v1)) {
+        migrateV1Flat(v1);
+      } else {
+        loadV2(raw as unknown as IdentityBindingFileV2);
+      }
+      return;
     }
   } catch {
     // Missing or unreadable state file is fine — observations rebuild from
@@ -274,8 +286,8 @@ function ensureLoaded(): void {
 
 function persistObservations(): void {
   try {
-    const payload: IdentityBindingFileV1 = {
-      version: 1,
+    const payload: IdentityBindingFileV2 = {
+      version: 2,
       observations: {},
     };
     for (const [accountId, map] of observationsByAccount) {

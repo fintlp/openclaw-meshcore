@@ -239,7 +239,7 @@ Encryption note: MeshCore DMs are encrypted to the recipient's node key, so mess
 
 For SignedPlain messages (`txtType === 2`), the decrypted DM payload begins with a 4-byte `sender_prefix` followed by the UTF-8 text. Only those 4 signature bytes are available on the companion side; full Ed25519 DM verification is impossible from the plugin (the firmware verifies advert signatures at admission, but the companion protocol never forwards signature material). The plugin therefore classifies each SignedPlain prefix:
 
-- `meshSecurity.prefixMatch` — whether the 4-byte prefix equals the first 4 bytes of the resolved contact's pubkey (`pubkey-first4`), the last 4 bytes (`pubkey-last4`), neither (`none`), or could not be classified (`unresolved`).
+- `meshSecurity.prefixMatch` — whether the 4-byte prefix equals the first 4 bytes of the resolved contact's pubkey (`pubkey-first4`), the last 4 bytes (`pubkey-last4`), neither (`none`), could not be classified (`unresolved`), or was corrupted by the companion library's non-fatal UTF-8 decoder (`lossy`).
 - `meshSecurity.identityBinding` — `extended` when the prefix is `pubkey-last4` or when the contact has used the same unknown prefix in at least 3 consecutive SignedPlain observations; `mismatch` when a previously consistent prefix is contradicted; otherwise `prefix-only`.
 
 A header prefix collision still admits an attacker *as* the contact, so treat mesh DM identity as convenience-grade, not cryptographic. The binding fields give you observability, not a cryptographic guarantee. If a contact ever starts behaving strangely, re-verify out-of-band.

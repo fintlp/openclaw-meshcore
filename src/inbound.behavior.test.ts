@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { finalizeInboundContext } from "openclaw/plugin-sdk/reply-runtime";
 import { handleMeshcoreInbound } from "./inbound.js";
 import {
   resetNodeStatusStateForTests,
@@ -262,12 +263,14 @@ describe("meshcore inbound behavior", () => {
 
     expect(inboundRunMock).toHaveBeenCalledTimes(1);
     const turn = inboundRunMock.mock.calls[0][0].adapter.resolveTurn();
-    // The compiled OpenClaw runtime reads ctxPayload.ChannelStructuredContext
-    // (capital C) at node_modules/openclaw/dist/bot-message-CMzg2kIN.mjs:1823:
-    //   params.context.ctxPayload.ChannelStructuredContext ?? []
-    // Plugins must write the capital-C field; lowercase channelStructuredContext
-    // is written later by the runtime and is not read from plugin payloads.
-    expect(turn.ctxPayload.ChannelStructuredContext).toEqual([
+    // finalizeInboundContext is the real OpenClaw normalization step; arbitrary
+    // keys survive it, so the meaningful assertion is the POST-normalization
+    // shape. The compiled runtime then reads the capital-C field at:
+    //   - bot-message-CMzg2kIN.mjs:1823: params.context.ctxPayload.ChannelStructuredContext ?? []
+    //   - context-*.mjs:156-160 (resolveChannelStructuredContext):
+    //       params.extra?.ChannelStructuredContext / params.supplemental?.channelStructuredContext
+    const finalized = finalizeInboundContext(turn.ctxPayload);
+    expect(finalized.ChannelStructuredContext).toEqual([
       {
         label: "MeshCore Message Security",
         source: "meshcore",
@@ -275,8 +278,8 @@ describe("meshcore inbound behavior", () => {
         payload: meshSecurity,
       },
     ]);
-    // Simulate the exact runtime read pattern to prove agent visibility.
-    const runtimeRead = (turn.ctxPayload.ChannelStructuredContext ?? []) as Array<{
+    // Prove the entry is visible to the runtime's own read pattern.
+    const runtimeRead = (finalized.ChannelStructuredContext ?? []) as Array<{
       label: string;
       source?: string;
       type?: string;
