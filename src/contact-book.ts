@@ -25,6 +25,8 @@ import { pluginStateDir } from "./state-dir.js";
  */
 export type ContactSource = "advert" | "contact-sync";
 
+export type ContactIdentityBasis = "firmware-advert-verified" | "unknown";
+
 export type ContactBookEntry = {
   publicKey: Uint8Array;
   type: number;
@@ -45,6 +47,22 @@ export type ContactBookEntry = {
   source: ContactSource;
   /** Epoch seconds when this contact was first seen by this gateway. */
   discoveredAt: number;
+  /**
+   * Trust basis for the public-key identity.
+   *
+   * - "firmware-advert-verified": learned from an Advert/NewAdvert push or a
+   *   contact-sync response. Adverts are signed and verified by the radio
+   *   firmware before admission; contact-sync returns the node's own contact
+   *   table, which is populated from verified adverts.
+   * - "unknown": source could not be determined (legacy migration, malformed
+   *   row, or SelfInfo which is not an advert/contact-sync source).
+   *
+   * Note: MeshCore contact records do not expose a manual-add marker in their
+   * type/flags fields, so manually-added contacts are indistinguishable here
+   * and currently fall under "firmware-advert-verified" when they arrive via
+   * contact-sync. Issue #31 cycle 2 verified this against meshcore.js 1.15.0.
+   */
+  identityBasis: ContactIdentityBasis;
 };
 
 /** Contacts keyed by accountId, then by full 64-character pubkey hex. */
@@ -132,6 +150,8 @@ type PersistedContactV2 = {
   source: ContactSource;
   /** Epoch seconds when this contact was first seen by this gateway. */
   discoveredAt: number;
+  /** Trust basis for the public-key identity. */
+  identityBasis: ContactIdentityBasis;
 };
 
 type ContactBookFileV2 = {
@@ -174,6 +194,7 @@ function migrateV1Row(row: { publicKeyHex?: string; name?: string }): ContactBoo
     lastHeardAt: 0,
     source: "contact-sync",
     discoveredAt: Math.floor(Date.now() / 1000),
+    identityBasis: "unknown",
   };
 }
 
@@ -202,6 +223,8 @@ function rowToEntry(row: PersistedContactV2): ContactBookEntry | undefined {
       typeof row.discoveredAt === "number" && Number.isFinite(row.discoveredAt) && row.discoveredAt > 0
         ? row.discoveredAt
         : (lastAdvert > 0 ? lastAdvert : Math.floor(Date.now() / 1000));
+    const identityBasis: ContactIdentityBasis =
+      row.identityBasis === "firmware-advert-verified" ? "firmware-advert-verified" : "unknown";
     return {
       publicKey: hexToBytes(hex),
       type: Number(row.type ?? 0),
@@ -216,6 +239,7 @@ function rowToEntry(row: PersistedContactV2): ContactBookEntry | undefined {
       lastHeardAt: Number(row.lastHeardAt ?? 0),
       source,
       discoveredAt,
+      identityBasis,
     };
   } catch (error) {
     console.error(`[meshcore contact-book] skipping corrupt contact row ${hex}: ${String(error)}`);
@@ -377,6 +401,7 @@ function persistContacts(accountId?: string): void {
           lastHeardAt: entry.lastHeardAt,
           source: entry.source,
           discoveredAt: entry.discoveredAt,
+          identityBasis: entry.identityBasis,
         });
       }
     }
@@ -397,6 +422,7 @@ function persistContacts(accountId?: string): void {
         lastHeardAt: entry.lastHeardAt,
         source: entry.source,
         discoveredAt: entry.discoveredAt,
+        identityBasis: entry.identityBasis,
       });
     }
     atomicWriteJson(path, payload);
@@ -466,6 +492,11 @@ export function rememberContact(
     lastHeardAt: nowSeconds,
     source: entry.source ?? existing?.source ?? "advert",
     discoveredAt: existing?.discoveredAt ?? entry.discoveredAt ?? nowSeconds,
+    identityBasis:
+      existing?.identityBasis === "firmware-advert-verified" ||
+      entry.identityBasis === "firmware-advert-verified"
+        ? "firmware-advert-verified"
+        : (existing?.identityBasis ?? entry.identityBasis ?? "unknown"),
   };
 
   map.set(hex, merged);
@@ -497,6 +528,7 @@ export function rememberSelfInfo(
       advLon: selfInfo.advLon,
       source: "contact-sync",
       discoveredAt: Math.floor(Date.now() / 1000),
+      identityBasis: "unknown",
     },
     accountId,
     maxEntries,

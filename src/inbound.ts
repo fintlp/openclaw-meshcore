@@ -408,6 +408,14 @@ export async function handleMeshcoreInbound(params: {
     OriginatingTo: `meshcore:${peerId}`,
     CommandAuthorized: commandAuthorized,
     ReplyToId: message.replyToId,
+    ChannelStructuredContext: [
+      {
+        label: "MeshCore Message Security",
+        source: "meshcore",
+        type: "mesh_security",
+        payload: message.meshSecurity,
+      },
+    ],
   });
 
   await core.channel.inbound.run({

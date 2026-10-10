@@ -3,14 +3,20 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { monitorMeshcoreProvider, resetPositionResyncStateForTests } from "./monitor.js";
+import { buildInboundMessage, monitorMeshcoreProvider, resetPositionResyncStateForTests } from "./monitor.js";
+import { resolvePubkeyFromDmPrefix } from "./identity-binding.js";
 import {
   getContactBookEntries,
+  getContactByPubkey,
   POSITION_RESYNC_AFTER_MS,
   rememberContact,
   resetContactBookForTests,
   setContactBookPathForTests,
 } from "./contact-book.js";
+import {
+  resetIdentityBindingStateForTests,
+  setIdentityBindingPathForTests,
+} from "./identity-binding.js";
 import {
   readGroupLogEntries,
   resetGroupLogStateForTests,
@@ -180,7 +186,9 @@ describe("monitorMeshcoreProvider", () => {
     setContactBookPathForTests(join(dir, "contacts.json"));
     setGroupLogPathForTests(join(dir, "group-log.jsonl"));
     setNodeStatusPathForTests(join(dir, "node-status.json"));
+    setIdentityBindingPathForTests(join(dir, "identity-bindings.json"));
     resetContactBookForTests();
+    resetIdentityBindingStateForTests();
     resetNodeStatusStateForTests();
     const { getMeshcoreRuntime } = await import("./runtime.js");
     getMeshcoreRuntime.mockReturnValue(createRuntime());
@@ -190,9 +198,11 @@ describe("monitorMeshcoreProvider", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     resetContactBookForTests();
+    resetIdentityBindingStateForTests();
     setContactBookPathForTests(undefined);
     setGroupLogPathForTests(undefined);
     setNodeStatusPathForTests(undefined);
+    setIdentityBindingPathForTests(undefined);
     resetGroupLogStateForTests();
     resetNodeStatusStateForTests();
   });
@@ -260,6 +270,260 @@ describe("monitorMeshcoreProvider", () => {
       expect.objectContaining({
         text: "hello from signed peer",
         isGroup: false,
+        meshSecurity: expect.objectContaining({
+          txtType: 2,
+          signedPlain: true,
+          senderPrefixHex: "5349474d",
+          identityBinding: "prefix-only",
+        }),
+      }),
+      handle,
+    );
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("buildInboundMessage resolves SignedPlain last4 against the contact book", () => {
+    const publicKey = hexToBytes(
+      "aabbccdd11223344556677889900aabbccddeeff001122334455667741424344",
+    );
+    expect(publicKey).toHaveLength(32);
+    rememberContact(
+      {
+        publicKey,
+        advName: "SignedPeer",
+        lastAdvert: 1700000000,
+        identityBasis: "firmware-advert-verified",
+      },
+      "default",
+    );
+
+    expect(getContactBookEntries("default")).toHaveLength(1);
+    expect(getContactByPubkey(publicKey, "default")).toBeDefined();
+
+    const prefix = bytesToHex(publicKey.slice(0, 6)).toLowerCase();
+    expect(resolvePubkeyFromDmPrefix(prefix, "default")).toEqual(publicKey);
+
+    const message = buildInboundMessage({
+      message: {
+        pubKeyPrefix: publicKey.slice(0, 6),
+        pathLen: 0,
+        txtType: 2,
+        senderTimestamp: 1700000000,
+        text: "ABCDhello last4",
+      },
+      handle: createConnection(),
+      isGroup: false,
+      accountId: "default",
+    });
+
+    expect(message).not.toBeNull();
+    expect(message!.text).toBe("hello last4");
+    expect(message!.meshSecurity).toEqual({
+      txtType: 2,
+      signedPlain: true,
+      senderPrefixHex: "41424344",
+      lossy: false,
+      prefixMatch: "pubkey-last4",
+      consistency: "insufficient",
+      identityBinding: "extended",
+    });
+  });
+
+  it("buildInboundMessage detects mismatch then recovers to prefix-only while varying", () => {
+    const publicKey = hexToBytes(
+      "aabbccdd11223344556677889900aabbccddeeff00112233445566778899aabb",
+    );
+    rememberContact(
+      {
+        publicKey,
+        advName: "SignedPeer",
+        lastAdvert: 1700000000,
+        identityBasis: "firmware-advert-verified",
+      },
+      "default",
+    );
+
+    function build(text: string) {
+      return buildInboundMessage({
+        message: {
+          pubKeyPrefix: publicKey.slice(0, 6),
+          pathLen: 0,
+          txtType: 2,
+          senderTimestamp: 1700000000,
+          text,
+        },
+        handle: createConnection(),
+        isGroup: false,
+        accountId: "default",
+      });
+    }
+
+    const constantPrefix = "deadbeef";
+    const contradictingPrefix = "cafebabe";
+
+    const msg1 = build(`${constantPrefix}one`);
+    expect(msg1!.meshSecurity.identityBinding).toBe("prefix-only");
+    const msg2 = build(`${constantPrefix}two`);
+    expect(msg2!.meshSecurity.identityBinding).toBe("prefix-only");
+    const msg3 = build(`${constantPrefix}three`);
+    expect(msg3!.meshSecurity.identityBinding).toBe("extended");
+    expect(msg3!.meshSecurity.consistency).toBe("constant-unknown");
+
+    const msg4 = build(`${contradictingPrefix}four`);
+    expect(msg4!.meshSecurity.identityBinding).toBe("mismatch");
+    // Consistency is read AFTER recording, so the 4th observation makes the
+    // window varying even though mismatch was detected against the prior constant.
+    expect(msg4!.meshSecurity.consistency).toBe("varying");
+
+    const msg5 = build(`${contradictingPrefix}five`);
+    expect(msg5!.meshSecurity.identityBinding).toBe("prefix-only");
+    expect(msg5!.meshSecurity.consistency).toBe("varying");
+  });
+
+  it("classifies SignedPlain prefix as pubkey-last4 when contact is known", async () => {
+    // Choose a pubkey whose last 4 bytes are valid ASCII so the SignedPlain
+    // prefix survives meshcore.js's UTF-8 decode cleanly.
+    const publicKey = hexToBytes(
+      "aabbccdd11223344556677889900aabbccddeeff001122334455667741424344",
+    );
+    rememberContact(
+      {
+        publicKey,
+        advName: "SignedPeer",
+        lastAdvert: 1700000000,
+        identityBasis: "firmware-advert-verified",
+      },
+      "default",
+    );
+
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const onMessage = vi.fn();
+
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      onMessage,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    handle.connection.emit(7, {
+      pubKeyPrefix: publicKey.slice(0, 6),
+      pathLen: 0,
+      txtType: 2,
+      senderTimestamp: 1700000000,
+      text: "ABCDhello last4",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "hello last4",
+        meshSecurity: expect.objectContaining({
+          txtType: 2,
+          signedPlain: true,
+          senderPrefixHex: "41424344",
+          prefixMatch: "pubkey-last4",
+          identityBinding: "extended",
+        }),
+      }),
+      handle,
+    );
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("includes meshSecurity on plain DMs with signedPlain=false", async () => {
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const onMessage = vi.fn();
+
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      onMessage,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    handle.connection.emit(7, {
+      pubKeyPrefix: new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+      pathLen: 0,
+      txtType: 0,
+      senderTimestamp: 1700000000,
+      text: "plain hello",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "plain hello",
+        meshSecurity: expect.objectContaining({
+          txtType: 0,
+          signedPlain: false,
+          identityBinding: "prefix-only",
+        }),
+      }),
+      handle,
+    );
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("includes meshSecurity on group messages with signedPlain=false", async () => {
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const onMessage = vi.fn();
+
+    resolveMeshcoreAccountMock.mockReturnValue(
+      createResolvedAccount({
+        config: {
+          dmPolicy: "pairing",
+          allowFrom: [],
+          groupPolicy: "allowlist",
+          groupAllowFrom: [],
+          channels: [0],
+          groups: { "channel:0": {} },
+          groupMonitorMode: "session",
+        },
+      }),
+    );
+
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      onMessage,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    handle.connection.emit(8, {
+      channelIdx: 0,
+      txtType: 2,
+      senderTimestamp: 1700000000,
+      text: "SIGMgroup signed plain",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "SIGMgroup signed plain",
+        isGroup: true,
+        meshSecurity: expect.objectContaining({
+          txtType: 2,
+          signedPlain: false,
+          identityBinding: "prefix-only",
+        }),
       }),
       handle,
     );

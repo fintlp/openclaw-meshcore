@@ -97,6 +97,7 @@ export async function syncContactsFromNode(deps: ContactSyncDeps): Promise<void>
           advLat: typeof contact.advLat === "number" ? contact.advLat : undefined,
           advLon: typeof contact.advLon === "number" ? contact.advLon : undefined,
           lastMod: typeof contact.lastMod === "number" ? contact.lastMod : undefined,
+          identityBasis: "firmware-advert-verified",
         },
         deps.accountId,
         deps.contactBookMaxEntries,

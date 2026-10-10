@@ -4,6 +4,7 @@ import {
   formatContactPrefix,
   getContactBookEntries,
   onContactBookChange,
+  type ContactIdentityBasis,
 } from "./contact-book.js";
 import { pluginStateDir } from "./state-dir.js";
 
@@ -44,6 +45,11 @@ export type DiscoverySummary = {
   totalsBySource: {
     advert: number;
     "contact-sync": number;
+  };
+  /** Contacts grouped by identity trust basis. */
+  totalsByIdentityBasis: {
+    "firmware-advert-verified": number;
+    unknown: number;
   };
   /** Per-contact discovery record, sorted by discoveredAt ascending. */
   contacts: DiscoveryContact[];
@@ -93,6 +99,14 @@ function buildDiscoverySummary(accountId?: string): DiscoverySummary {
     }))
     .sort((a, b) => a.discoveredAt - b.discoveredAt);
 
+  const identityBasisCounts: Record<ContactIdentityBasis, number> = {
+    "firmware-advert-verified": 0,
+    unknown: 0,
+  };
+  for (const entry of entries) {
+    identityBasisCounts[entry.identityBasis] += 1;
+  }
+
   return {
     generatedAt: new Date().toISOString(),
     accountId,
@@ -101,6 +115,7 @@ function buildDiscoverySummary(accountId?: string): DiscoverySummary {
       advert: contacts.filter((c) => c.source === "advert").length,
       "contact-sync": contacts.filter((c) => c.source === "contact-sync").length,
     },
+    totalsByIdentityBasis: identityBasisCounts,
     contacts,
   };
 }

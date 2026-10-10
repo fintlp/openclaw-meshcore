@@ -30,10 +30,28 @@ Verified combinations, with the date and evidence class. "Verified" = exercised 
 - **TCP companion protocol only.** BLE and serial transports are not implemented.
 - One companion client per node (see [NODE-SETUP.md](NODE-SETUP.md)).
 
-## Wire limits (firmware 1.16)
+## Wire format notes
+
+### Text frame cap (firmware 1.16)
 
 - **127-byte text frame cap** — longer text is chunked by the plugin (`textChunkLimit` default 127). A limit configured above 127 is clamped back to 127 bytes; an oversized frame causes the node to **kick the TCP companion session** rather than truncating silently (observed live 2026-10-09 with MeshCore companion 1.16-class firmware).
 - **Group channels: receive-only** by design, at the plugin level. Not a firmware limitation.
+
+### SignedPlain direct messages (`txtType === 2`)
+
+Verified against `@liamcottle/meshcore.js` 1.15.0 and companion-protocol firmware:
+
+- Payload layout: `[4-byte sender_prefix][UTF-8 text]`.
+- The library's `readString()` decodes the entire remaining payload as one
+  string; the plugin parses out the prefix and text on the companion side.
+- Only 4 bytes of signature material are present in the payload; full
+  Ed25519 DM verification is not possible from the companion protocol.
+- Advert signatures are verified by the radio firmware at admission. The
+  companion protocol does not forward signature material (`NewAdvert` 0x8A
+  frames have no signature field). Contact-book entries learned via advert
+  pushes or contact-sync are transitively firmware-verified; contacts added
+  manually on-device bypass that verification, and the contact record
+  `type`/`flags` fields do not expose a manual-add marker (verified 2026-10-10).
 
 ## What we recommend for new deployments (2026-10)
 

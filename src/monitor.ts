@@ -11,6 +11,20 @@ import {
   rememberContact,
 } from "./contact-book.js";
 import {
+  classifySignedPlainPrefix,
+  ensureIdentityBindingEvictionListener,
+  formatSignedPlainLogLine,
+  getTrackedConstantPrefix,
+  parseSignedPlainPayload,
+  readPrefixConsistency,
+  recordPrefixObservation,
+  resolveIdentityBinding,
+  resolvePubkeyFromDmPrefix,
+  type IdentityBinding,
+  type PrefixConsistency,
+  type PrefixMatch,
+} from "./identity-binding.js";
+import {
   createThrottledContactSync,
   syncContactsFromNode,
 } from "./contact-sync.js";
@@ -131,31 +145,33 @@ function messageIdFromChannelMessage(message: {
   return `mc-ch-${channel}-${timestamp}-${hash}`;
 }
 
-/**
- * The pinned dependency does not skip the 4 signature bytes that precede the
- * text in a SignedPlain (txtType === 2) contact message. Re-encode the parsed
- * string, drop the first four bytes, and decode the remainder so the payload
- * flows into the inbound handler without leading garbage.
- */
-function stripSignedPlainPrefix(text: string): string {
-  const bytes = new TextEncoder().encode(text);
-  return new TextDecoder().decode(bytes.slice(4));
-}
-
 export function buildInboundMessage(params: {
   message: Record<string, unknown>;
   handle: MeshcoreDeviceHandle;
   isGroup: boolean;
+  accountId: string;
 }): MeshcoreInboundMessage | null {
-  const text = String(params.message.text ?? "").trim();
-  if (!text) {
+  const rawText = String(params.message.text ?? "").trim();
+  if (!rawText) {
     return null;
   }
-  if (isOutboundEcho(text)) {
+  if (isOutboundEcho(rawText)) {
     return null;
   }
 
   const meshChannel = channelIndexFromPacket(Number(params.message.channelIdx ?? 0));
+  const txtType = Number(params.message.txtType ?? 0);
+  const isSignedPlain = txtType === 2 && !params.isGroup;
+
+  let text = rawText;
+  let senderPrefixHex: string | null = null;
+  let lossy = false;
+  if (isSignedPlain) {
+    const parsed = parseSignedPlainPayload(rawText);
+    text = parsed.text;
+    senderPrefixHex = parsed.senderPrefixHex;
+    lossy = parsed.lossy;
+  }
 
   if (params.isGroup) {
     const target = formatMeshcoreChannelTarget(meshChannel);
@@ -168,6 +184,11 @@ export function buildInboundMessage(params: {
       isGroup: true,
       meshChannel,
       snr: typeof params.message.snr === "number" ? params.message.snr : undefined,
+      meshSecurity: {
+        txtType,
+        signedPlain: false,
+        identityBinding: "prefix-only",
+      },
     };
   }
 
@@ -184,6 +205,41 @@ export function buildInboundMessage(params: {
     contacts: params.handle.contacts,
   });
 
+  const prefixMatchHex = bytesToHex(prefixBytes.slice(0, 6)).toLowerCase();
+  const resolvedPubkey = resolvePubkeyFromDmPrefix(prefixMatchHex, params.accountId);
+
+  let prefixMatch: PrefixMatch = "unresolved";
+  let consistency: PrefixConsistency = "insufficient";
+  let identityBinding: IdentityBinding = "prefix-only";
+
+  if (isSignedPlain && resolvedPubkey) {
+    prefixMatch = classifySignedPlainPrefix({
+      senderPrefixHex,
+      publicKey: resolvedPubkey,
+      lossy,
+    });
+    // Read the PRE-observation tracked constant so a contradicting prefix is
+    // flagged before it poisons the consistency window.
+    const trackedConstantPrefix = getTrackedConstantPrefix(resolvedPubkey, params.accountId);
+    // Record the observation first; the meshSecurity consistency field then
+    // reflects the post-observation window while mismatch detection used the
+    // pre-observation constant above.
+    recordPrefixObservation({
+      publicKey: resolvedPubkey,
+      senderPrefixHex,
+      prefixMatch,
+      accountId: params.accountId,
+    });
+    consistency = readPrefixConsistency(resolvedPubkey, params.accountId);
+    identityBinding = resolveIdentityBinding({
+      signedPlain: true,
+      senderPrefixHex,
+      prefixMatch,
+      consistency,
+      trackedConstantPrefix,
+    });
+  }
+
   return {
     messageId: messageIdFromContactMessage(params.message),
     target: nodeId,
@@ -194,6 +250,15 @@ export function buildInboundMessage(params: {
     isGroup: false,
     meshChannel,
     snr: typeof params.message.snr === "number" ? params.message.snr : undefined,
+    meshSecurity: {
+      txtType,
+      signedPlain: isSignedPlain,
+      senderPrefixHex: senderPrefixHex ?? undefined,
+      lossy: isSignedPlain ? lossy : undefined,
+      prefixMatch,
+      consistency,
+      identityBinding,
+    },
   };
 }
 
@@ -273,6 +338,10 @@ export function monitorMeshcoreProvider(
       return bytesToHex(bytes.slice(0, 6)).toLowerCase();
     }
 
+    // Keep the identity-binding observation store bounded: evict entries
+    // whose contacts are pruned by contactBookMaxEntries.
+    ensureIdentityBindingEvictionListener();
+
     const contactSync = createThrottledContactSync({
       getContacts: async () => handle.connection.getContacts(),
       rememberContact,
@@ -307,10 +376,25 @@ export function monitorMeshcoreProvider(
       });
       void (async () => {
         try {
-          if (Number(message.txtType) === 2) {
-            message.text = stripSignedPlainPrefix(String(message.text ?? ""));
+          const inbound = buildInboundMessage({
+            message,
+            handle,
+            isGroup: false,
+            accountId: account.accountId,
+          });
+          if (inbound && inbound.meshSecurity.signedPlain) {
+            console.log(
+              formatSignedPlainLogLine({
+                timestamp: new Date(inbound.timestamp).toISOString(),
+                accountId: account.accountId,
+                prefixHex: inbound.meshSecurity.senderPrefixHex ?? null,
+                prefixMatch: inbound.meshSecurity.prefixMatch ?? "unresolved",
+                consistency: inbound.meshSecurity.consistency ?? "insufficient",
+                binding: inbound.meshSecurity.identityBinding,
+                lossy: inbound.meshSecurity.lossy ?? false,
+              }),
+            );
           }
-          const inbound = buildInboundMessage({ message, handle, isGroup: false });
           if (!inbound) {
             return;
           }
@@ -377,7 +461,12 @@ export function monitorMeshcoreProvider(
       });
       void (async () => {
         try {
-          const inbound = buildInboundMessage({ message, handle, isGroup: true });
+          const inbound = buildInboundMessage({
+            message,
+            handle,
+            isGroup: true,
+            accountId: account.accountId,
+          });
           if (!inbound) {
             return;
           }
@@ -525,6 +614,7 @@ export function monitorMeshcoreProvider(
             advLat: typeof advert.advLat === "number" ? advert.advLat : undefined,
             advLon: typeof advert.advLon === "number" ? advert.advLon : undefined,
             lastMod: typeof advert.lastMod === "number" ? advert.lastMod : undefined,
+            identityBasis: "firmware-advert-verified",
           },
           account.accountId,
           account.config.contactBookMaxEntries,
