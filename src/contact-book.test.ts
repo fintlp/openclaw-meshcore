@@ -543,6 +543,33 @@ describe("contact book", () => {
     expect(entry.identityBasis).toBe("firmware-advert-verified");
   });
 
+  it("does not downgrade verified identityBasis when SelfInfo merges onto it", () => {
+    rememberContact(
+      {
+        publicKey: samplePublicKey,
+        advName: "FromAdvert",
+        lastAdvert: 1000,
+        identityBasis: "firmware-advert-verified",
+      },
+      accountId,
+    );
+    expect(getContactByPubkey(samplePublicKey, accountId)!.identityBasis).toBe(
+      "firmware-advert-verified",
+    );
+    rememberSelfInfo(
+      {
+        publicKey: samplePublicKey,
+        name: "MyNode",
+        advLat: 0,
+        advLon: 0,
+      },
+      accountId,
+    );
+    expect(getContactByPubkey(samplePublicKey, accountId)!.identityBasis).toBe(
+      "firmware-advert-verified",
+    );
+  });
+
   it("upgrades identityBasis to verified when a verified source follows an unknown one", () => {
     rememberSelfInfo(
       {

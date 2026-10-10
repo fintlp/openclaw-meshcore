@@ -205,6 +205,47 @@ function normalizeObservationEntry(entry: unknown): ContactObservationState | un
   return { observations: observations.slice(-MAX_PREFIX_OBSERVATIONS) };
 }
 
+function isPubkeyHex(key: string): boolean {
+  return /^[0-9a-f]{64}$/iu.test(key);
+}
+
+function isLegacyV1Observations(
+  observations: Record<string, unknown>,
+): observations is Record<string, ContactObservationState> {
+  // Legacy v1 rows are keyed directly by 64-character pubkey hex and contain
+  // { observations: string[] }. Modern v1 rows are keyed by accountId.
+  for (const [key, value] of Object.entries(observations)) {
+    if (!isPubkeyHex(key)) return false;
+    if (!value || typeof value !== "object" || !Array.isArray((value as ContactObservationState).observations)) {
+      return false;
+    }
+  }
+  return Object.keys(observations).length > 0;
+}
+
+function loadModernV1(data: IdentityBindingFileV1): void {
+  for (const [accountId, accountObservations] of Object.entries(data.observations)) {
+    if (!accountObservations || typeof accountObservations !== "object") continue;
+    const map = getAccountMap(accountId);
+    for (const [pubkeyHex, entry] of Object.entries(accountObservations)) {
+      const normalized = normalizeObservationEntry(entry);
+      if (normalized) {
+        map.set(pubkeyHex.toLowerCase(), normalized);
+      }
+    }
+  }
+}
+
+function loadLegacyV1(observations: Record<string, ContactObservationState>): void {
+  const map = getAccountMap(DEFAULT_ACCOUNT_ID);
+  for (const [pubkeyHex, entry] of Object.entries(observations)) {
+    const normalized = normalizeObservationEntry(entry);
+    if (normalized) {
+      map.set(pubkeyHex.toLowerCase(), normalized);
+    }
+  }
+}
+
 function ensureLoaded(): void {
   if (stateLoaded) return;
   stateLoaded = true;
@@ -219,15 +260,11 @@ function ensureLoaded(): void {
       return;
     }
     const data = raw as IdentityBindingFileV1;
-    for (const [accountId, accountObservations] of Object.entries(data.observations)) {
-      if (!accountObservations || typeof accountObservations !== "object") continue;
-      const map = getAccountMap(accountId);
-      for (const [pubkeyHex, entry] of Object.entries(accountObservations)) {
-        const normalized = normalizeObservationEntry(entry);
-        if (normalized) {
-          map.set(pubkeyHex.toLowerCase(), normalized);
-        }
-      }
+    const observations = data.observations as Record<string, unknown>;
+    if (isLegacyV1Observations(observations)) {
+      loadLegacyV1(observations);
+    } else {
+      loadModernV1(data);
     }
   } catch {
     // Missing or unreadable state file is fine — observations rebuild from
@@ -478,6 +515,12 @@ export function formatSignedPlainLogLine(params: {
  * unbounded when contactBookMaxEntries prunes stale advert contacts.
  */
 let evictionListenerInstalled = false;
+
+/** @internal Reset the eviction listener flag so tests can reinstall it. */
+export function resetIdentityBindingEvictionListenerForTests(): void {
+  evictionListenerInstalled = false;
+}
+
 export function ensureIdentityBindingEvictionListener(): void {
   if (evictionListenerInstalled) return;
   evictionListenerInstalled = true;

@@ -262,7 +262,12 @@ describe("meshcore inbound behavior", () => {
 
     expect(inboundRunMock).toHaveBeenCalledTimes(1);
     const turn = inboundRunMock.mock.calls[0][0].adapter.resolveTurn();
-    expect(turn.ctxPayload.channelStructuredContext).toEqual([
+    // The compiled OpenClaw runtime reads ctxPayload.ChannelStructuredContext
+    // (capital C) at node_modules/openclaw/dist/bot-message-CMzg2kIN.mjs:1823:
+    //   params.context.ctxPayload.ChannelStructuredContext ?? []
+    // Plugins must write the capital-C field; lowercase channelStructuredContext
+    // is written later by the runtime and is not read from plugin payloads.
+    expect(turn.ctxPayload.ChannelStructuredContext).toEqual([
       {
         label: "MeshCore Message Security",
         source: "meshcore",
@@ -270,6 +275,15 @@ describe("meshcore inbound behavior", () => {
         payload: meshSecurity,
       },
     ]);
+    // Simulate the exact runtime read pattern to prove agent visibility.
+    const runtimeRead = (turn.ctxPayload.ChannelStructuredContext ?? []) as Array<{
+      label: string;
+      source?: string;
+      type?: string;
+      payload: unknown;
+    }>;
+    expect(runtimeRead).toHaveLength(1);
+    expect(runtimeRead[0].payload).toEqual(meshSecurity);
     expect(sendReply).not.toHaveBeenCalled();
   });
 

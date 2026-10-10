@@ -1,16 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   classifySignedPlainPrefix,
   derivePrefixConsistency,
+  ensureIdentityBindingEvictionListener,
   formatSignedPlainLogLine,
   getPrefixObservationsForTests,
   getTrackedConstantPrefix,
   parseSignedPlainPayload,
   readPrefixConsistency,
   recordPrefixObservation,
+  resetIdentityBindingEvictionListenerForTests,
   resetIdentityBindingStateForTests,
   resolveIdentityBinding,
   resolvePubkeyFromDmPrefix,
@@ -35,6 +37,7 @@ describe("identity binding", () => {
     setContactBookPathForTests(contactBookPath);
     resetIdentityBindingStateForTests();
     resetContactBookForTests();
+    resetIdentityBindingEvictionListenerForTests();
   });
 
   afterEach(() => {
@@ -646,6 +649,108 @@ describe("identity binding", () => {
         accountId,
       });
       expect(getTrackedConstantPrefix(samplePublicKey, accountId)).toBeUndefined();
+    });
+  });
+
+  describe("ensureIdentityBindingEvictionListener", () => {
+    it("prunes identity-binding observations when their advert contact is evicted", () => {
+      ensureIdentityBindingEvictionListener();
+
+      const pubkeyA = samplePublicKey;
+      const pubkeyB = hexToBytes(
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+      );
+      const pubkeyC = hexToBytes(
+        "11223344556677889900aabbccddeeff00112233445566778899aabbccddeeff",
+      );
+      const first4B = bytesToHex(pubkeyB.slice(0, 4)).toLowerCase();
+
+      rememberContact(
+        {
+          publicKey: pubkeyA,
+          advName: "A",
+          lastAdvert: 1000,
+          source: "advert",
+          identityBasis: "firmware-advert-verified",
+        },
+        accountId,
+      );
+      rememberContact(
+        {
+          publicKey: pubkeyB,
+          advName: "B",
+          lastAdvert: 2000,
+          source: "advert",
+          identityBasis: "firmware-advert-verified",
+        },
+        accountId,
+      );
+
+      for (let i = 0; i < 3; i++) {
+        recordPrefixObservation({
+          publicKey: pubkeyA,
+          senderPrefixHex: last4,
+          prefixMatch: "pubkey-last4",
+          accountId,
+        });
+        recordPrefixObservation({
+          publicKey: pubkeyB,
+          senderPrefixHex: first4B,
+          prefixMatch: "pubkey-first4",
+          accountId,
+        });
+      }
+      expect(readPrefixConsistency(pubkeyA, accountId)).toBe("pubkey-last4");
+      expect(readPrefixConsistency(pubkeyB, accountId)).toBe("pubkey-first4");
+
+      // Adding C with maxEntries=1 evicts the older advert contacts A and B.
+      rememberContact(
+        {
+          publicKey: pubkeyC,
+          advName: "C",
+          lastAdvert: 3000,
+          source: "advert",
+          identityBasis: "firmware-advert-verified",
+        },
+        accountId,
+        1,
+      );
+
+      // Force a reload from disk to prove the eviction was persisted.
+      resetIdentityBindingStateForTests();
+      expect(readPrefixConsistency(pubkeyA, accountId)).toBe("insufficient");
+      expect(readPrefixConsistency(pubkeyB, accountId)).toBe("insufficient");
+      const raw = JSON.parse(readFileSync(identityBindingPath, "utf8"));
+      const hexA = bytesToHex(pubkeyA).toLowerCase();
+      const hexB = bytesToHex(pubkeyB).toLowerCase();
+      expect(raw.observations[accountId][hexA]).toBeUndefined();
+      expect(raw.observations[accountId][hexB]).toBeUndefined();
+    });
+  });
+
+  describe("legacy v1 identity-binding migration", () => {
+    it("migrates pre-accountId v1 rows to the default account", () => {
+      const pubkeyHex = bytesToHex(samplePublicKey).toLowerCase();
+      const legacy = {
+        version: 1,
+        observations: {
+          [pubkeyHex]: { observations: [last4, last4, last4] },
+        },
+      };
+      writeFileSync(identityBindingPath, JSON.stringify(legacy));
+      resetIdentityBindingStateForTests();
+
+      expect(readPrefixConsistency(samplePublicKey, "default")).toBe("pubkey-last4");
+
+      // A subsequent write re-persists in the modern per-account format.
+      recordPrefixObservation({
+        publicKey: samplePublicKey,
+        senderPrefixHex: last4,
+        prefixMatch: "pubkey-last4",
+        accountId: "default",
+      });
+      const rewritten = JSON.parse(readFileSync(identityBindingPath, "utf8"));
+      expect(rewritten.observations.default[pubkeyHex].observations).toHaveLength(4);
     });
   });
 });
