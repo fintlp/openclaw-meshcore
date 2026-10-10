@@ -53,6 +53,7 @@ describe("contact book", () => {
       advLat: 48858900, // ~48.8589° N (degrees * 1e6)
       advLon: 2294500, // ~2.2945° E
       lastMod: 1234567000,
+      identityBasis: "firmware-advert-verified" as const,
     };
   }
 
@@ -513,6 +514,77 @@ describe("contact book", () => {
     const entry = getContactByPubkey(samplePublicKey, accountId)!;
     expect(entry.source).toBe("advert" satisfies ContactSource);
     expect(entry.discoveredAt).toBe(10_000);
+  });
+
+  it("sets identityBasis=firmware-advert-verified for advert-derived contacts", () => {
+    rememberContact(makeFullAdvert(), accountId);
+    const entry = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(entry.identityBasis).toBe("firmware-advert-verified");
+  });
+
+  it("sets identityBasis=unknown for SelfInfo-derived contacts", () => {
+    rememberSelfInfo(
+      {
+        publicKey: samplePublicKey,
+        name: "MyNode",
+        advLat: 12345000,
+        advLon: -54321000,
+      },
+      accountId,
+    );
+    const entry = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(entry.identityBasis).toBe("unknown");
+  });
+
+  it("preserves an existing identityBasis when a merge does not specify one", () => {
+    rememberContact(makeFullAdvert(), accountId);
+    rememberContact({ publicKey: samplePublicKey, advName: "UpdatedName" }, accountId);
+    const entry = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(entry.identityBasis).toBe("firmware-advert-verified");
+  });
+
+  it("upgrades identityBasis to verified when a verified source follows an unknown one", () => {
+    rememberSelfInfo(
+      {
+        publicKey: samplePublicKey,
+        name: "MyNode",
+        advLat: 0,
+        advLon: 0,
+      },
+      accountId,
+    );
+    expect(getContactByPubkey(samplePublicKey, accountId)!.identityBasis).toBe("unknown");
+    rememberContact(
+      {
+        publicKey: samplePublicKey,
+        advName: "FromAdvert",
+        lastAdvert: 1000,
+        identityBasis: "firmware-advert-verified",
+      },
+      accountId,
+    );
+    expect(getContactByPubkey(samplePublicKey, accountId)!.identityBasis).toBe(
+      "firmware-advert-verified",
+    );
+  });
+
+  it("round-trips identityBasis through persistence", () => {
+    rememberContact(makeFullAdvert(), accountId);
+    resetContactBookForTests();
+    const entry = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(entry.identityBasis).toBe("firmware-advert-verified");
+  });
+
+  it("sets identityBasis=unknown for v1 migration rows", () => {
+    const path = join(tmpdir(), "meshcore-contact-book-v1-identity.json");
+    setContactBookPathForTests(path);
+    writeFileSync(
+      path,
+      JSON.stringify([{ publicKeyHex: bytesToHex(samplePublicKey), name: "LegacyNode" }]),
+    );
+    resetContactBookForTests();
+    const entry = getContactByPubkey(samplePublicKey, accountId)!;
+    expect(entry.identityBasis).toBe("unknown");
   });
 
   it("sets source=contact-sync and discoveredAt for SelfInfo", () => {

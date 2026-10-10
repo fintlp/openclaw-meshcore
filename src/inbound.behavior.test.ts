@@ -63,6 +63,11 @@ function createMessage(overrides?: Partial<MeshcoreInboundMessage>): MeshcoreInb
     timestamp: Date.now(),
     isGroup: false,
     meshChannel: 0,
+    meshSecurity: {
+      txtType: 0,
+      signedPlain: false,
+      identityBinding: "prefix-only",
+    },
     ...overrides,
   };
 }

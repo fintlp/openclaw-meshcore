@@ -108,6 +108,7 @@ describe("contact-list sync", () => {
     expect(alpha.outPathLen).toBe(2);
     expect(bytesToHex(alpha.outPath)).toBe(bytesToHex(outPath1));
     expect(alpha.lastMod).toBe(1111111111);
+    expect(alpha.identityBasis).toBe("firmware-advert-verified");
 
     const emptyName = getContactByPubkey(key2, accountId)!;
     expect(emptyName.advName).toBe("");
@@ -116,6 +117,7 @@ describe("contact-list sync", () => {
     expect(emptyName.outPathLen).toBe(-1);
     expect(bytesToHex(emptyName.outPath)).toBe(bytesToHex(outPath2));
     expect(emptyName.lastMod).toBe(2222222222);
+    expect(emptyName.identityBasis).toBe("firmware-advert-verified");
   });
 
   it("swallows a rejected getContacts without throwing and leaves the contact book unchanged", async () => {

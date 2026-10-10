@@ -73,6 +73,7 @@ describe("discovery summary", () => {
       advLat: 48858900,
       advLon: 2294500,
       lastMod: 1234567000,
+      identityBasis: "firmware-advert-verified",
       ...overrides,
     };
   }
@@ -87,6 +88,10 @@ describe("discovery summary", () => {
     const summary = readDiscoverySummary()!;
     expect(summary.totalContacts).toBe(1);
     expect(summary.totalsBySource).toEqual({ advert: 1, "contact-sync": 0 });
+    expect(summary.totalsByIdentityBasis).toEqual({
+      "firmware-advert-verified": 1,
+      unknown: 0,
+    });
     expect(summary.contacts).toHaveLength(1);
     expect(summary.contacts[0]).toEqual({
       prefix: "aabbccdd1122",
@@ -119,6 +124,10 @@ describe("discovery summary", () => {
     const summary = readDiscoverySummary()!;
     expect(summary.totalContacts).toBe(2);
     expect(summary.totalsBySource).toEqual({ advert: 1, "contact-sync": 1 });
+    expect(summary.totalsByIdentityBasis).toEqual({
+      "firmware-advert-verified": 1,
+      unknown: 1,
+    });
     expect(summary.contacts[0].prefix).toBe("aabbccdd1122");
     expect(summary.contacts[1].prefix).toBe("001122334455");
     expect(summary.contacts[0].discoveredAt).toBeLessThan(summary.contacts[1].discoveredAt);

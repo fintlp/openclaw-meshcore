@@ -87,7 +87,7 @@ plugin can guarantee who knocked at the gate (pairing); it cannot
 cryptographically prove who is speaking after admission. Design tier 3
 accordingly.
 
-### The double-confirmation challenge (interim, until issue #31 ships)
+### The double-confirmation challenge (tier-3 gating)
 
 The property that makes a challenge work over an imperfect identity layer:
 **a prefix-spoofer is blind.** Replies encrypt to the resolved *real*
@@ -114,9 +114,24 @@ Protocol for every tier-3 request (garage, locks, alarm):
    but note that *arming itself* is a tier-3 action and needs the same
    challenge.
 
-Once SignedPlain signature verification ships (issue #31), sender identity
-becomes cryptographic for signing clients and the challenge degrades from
-load-bearing to defense-in-depth.
+**Gate on `meshSecurity.identityBinding`.** Issue #31 cycle 2 added
+SignedPlain prefix capture and classification. The inbound DM envelope now
+includes `meshSecurity.identityBinding`:
+
+- `extended` — SignedPlain is present and the prefix either matches the
+  resolved contact's pubkey last 4 bytes (`pubkey-last4`) or has been
+  consistent for at least 3 observations (`constant-unknown`). This is the
+  strongest identity signal available on the companion wire, but it is still
+  not a cryptographic proof.
+- `prefix-only` — default for Plain/CliData messages or when SignedPlain
+  classification is inconclusive.
+- `mismatch` — SignedPlain is present but the current prefix contradicts a
+  previously consistent prefix for the resolved contact.
+
+Tier-3 actions should require the in-band secret or out-of-band confirmation
+regardless of binding; `extended` may shorten the challenge but must not
+replace it. A challenge-response cycle remains the documented follow-up for
+issue #31.
 
 ## Recommended baseline (what we run)
 

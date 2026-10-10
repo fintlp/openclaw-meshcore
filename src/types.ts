@@ -9,6 +9,7 @@ import type {
   OpenClawConfig,
 } from "openclaw/plugin-sdk/config-contracts";
 import type { BaseProbeResult } from "openclaw/plugin-sdk/core";
+import type { IdentityBinding, PrefixMatch } from "./identity-binding.js";
 
 export type MeshcoreGroupConfig = {
   requireMention?: boolean;
@@ -89,6 +90,19 @@ export type CoreConfig = OpenClawConfig & {
   };
 };
 
+export type MeshcoreMessageSecurity = {
+  /** MeshCore text type: 0=Plain, 1=CliData, 2=SignedPlain. */
+  txtType: number;
+  /** True when the message arrived as a SignedPlain (txtType === 2) DM. */
+  signedPlain: boolean;
+  /** Hex of the 4-byte SignedPlain sender_prefix, when signedPlain is true. */
+  senderPrefixHex?: string;
+  /** How the sender_prefix relates to the resolved contact's full pubkey. */
+  prefixMatch?: PrefixMatch;
+  /** Identity binding classification for this message. */
+  identityBinding: IdentityBinding;
+};
+
 /** Inbound message emitted by the MeshCore monitor. */
 export type MeshcoreInboundMessage = {
   messageId: string;
@@ -103,6 +117,8 @@ export type MeshcoreInboundMessage = {
   meshChannel: number;
   replyToId?: string;
   snr?: number;
+  /** Security metadata derived from the wire frame and the contact book. */
+  meshSecurity: MeshcoreMessageSecurity;
 };
 
 export type MeshcoreSelfInfo = {

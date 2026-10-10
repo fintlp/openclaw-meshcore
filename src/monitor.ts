@@ -11,6 +11,19 @@ import {
   rememberContact,
 } from "./contact-book.js";
 import {
+  classifySignedPlainPrefix,
+  formatSignedPlainLogLine,
+  getTrackedConstantPrefix,
+  parseSignedPlainPayload,
+  readPrefixConsistency,
+  recordPrefixObservation,
+  resolveIdentityBinding,
+  resolvePubkeyFromDmPrefix,
+  type IdentityBinding,
+  type PrefixConsistency,
+  type PrefixMatch,
+} from "./identity-binding.js";
+import {
   createThrottledContactSync,
   syncContactsFromNode,
 } from "./contact-sync.js";
@@ -131,31 +144,33 @@ function messageIdFromChannelMessage(message: {
   return `mc-ch-${channel}-${timestamp}-${hash}`;
 }
 
-/**
- * The pinned dependency does not skip the 4 signature bytes that precede the
- * text in a SignedPlain (txtType === 2) contact message. Re-encode the parsed
- * string, drop the first four bytes, and decode the remainder so the payload
- * flows into the inbound handler without leading garbage.
- */
-function stripSignedPlainPrefix(text: string): string {
-  const bytes = new TextEncoder().encode(text);
-  return new TextDecoder().decode(bytes.slice(4));
-}
-
 export function buildInboundMessage(params: {
   message: Record<string, unknown>;
   handle: MeshcoreDeviceHandle;
   isGroup: boolean;
+  accountId: string;
 }): MeshcoreInboundMessage | null {
-  const text = String(params.message.text ?? "").trim();
-  if (!text) {
+  const rawText = String(params.message.text ?? "").trim();
+  if (!rawText) {
     return null;
   }
-  if (isOutboundEcho(text)) {
+  if (isOutboundEcho(rawText)) {
     return null;
   }
 
   const meshChannel = channelIndexFromPacket(Number(params.message.channelIdx ?? 0));
+  const txtType = Number(params.message.txtType ?? 0);
+  const isSignedPlain = txtType === 2 && !params.isGroup;
+
+  let text = rawText;
+  let senderPrefixHex: string | undefined;
+  let lossy = false;
+  if (isSignedPlain) {
+    const parsed = parseSignedPlainPayload(rawText);
+    text = parsed.text;
+    senderPrefixHex = parsed.senderPrefixHex;
+    lossy = parsed.lossy;
+  }
 
   if (params.isGroup) {
     const target = formatMeshcoreChannelTarget(meshChannel);
@@ -168,6 +183,11 @@ export function buildInboundMessage(params: {
       isGroup: true,
       meshChannel,
       snr: typeof params.message.snr === "number" ? params.message.snr : undefined,
+      meshSecurity: {
+        txtType,
+        signedPlain: false,
+        identityBinding: "prefix-only",
+      },
     };
   }
 
@@ -184,6 +204,35 @@ export function buildInboundMessage(params: {
     contacts: params.handle.contacts,
   });
 
+  const prefixMatchHex = bytesToHex(prefixBytes.slice(0, 6)).toLowerCase();
+  const resolvedPubkey = resolvePubkeyFromDmPrefix(prefixMatchHex, params.accountId);
+
+  let prefixMatch: PrefixMatch = "unresolved";
+  let consistency: PrefixConsistency = "insufficient";
+  let identityBinding: IdentityBinding = "prefix-only";
+
+  if (isSignedPlain && resolvedPubkey) {
+    prefixMatch = classifySignedPlainPrefix({
+      senderPrefixHex: senderPrefixHex ?? "",
+      publicKey: resolvedPubkey,
+      lossy,
+    });
+    consistency = recordPrefixObservation({
+      publicKey: resolvedPubkey,
+      senderPrefixHex: senderPrefixHex ?? "",
+      prefixMatch,
+    });
+    identityBinding = resolveIdentityBinding({
+      signedPlain: true,
+      senderPrefixHex: senderPrefixHex ?? "",
+      prefixMatch,
+      consistency,
+      trackedConstantPrefix: getTrackedConstantPrefix(resolvedPubkey),
+    });
+  } else if (!isSignedPlain) {
+    identityBinding = "prefix-only";
+  }
+
   return {
     messageId: messageIdFromContactMessage(params.message),
     target: nodeId,
@@ -194,6 +243,13 @@ export function buildInboundMessage(params: {
     isGroup: false,
     meshChannel,
     snr: typeof params.message.snr === "number" ? params.message.snr : undefined,
+    meshSecurity: {
+      txtType,
+      signedPlain: isSignedPlain,
+      senderPrefixHex,
+      prefixMatch,
+      identityBinding,
+    },
   };
 }
 
@@ -307,10 +363,34 @@ export function monitorMeshcoreProvider(
       });
       void (async () => {
         try {
-          if (Number(message.txtType) === 2) {
-            message.text = stripSignedPlainPrefix(String(message.text ?? ""));
+          const inbound = buildInboundMessage({
+            message,
+            handle,
+            isGroup: false,
+            accountId: account.accountId,
+          });
+          if (inbound && inbound.meshSecurity.signedPlain) {
+            const dmPrefixHex = bytesToHex(
+              (message.pubKeyPrefix instanceof Uint8Array
+                ? message.pubKeyPrefix
+                : Array.isArray(message.pubKeyPrefix)
+                  ? new Uint8Array(message.pubKeyPrefix as number[])
+                  : new Uint8Array(0)
+              ).slice(0, 6),
+            ).toLowerCase();
+            const resolvedPubkey = resolvePubkeyFromDmPrefix(dmPrefixHex, account.accountId);
+            const consistency = resolvedPubkey
+              ? readPrefixConsistency(resolvedPubkey)
+              : "insufficient";
+            console.log(
+              formatSignedPlainLogLine({
+                prefixHex: inbound.meshSecurity.senderPrefixHex ?? "",
+                prefixMatch: inbound.meshSecurity.prefixMatch ?? "unresolved",
+                consistency,
+                binding: inbound.meshSecurity.identityBinding,
+              }),
+            );
           }
-          const inbound = buildInboundMessage({ message, handle, isGroup: false });
           if (!inbound) {
             return;
           }
@@ -377,7 +457,12 @@ export function monitorMeshcoreProvider(
       });
       void (async () => {
         try {
-          const inbound = buildInboundMessage({ message, handle, isGroup: true });
+          const inbound = buildInboundMessage({
+            message,
+            handle,
+            isGroup: true,
+            accountId: account.accountId,
+          });
           if (!inbound) {
             return;
           }
@@ -525,6 +610,7 @@ export function monitorMeshcoreProvider(
             advLat: typeof advert.advLat === "number" ? advert.advLat : undefined,
             advLon: typeof advert.advLon === "number" ? advert.advLon : undefined,
             lastMod: typeof advert.lastMod === "number" ? advert.lastMod : undefined,
+            identityBasis: "firmware-advert-verified",
           },
           account.accountId,
           account.config.contactBookMaxEntries,
