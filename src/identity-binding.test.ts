@@ -135,14 +135,14 @@ describe("identity binding", () => {
       ).toBe("none");
     });
 
-    it("classifies a lossy prefix as unresolved", () => {
+    it("classifies a lossy prefix as lossy", () => {
       expect(
         classifySignedPlainPrefix({
-          senderPrefixHex: "efbfbd",
+          senderPrefixHex: null,
           publicKey: samplePublicKey,
           lossy: true,
         }),
-      ).toBe("unresolved");
+      ).toBe("lossy");
     });
 
     it("classifies an invalid public key length as unresolved", () => {
@@ -337,13 +337,15 @@ describe("identity binding", () => {
           publicKey: samplePublicKey,
           senderPrefixHex: last4,
           prefixMatch: "pubkey-last4",
+          accountId,
         });
       }
       resetIdentityBindingStateForTests();
-      expect(readPrefixConsistency(samplePublicKey)).toBe("pubkey-last4");
+      expect(readPrefixConsistency(samplePublicKey, accountId)).toBe("pubkey-last4");
       const raw = JSON.parse(readFileSync(identityBindingPath, "utf8"));
       expect(raw.version).toBe(1);
-      expect(raw.observations[bytesToHex(samplePublicKey).toLowerCase()].observations).toEqual([
+      const pubkeyHex = bytesToHex(samplePublicKey).toLowerCase();
+      expect(raw.observations[accountId][pubkeyHex].observations).toEqual([
         last4,
         last4,
         last4,
@@ -490,13 +492,16 @@ describe("identity binding", () => {
   describe("formatSignedPlainLogLine", () => {
     it("formats the one-line summary", () => {
       const line = formatSignedPlainLogLine({
+        timestamp: "2026-10-10T20:00:00.000Z",
+        accountId: "default",
         prefixHex: "8899aabb",
         prefixMatch: "pubkey-last4",
         consistency: "pubkey-last4",
         binding: "extended",
+        lossy: false,
       });
       expect(line).toBe(
-        "[meshcore] signedplain prefix=8899aabb match=pubkey-last4 consistency=pubkey-last4 binding=extended",
+        "[2026-10-10T20:00:00.000Z] [meshcore] [default] signedplain prefix=8899aabb lossy=false match=pubkey-last4 consistency=pubkey-last4 binding=extended",
       );
     });
   });

@@ -1,8 +1,16 @@
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
-import { bytesToHex, hexToBytes, MESHCORE_PUBKEY_LENGTH } from "./protocol.js";
+import {
+  bytesToHex,
+  hexToBytes,
+  MESHCORE_PUBKEY_LENGTH,
+} from "./protocol.js";
 import { pluginStateDir } from "./state-dir.js";
-import { resolveContactByPrefix } from "./contact-book.js";
+import {
+  getContactBookEntries,
+  onContactBookChange,
+  resolveContactByPrefix,
+} from "./contact-book.js";
 
 /**
  * SignedPlain (txtType === 2) direct-message payload layout, verified against
@@ -21,11 +29,16 @@ import { resolveContactByPrefix } from "./contact-book.js";
  * not a pubkey slice still has binding value because it lives inside the
  * pairwise-encrypted payload: a blind injector cannot observe it.
  *
- * @liamcottle/meshcore.js uses a non-fatal TextDecoder. Prefix bytes that are
- * not valid UTF-8 (e.g. >= 0x80 standing alone) become U+FFFD. U+FFFD re-
- * encodes to 3 bytes (EF BF BD), which breaks a naive re-encode->slice(4)
- * strip. The parser below detects U+FFFD in the prefix region and marks the
- * result lossy.
+ * @liamcottle/meshcore.js uses a non-fatal TextDecoder. Invalid prefix byte
+ * sequences are replaced with U+FFFD using WHATWG "maximal subpart" rules:
+ * a single U+FFFD can collapse up to 3 raw prefix bytes. U+FFFD re-encodes
+ * to 3 bytes (EF BF BD), which breaks a naive re-encode->slice(4) strip.
+ *
+ * The parser below detects U+FFFD in the prefix region and marks the result
+ * lossy. To guarantee real text is never dropped, each U+FFFD is counted as
+ * 3 raw prefix bytes. This may leave 1-2 spurious prefix-residue characters
+ * at the start of the returned text; callers must consult meshSecurity.lossy
+ * and must NOT promote lossy prefixes to extended identity.
  */
 
 const SIGNED_PLAIN_PREFIX_LENGTH = 4;
@@ -33,7 +46,8 @@ const UFFFD_BYTES = new Uint8Array([0xef, 0xbf, 0xbd]);
 
 export type SignedPlainParseResult = {
   text: string;
-  senderPrefixHex: string;
+  /** null when the prefix region was lossy; the artifacts are not a real prefix. */
+  senderPrefixHex: string | null;
   lossy: boolean;
 };
 
@@ -47,55 +61,66 @@ function startsWithUfffd(bytes: Uint8Array, offset: number): boolean {
 
 /**
  * Parse a SignedPlain DM payload that has already been decoded by meshcore.js
- * as a single string. Returns the message text, the best-effort hex of the
- * 4-byte sender prefix, and whether the prefix region was corrupted by the
- * library's lossy TextDecoder.
+ * as a single string. Returns the message text, the sender prefix hex (null
+ * when lossy), and whether the prefix region was corrupted by the library's
+ * non-fatal TextDecoder.
  *
  * For clean inputs the output text is byte-identical to the legacy
- * stripSignedPlainPrefix() behaviour.
+ * stripSignedPlainPrefix() behaviour. For lossy inputs, real text is never
+ * dropped, but 1-2 spurious prefix-residue characters may remain at the text
+ * start.
  */
 export function parseSignedPlainPayload(decoded: string): SignedPlainParseResult {
   const fullBytes = new TextEncoder().encode(decoded);
   let lossy = false;
   let pos = 0;
-  let prefixBytesConsumed = 0;
+  let rawBytesConsumed = 0;
 
-  // Consume exactly 4 wire-prefix bytes. U+FFFD replacements are 3 encoded
-  // bytes but represent only 1 original prefix byte.
-  while (prefixBytesConsumed < SIGNED_PLAIN_PREFIX_LENGTH && pos < fullBytes.length) {
+  // Consume exactly 4 raw prefix bytes. WHATWG maximal-subpart replacement
+  // means one U+FFFD may collapse up to 3 raw bytes; counting each U+FFFD as
+  // 3 raw bytes guarantees we never advance into the real text.
+  while (rawBytesConsumed < SIGNED_PLAIN_PREFIX_LENGTH && pos < fullBytes.length) {
     if (startsWithUfffd(fullBytes, pos)) {
       lossy = true;
       pos += UFFFD_BYTES.length;
+      rawBytesConsumed += UFFFD_BYTES.length;
     } else {
       pos += 1;
+      rawBytesConsumed += 1;
     }
-    prefixBytesConsumed += 1;
   }
-
-  // Best-effort sender prefix: the first 4 encoded bytes, or fewer if the
-  // payload is shorter. For lossy prefixes this is intentionally approximate.
-  const prefixByteCount = Math.min(SIGNED_PLAIN_PREFIX_LENGTH, fullBytes.length);
-  const senderPrefixHex = bytesToHex(fullBytes.slice(0, prefixByteCount)).toLowerCase();
 
   const textBytes = fullBytes.slice(pos);
   const text = new TextDecoder().decode(textBytes);
 
-  return { text, senderPrefixHex, lossy };
+  if (lossy) {
+    return { text, senderPrefixHex: null, lossy: true };
+  }
+
+  const prefixByteCount = Math.min(SIGNED_PLAIN_PREFIX_LENGTH, fullBytes.length);
+  const senderPrefixHex = bytesToHex(fullBytes.slice(0, prefixByteCount)).toLowerCase();
+  return { text, senderPrefixHex, lossy: false };
 }
 
-export type PrefixMatch = "pubkey-first4" | "pubkey-last4" | "none" | "unresolved";
+export type PrefixMatch =
+  | "pubkey-first4"
+  | "pubkey-last4"
+  | "none"
+  | "unresolved"
+  | "lossy";
 
 /**
  * Classify a 4-byte SignedPlain sender prefix against a resolved 32-byte
- * public key.
+ * public key. Lossy prefixes are classified as "lossy" and never grant
+ * extended identity.
  */
 export function classifySignedPlainPrefix(params: {
-  senderPrefixHex: string;
+  senderPrefixHex: string | null;
   publicKey: Uint8Array;
   lossy: boolean;
 }): PrefixMatch {
-  if (params.lossy) {
-    return "unresolved";
+  if (params.lossy || params.senderPrefixHex === null) {
+    return "lossy";
   }
   if (params.publicKey.length !== MESHCORE_PUBKEY_LENGTH) {
     return "unresolved";
@@ -119,16 +144,19 @@ export type PrefixConsistency =
 const MAX_PREFIX_OBSERVATIONS = 8;
 const MIN_OBSERVATIONS_FOR_CONSISTENCY = 3;
 
+const DEFAULT_ACCOUNT_ID = "default";
+
 type ContactObservationState = {
   observations: string[];
 };
 
 type IdentityBindingFileV1 = {
   version: 1;
-  observations: Record<string, ContactObservationState>;
+  observations: Record<string, Record<string, ContactObservationState>>;
 };
 
-const observations = new Map<string, ContactObservationState>();
+// Per-account observation storage, mirroring contact-book.ts isolation.
+const observationsByAccount = new Map<string, Map<string, ContactObservationState>>();
 let stateLoaded = false;
 let testIdentityBindingPath: string | undefined;
 
@@ -152,27 +180,52 @@ function atomicWriteJson(path: string, data: unknown): void {
   renameSync(tmpPath, path);
 }
 
+function getAccountMap(accountId: string): Map<string, ContactObservationState> {
+  let map = observationsByAccount.get(accountId);
+  if (!map) {
+    map = new Map();
+    observationsByAccount.set(accountId, map);
+  }
+  return map;
+}
+
+function pubkeyHexForState(publicKey: Uint8Array): string | undefined {
+  const hex = bytesToHex(publicKey).toLowerCase();
+  return hex.length === MESHCORE_PUBKEY_LENGTH * 2 ? hex : undefined;
+}
+
+function normalizeObservationEntry(entry: unknown): ContactObservationState | undefined {
+  if (!entry || typeof entry !== "object" || !Array.isArray((entry as ContactObservationState).observations)) {
+    return undefined;
+  }
+  const observations = (entry as ContactObservationState).observations.filter(
+    (o): o is string => typeof o === "string" && /^[0-9a-f]{8}$/iu.test(o),
+  );
+  if (observations.length === 0) return undefined;
+  return { observations: observations.slice(-MAX_PREFIX_OBSERVATIONS) };
+}
+
 function ensureLoaded(): void {
   if (stateLoaded) return;
   stateLoaded = true;
   try {
     const raw = JSON.parse(readFileSync(getIdentityBindingPath(), "utf8")) as unknown;
     if (
-      raw &&
-      typeof raw === "object" &&
-      (raw as Record<string, unknown>).version === 1 &&
-      typeof (raw as Record<string, unknown>).observations === "object"
+      !raw ||
+      typeof raw !== "object" ||
+      (raw as Record<string, unknown>).version !== 1 ||
+      typeof (raw as Record<string, unknown>).observations !== "object"
     ) {
-      const data = raw as IdentityBindingFileV1;
-      for (const [pubkeyHex, state] of Object.entries(data.observations)) {
-        if (
-          state &&
-          Array.isArray(state.observations) &&
-          state.observations.every((o) => typeof o === "string" && /^[0-9a-f]{8}$/iu.test(o))
-        ) {
-          observations.set(pubkeyHex.toLowerCase(), {
-            observations: state.observations.slice(-MAX_PREFIX_OBSERVATIONS),
-          });
+      return;
+    }
+    const data = raw as IdentityBindingFileV1;
+    for (const [accountId, accountObservations] of Object.entries(data.observations)) {
+      if (!accountObservations || typeof accountObservations !== "object") continue;
+      const map = getAccountMap(accountId);
+      for (const [pubkeyHex, entry] of Object.entries(accountObservations)) {
+        const normalized = normalizeObservationEntry(entry);
+        if (normalized) {
+          map.set(pubkeyHex.toLowerCase(), normalized);
         }
       }
     }
@@ -188,18 +241,16 @@ function persistObservations(): void {
       version: 1,
       observations: {},
     };
-    for (const [pubkeyHex, state] of observations) {
-      payload.observations[pubkeyHex] = { observations: state.observations };
+    for (const [accountId, map] of observationsByAccount) {
+      payload.observations[accountId] = {};
+      for (const [pubkeyHex, state] of map) {
+        payload.observations[accountId]![pubkeyHex] = { observations: state.observations };
+      }
     }
     atomicWriteJson(getIdentityBindingPath(), payload);
   } catch {
     // best-effort persistence
   }
-}
-
-function pubkeyHexForState(publicKey: Uint8Array): string | undefined {
-  const hex = bytesToHex(publicKey).toLowerCase();
-  return hex.length === MESHCORE_PUBKEY_LENGTH * 2 ? hex : undefined;
 }
 
 /**
@@ -229,68 +280,32 @@ export function derivePrefixConsistency(params: {
   return "constant-unknown";
 }
 
-/**
- * Record a valid SignedPlain prefix observation for a contact and return the
- * updated consistency classification. Only observations that carry binding
- * value are tracked: a prefix that matches a pubkey slice (first4/last4) or a
- * non-slice constant. "none" (contact resolved but prefix is neither slice nor
- * constant yet) is not stored.
- */
-export function recordPrefixObservation(params: {
+function readConsistency(params: {
   publicKey: Uint8Array;
-  senderPrefixHex: string;
-  prefixMatch: PrefixMatch;
+  accountId: string;
 }): PrefixConsistency {
   ensureLoaded();
-
-  if (params.prefixMatch === "unresolved") {
-    return readConsistency(params.publicKey);
-  }
-
   const hex = pubkeyHexForState(params.publicKey);
-  if (!hex) {
-    return "insufficient";
-  }
-
-  let state = observations.get(hex);
-  if (!state) {
-    state = { observations: [] };
-    observations.set(hex, state);
-  }
-
-  const normalizedPrefix = params.senderPrefixHex.toLowerCase();
-
-  // Store every observation that is not unresolved. Observations that match a
-  // pubkey slice are always bound to that contact; "none" observations may
-  // converge to constant-unknown if the sender uses a stable per-contact
-  // prefix, or may reveal a varying/spoofing sender.
-  state.observations.push(normalizedPrefix);
-  if (state.observations.length > MAX_PREFIX_OBSERVATIONS) {
-    state.observations = state.observations.slice(-MAX_PREFIX_OBSERVATIONS);
-  }
-  persistObservations();
-
-  return derivePrefixConsistency({ observations: state.observations, publicKey: params.publicKey });
-}
-
-function readConsistency(publicKey: Uint8Array): PrefixConsistency {
-  ensureLoaded();
-  const hex = pubkeyHexForState(publicKey);
   if (!hex) return "insufficient";
   return derivePrefixConsistency({
-    observations: observations.get(hex)?.observations ?? [],
-    publicKey,
+    observations: getAccountMap(params.accountId).get(hex)?.observations ?? [],
+    publicKey: params.publicKey,
   });
 }
 
 /**
  * Return the currently tracked constant prefix for a contact, if any.
+ * This reads the pre-observation window; call before recordPrefixObservation
+ * when resolving identityBinding so a contradicting prefix is detected.
  */
-export function getTrackedConstantPrefix(publicKey: Uint8Array): string | undefined {
+export function getTrackedConstantPrefix(
+  publicKey: Uint8Array,
+  accountId: string,
+): string | undefined {
   ensureLoaded();
   const hex = pubkeyHexForState(publicKey);
   if (!hex) return undefined;
-  const state = observations.get(hex);
+  const state = getAccountMap(accountId).get(hex);
   if (!state) return undefined;
   const consistency = derivePrefixConsistency({
     observations: state.observations,
@@ -307,26 +322,72 @@ export function getTrackedConstantPrefix(publicKey: Uint8Array): string | undefi
 }
 
 /**
+ * Record a valid SignedPlain prefix observation for a contact and return the
+ * updated consistency classification. Lossy and unresolved observations are
+ * ignored.
+ */
+export function recordPrefixObservation(params: {
+  publicKey: Uint8Array;
+  senderPrefixHex: string | null;
+  prefixMatch: PrefixMatch;
+  accountId: string;
+}): PrefixConsistency {
+  ensureLoaded();
+
+  if (params.prefixMatch === "lossy" || params.prefixMatch === "unresolved") {
+    return readConsistency({ publicKey: params.publicKey, accountId: params.accountId });
+  }
+
+  const hex = pubkeyHexForState(params.publicKey);
+  if (!hex) {
+    return "insufficient";
+  }
+
+  const map = getAccountMap(params.accountId);
+  let state = map.get(hex);
+  if (!state) {
+    state = { observations: [] };
+    map.set(hex, state);
+  }
+
+  const normalizedPrefix = params.senderPrefixHex?.toLowerCase() ?? "";
+
+  state.observations.push(normalizedPrefix);
+  if (state.observations.length > MAX_PREFIX_OBSERVATIONS) {
+    state.observations = state.observations.slice(-MAX_PREFIX_OBSERVATIONS);
+  }
+  persistObservations();
+
+  return derivePrefixConsistency({ observations: state.observations, publicKey: params.publicKey });
+}
+
+/**
  * Read the current consistency classification for a contact without mutating
  * state.
  */
-export function readPrefixConsistency(publicKey: Uint8Array): PrefixConsistency {
-  return readConsistency(publicKey);
+export function readPrefixConsistency(
+  publicKey: Uint8Array,
+  accountId: string,
+): PrefixConsistency {
+  return readConsistency({ publicKey, accountId });
 }
 
 /**
  * Read the stored observations for a contact without mutating state.
  */
-export function getPrefixObservationsForTests(publicKey: Uint8Array): string[] {
+export function getPrefixObservationsForTests(
+  publicKey: Uint8Array,
+  accountId: string,
+): string[] {
   ensureLoaded();
   const hex = pubkeyHexForState(publicKey);
   if (!hex) return [];
-  return [...(observations.get(hex)?.observations ?? [])];
+  return [...(getAccountMap(accountId).get(hex)?.observations ?? [])];
 }
 
 /** @internal Reset in-memory state for tests; does not delete the persisted file. */
 export function resetIdentityBindingStateForTests(): void {
-  observations.clear();
+  observationsByAccount.clear();
   stateLoaded = false;
 }
 
@@ -353,10 +414,14 @@ export type IdentityBinding = "extended" | "prefix-only" | "mismatch";
  * - "extended": signedPlain AND (prefixMatch is pubkey-last4 OR the tracked
  *   consistency is constant-unknown with >= 3 observations).
  * - "prefix-only": everything else.
+ *
+ * This function must be called with the PRE-observation tracked constant and
+ * consistency so that a contradicting prefix is reported as mismatch before
+ * it is recorded.
  */
 export function resolveIdentityBinding(params: {
   signedPlain: boolean;
-  senderPrefixHex: string;
+  senderPrefixHex: string | null;
   prefixMatch: PrefixMatch;
   consistency: PrefixConsistency;
   trackedConstantPrefix?: string;
@@ -365,7 +430,7 @@ export function resolveIdentityBinding(params: {
     return "prefix-only";
   }
 
-  if (params.prefixMatch === "unresolved") {
+  if (params.prefixMatch === "lossy" || params.prefixMatch === "unresolved") {
     return "prefix-only";
   }
 
@@ -375,7 +440,7 @@ export function resolveIdentityBinding(params: {
     params.consistency === "constant-unknown";
 
   if (hasConstant && params.trackedConstantPrefix !== undefined) {
-    if (params.senderPrefixHex.toLowerCase() !== params.trackedConstantPrefix.toLowerCase()) {
+    if ((params.senderPrefixHex?.toLowerCase() ?? "") !== params.trackedConstantPrefix.toLowerCase()) {
       return "mismatch";
     }
   }
@@ -392,12 +457,59 @@ export function resolveIdentityBinding(params: {
 
 /**
  * Format the concise one-line console summary emitted for every SignedPlain DM.
+ * Uses console.log (not the plugin logger) because README documents that
+ * logger.info is filtered from gateway.log; operators grep gateway.log for
+ * these lines post-install.
  */
 export function formatSignedPlainLogLine(params: {
-  prefixHex: string;
+  timestamp: string;
+  accountId: string;
+  prefixHex: string | null;
   prefixMatch: PrefixMatch;
   consistency: PrefixConsistency;
   binding: IdentityBinding;
+  lossy: boolean;
 }): string {
-  return `[meshcore] signedplain prefix=${params.prefixHex} match=${params.prefixMatch} consistency=${params.consistency} binding=${params.binding}`;
+  const prefix = params.prefixHex ?? "lossy";
+  return `[${params.timestamp}] [meshcore] [${params.accountId}] signedplain prefix=${prefix} lossy=${params.lossy} match=${params.prefixMatch} consistency=${params.consistency} binding=${params.binding}`;
+}
+
+/**
+ * Subscribe to contact-book changes and evict identity-binding observations
+ * when their contact is evicted. This keeps the binding store from growing
+ * unbounded when contactBookMaxEntries prunes stale advert contacts.
+ */
+let evictionListenerInstalled = false;
+export function ensureIdentityBindingEvictionListener(): void {
+  if (evictionListenerInstalled) return;
+  evictionListenerInstalled = true;
+  onContactBookChange((accountId) => {
+    ensureLoaded();
+    if (!accountId) {
+      // Without an account hint, evict any contact not present in any account.
+      for (const [obsAccountId, map] of observationsByAccount) {
+        const entries = getContactBookEntries(obsAccountId);
+        const present = new Set(
+          entries.map((e) => bytesToHex(e.publicKey).toLowerCase()),
+        );
+        for (const pubkeyHex of Array.from(map.keys())) {
+          if (!present.has(pubkeyHex)) {
+            map.delete(pubkeyHex);
+          }
+        }
+      }
+      persistObservations();
+      return;
+    }
+    const map = observationsByAccount.get(accountId);
+    if (!map) return;
+    const entries = getContactBookEntries(accountId);
+    const present = new Set(entries.map((e) => bytesToHex(e.publicKey).toLowerCase()));
+    for (const pubkeyHex of Array.from(map.keys())) {
+      if (!present.has(pubkeyHex)) {
+        map.delete(pubkeyHex);
+      }
+    }
+    persistObservations();
+  });
 }

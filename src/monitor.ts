@@ -12,6 +12,7 @@ import {
 } from "./contact-book.js";
 import {
   classifySignedPlainPrefix,
+  ensureIdentityBindingEvictionListener,
   formatSignedPlainLogLine,
   getTrackedConstantPrefix,
   parseSignedPlainPayload,
@@ -163,7 +164,7 @@ export function buildInboundMessage(params: {
   const isSignedPlain = txtType === 2 && !params.isGroup;
 
   let text = rawText;
-  let senderPrefixHex: string | undefined;
+  let senderPrefixHex: string | null = null;
   let lossy = false;
   if (isSignedPlain) {
     const parsed = parseSignedPlainPayload(rawText);
@@ -213,24 +214,28 @@ export function buildInboundMessage(params: {
 
   if (isSignedPlain && resolvedPubkey) {
     prefixMatch = classifySignedPlainPrefix({
-      senderPrefixHex: senderPrefixHex ?? "",
+      senderPrefixHex,
       publicKey: resolvedPubkey,
       lossy,
     });
-    consistency = recordPrefixObservation({
-      publicKey: resolvedPubkey,
-      senderPrefixHex: senderPrefixHex ?? "",
-      prefixMatch,
-    });
+    // Read the PRE-observation window so a contradicting prefix is detected
+    // before it poisons the consistency window.
+    consistency = readPrefixConsistency(resolvedPubkey, params.accountId);
+    const trackedConstantPrefix = getTrackedConstantPrefix(resolvedPubkey, params.accountId);
     identityBinding = resolveIdentityBinding({
       signedPlain: true,
-      senderPrefixHex: senderPrefixHex ?? "",
+      senderPrefixHex,
       prefixMatch,
       consistency,
-      trackedConstantPrefix: getTrackedConstantPrefix(resolvedPubkey),
+      trackedConstantPrefix,
     });
-  } else if (!isSignedPlain) {
-    identityBinding = "prefix-only";
+    // Now record the observation so the window self-heals over time.
+    recordPrefixObservation({
+      publicKey: resolvedPubkey,
+      senderPrefixHex,
+      prefixMatch,
+      accountId: params.accountId,
+    });
   }
 
   return {
@@ -246,8 +251,10 @@ export function buildInboundMessage(params: {
     meshSecurity: {
       txtType,
       signedPlain: isSignedPlain,
-      senderPrefixHex,
+      senderPrefixHex: senderPrefixHex ?? undefined,
+      lossy: isSignedPlain ? lossy : undefined,
       prefixMatch,
+      consistency,
       identityBinding,
     },
   };
@@ -329,6 +336,10 @@ export function monitorMeshcoreProvider(
       return bytesToHex(bytes.slice(0, 6)).toLowerCase();
     }
 
+    // Keep the identity-binding observation store bounded: evict entries
+    // whose contacts are pruned by contactBookMaxEntries.
+    ensureIdentityBindingEvictionListener();
+
     const contactSync = createThrottledContactSync({
       getContacts: async () => handle.connection.getContacts(),
       rememberContact,
@@ -370,24 +381,15 @@ export function monitorMeshcoreProvider(
             accountId: account.accountId,
           });
           if (inbound && inbound.meshSecurity.signedPlain) {
-            const dmPrefixHex = bytesToHex(
-              (message.pubKeyPrefix instanceof Uint8Array
-                ? message.pubKeyPrefix
-                : Array.isArray(message.pubKeyPrefix)
-                  ? new Uint8Array(message.pubKeyPrefix as number[])
-                  : new Uint8Array(0)
-              ).slice(0, 6),
-            ).toLowerCase();
-            const resolvedPubkey = resolvePubkeyFromDmPrefix(dmPrefixHex, account.accountId);
-            const consistency = resolvedPubkey
-              ? readPrefixConsistency(resolvedPubkey)
-              : "insufficient";
             console.log(
               formatSignedPlainLogLine({
-                prefixHex: inbound.meshSecurity.senderPrefixHex ?? "",
+                timestamp: new Date(inbound.timestamp).toISOString(),
+                accountId: account.accountId,
+                prefixHex: inbound.meshSecurity.senderPrefixHex ?? null,
                 prefixMatch: inbound.meshSecurity.prefixMatch ?? "unresolved",
-                consistency,
+                consistency: inbound.meshSecurity.consistency ?? "insufficient",
                 binding: inbound.meshSecurity.identityBinding,
+                lossy: inbound.meshSecurity.lossy ?? false,
               }),
             );
           }

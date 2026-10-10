@@ -9,7 +9,7 @@ import type {
   OpenClawConfig,
 } from "openclaw/plugin-sdk/config-contracts";
 import type { BaseProbeResult } from "openclaw/plugin-sdk/core";
-import type { IdentityBinding, PrefixMatch } from "./identity-binding.js";
+import type { IdentityBinding, PrefixConsistency, PrefixMatch } from "./identity-binding.js";
 
 export type MeshcoreGroupConfig = {
   requireMention?: boolean;
@@ -95,10 +95,14 @@ export type MeshcoreMessageSecurity = {
   txtType: number;
   /** True when the message arrived as a SignedPlain (txtType === 2) DM. */
   signedPlain: boolean;
-  /** Hex of the 4-byte SignedPlain sender_prefix, when signedPlain is true. */
+  /** Hex of the 4-byte SignedPlain sender_prefix, when signedPlain is true and not lossy. */
   senderPrefixHex?: string;
+  /** True when the SignedPlain prefix region was corrupted by the library's non-fatal decoder. */
+  lossy?: boolean;
   /** How the sender_prefix relates to the resolved contact's full pubkey. */
   prefixMatch?: PrefixMatch;
+  /** Tracked prefix consistency for the resolved contact (pre-observation window). */
+  consistency?: PrefixConsistency;
   /** Identity binding classification for this message. */
   identityBinding: IdentityBinding;
 };
