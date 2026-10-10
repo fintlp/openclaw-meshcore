@@ -225,6 +225,54 @@ describe("meshcore inbound behavior", () => {
     expect(sendReply).not.toHaveBeenCalled();
   });
 
+  it("exposes meshSecurity in the SDK ChannelStructuredContext payload", async () => {
+    const sendReply = vi.fn(async () => undefined);
+    const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+    setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+
+    const meshSecurity = {
+      txtType: 2,
+      signedPlain: true,
+      senderPrefixHex: "41424344",
+      lossy: false,
+      prefixMatch: "pubkey-last4" as const,
+      consistency: "insufficient" as const,
+      identityBinding: "extended" as const,
+    };
+
+    await handleMeshcoreInbound({
+      message: createMessage({
+        senderNodeId: "!aabbccdd1122",
+        target: "!aabbccdd1122",
+        meshSecurity,
+      }),
+      account: createAccount({
+        config: {
+          dmPolicy: "allowlist",
+          allowFrom: ["!aabbccdd1122"],
+          groupPolicy: "disabled",
+          groupAllowFrom: [],
+          channels: [0],
+        },
+      }),
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      sendReply,
+    });
+
+    expect(inboundRunMock).toHaveBeenCalledTimes(1);
+    const turn = inboundRunMock.mock.calls[0][0].adapter.resolveTurn();
+    expect(turn.ctxPayload.channelStructuredContext).toEqual([
+      {
+        label: "MeshCore Message Security",
+        source: "meshcore",
+        type: "mesh_security",
+        payload: meshSecurity,
+      },
+    ]);
+    expect(sendReply).not.toHaveBeenCalled();
+  });
+
   it("drops DM from non-allowlisted sender when dmPolicy=allowlist", async () => {
     const runtime = createRuntimeEnv();
     await handleMeshcoreInbound({

@@ -218,23 +218,25 @@ export function buildInboundMessage(params: {
       publicKey: resolvedPubkey,
       lossy,
     });
-    // Read the PRE-observation window so a contradicting prefix is detected
-    // before it poisons the consistency window.
-    consistency = readPrefixConsistency(resolvedPubkey, params.accountId);
+    // Read the PRE-observation tracked constant so a contradicting prefix is
+    // flagged before it poisons the consistency window.
     const trackedConstantPrefix = getTrackedConstantPrefix(resolvedPubkey, params.accountId);
+    // Record the observation first; the meshSecurity consistency field then
+    // reflects the post-observation window while mismatch detection used the
+    // pre-observation constant above.
+    recordPrefixObservation({
+      publicKey: resolvedPubkey,
+      senderPrefixHex,
+      prefixMatch,
+      accountId: params.accountId,
+    });
+    consistency = readPrefixConsistency(resolvedPubkey, params.accountId);
     identityBinding = resolveIdentityBinding({
       signedPlain: true,
       senderPrefixHex,
       prefixMatch,
       consistency,
       trackedConstantPrefix,
-    });
-    // Now record the observation so the window self-heals over time.
-    recordPrefixObservation({
-      publicKey: resolvedPubkey,
-      senderPrefixHex,
-      prefixMatch,
-      accountId: params.accountId,
     });
   }
 

@@ -70,23 +70,54 @@ describe("identity binding", () => {
       expect(result.lossy).toBe(false);
     });
 
-    it("detects a lossy prefix with bytes >= 0x80 and recovers best-effort text", () => {
+    it("detects a lossy prefix with bytes >= 0x80 and never drops real text", () => {
       // 4 invalid standalone bytes followed by ASCII text.
       const decoded = "\uFFFD\uFFFD\uFFFD\uFFFDhello";
       const result = parseSignedPlainPayload(decoded);
       expect(result.lossy).toBe(true);
-      expect(result.text).toBe("hello");
-      // Best-effort prefix is the first 4 encoded bytes; each U+FFFD encodes
-      // to 3 bytes, so the snapshot is partial.
-      expect(result.senderPrefixHex).toBe("efbfbdef");
+      expect(result.senderPrefixHex).toBeNull();
+      // WHATWG maximal-subpart collapse may leave 1-2 spurious prefix-residue
+      // replacement characters, but the real ASCII text is never dropped.
+      expect(result.text).toMatch(/hello$/);
     });
 
-    it("detects a partially lossy prefix", () => {
+    it("detects a partially lossy prefix and never drops real text", () => {
       // "AB" + invalid + invalid + "hello"
       const decoded = "AB\uFFFD\uFFFDhello";
       const result = parseSignedPlainPayload(decoded);
       expect(result.lossy).toBe(true);
-      expect(result.text).toBe("hello");
+      expect(result.senderPrefixHex).toBeNull();
+      expect(result.text).toMatch(/hello$/);
+    });
+
+    it("collapses E0 A0 41 42 prefix and preserves adjacent real text", () => {
+      // E0 A0 is an incomplete 3-byte UTF-8 sequence; TextDecoder replaces it
+      // with U+FFFD and leaves 0x41 0x42 ('AB') as real text bytes. The parser
+      // counts the replacement as 3 raw prefix bytes and consumes one real text
+      // byte to reach 4, leaving a single prefix-residue character.
+      const raw = new Uint8Array([
+        0xe0, 0xa0, 0x41, 0x42, ...Array.from("hello").map((c) => c.charCodeAt(0)),
+      ]);
+      const decoded = new TextDecoder().decode(raw);
+      const result = parseSignedPlainPayload(decoded);
+      expect(result.lossy).toBe(true);
+      expect(result.senderPrefixHex).toBeNull();
+      expect(result.text).toMatch(/hello$/);
+    });
+
+    it("collapses F0 90 80 41 prefix and preserves adjacent real text", () => {
+      // F0 90 80 is an incomplete 4-byte UTF-8 sequence; TextDecoder replaces
+      // the first 3 bytes with U+FFFD and leaves 0x41 ('A') as an ASCII byte.
+      // The parser consumes the replacement (3 raw bytes) plus A (1 byte) to
+      // reach the 4-prefix boundary, so the real text starts intact.
+      const raw = new Uint8Array([
+        0xf0, 0x90, 0x80, 0x41, ...Array.from("realtext").map((c) => c.charCodeAt(0)),
+      ]);
+      const decoded = new TextDecoder().decode(raw);
+      const result = parseSignedPlainPayload(decoded);
+      expect(result.lossy).toBe(true);
+      expect(result.senderPrefixHex).toBeNull();
+      expect(result.text).toBe("realtext");
     });
 
     it("handles a payload shorter than 4 bytes", () => {
@@ -222,14 +253,15 @@ describe("identity binding", () => {
           publicKey: samplePublicKey,
           senderPrefixHex: first4,
           prefixMatch: "pubkey-first4",
+          accountId,
         });
       }
-      expect(getPrefixObservationsForTests(samplePublicKey)).toEqual([
+      expect(getPrefixObservationsForTests(samplePublicKey, accountId)).toEqual([
         first4,
         first4,
         first4,
       ]);
-      expect(readPrefixConsistency(samplePublicKey)).toBe("pubkey-first4");
+      expect(readPrefixConsistency(samplePublicKey, accountId)).toBe("pubkey-first4");
     });
 
     it("records last4 observations and derives pubkey-last4", () => {
@@ -238,9 +270,10 @@ describe("identity binding", () => {
           publicKey: samplePublicKey,
           senderPrefixHex: last4,
           prefixMatch: "pubkey-last4",
+          accountId,
         });
       }
-      expect(readPrefixConsistency(samplePublicKey)).toBe("pubkey-last4");
+      expect(readPrefixConsistency(samplePublicKey, accountId)).toBe("pubkey-last4");
     });
 
     it("records a constant-unknown prefix after 3 identical none observations", () => {
@@ -249,9 +282,10 @@ describe("identity binding", () => {
           publicKey: samplePublicKey,
           senderPrefixHex: unknownPrefix,
           prefixMatch: "none",
+          accountId,
         });
       }
-      expect(readPrefixConsistency(samplePublicKey)).toBe("constant-unknown");
+      expect(readPrefixConsistency(samplePublicKey, accountId)).toBe("constant-unknown");
     });
 
     it("records none observations and converges to constant-unknown", () => {
@@ -259,8 +293,9 @@ describe("identity binding", () => {
         publicKey: samplePublicKey,
         senderPrefixHex: unknownPrefix,
         prefixMatch: "none",
+        accountId,
       });
-      expect(getPrefixObservationsForTests(samplePublicKey)).toEqual([unknownPrefix]);
+      expect(getPrefixObservationsForTests(samplePublicKey, accountId)).toEqual([unknownPrefix]);
     });
 
     it("records a repeated none observation once constant-unknown is established", () => {
@@ -269,15 +304,17 @@ describe("identity binding", () => {
           publicKey: samplePublicKey,
           senderPrefixHex: unknownPrefix,
           prefixMatch: "none",
+          accountId,
         });
       }
-      expect(getPrefixObservationsForTests(samplePublicKey)).toHaveLength(3);
+      expect(getPrefixObservationsForTests(samplePublicKey, accountId)).toHaveLength(3);
       recordPrefixObservation({
         publicKey: samplePublicKey,
         senderPrefixHex: unknownPrefix,
         prefixMatch: "none",
+        accountId,
       });
-      expect(getPrefixObservationsForTests(samplePublicKey)).toHaveLength(4);
+      expect(getPrefixObservationsForTests(samplePublicKey, accountId)).toHaveLength(4);
     });
 
     it("does not record unresolved observations", () => {
@@ -285,8 +322,20 @@ describe("identity binding", () => {
         publicKey: samplePublicKey,
         senderPrefixHex: "efbfbd",
         prefixMatch: "unresolved",
+        accountId,
       });
-      expect(getPrefixObservationsForTests(samplePublicKey)).toEqual([]);
+      expect(getPrefixObservationsForTests(samplePublicKey, accountId)).toEqual([]);
+    });
+
+    it("does not record lossy observations", () => {
+      recordPrefixObservation({
+        publicKey: samplePublicKey,
+        senderPrefixHex: null,
+        prefixMatch: "lossy",
+        accountId,
+      });
+      expect(getPrefixObservationsForTests(samplePublicKey, accountId)).toEqual([]);
+      expect(readPrefixConsistency(samplePublicKey, accountId)).toBe("insufficient");
     });
 
     it("transitions from insufficient to constant-unknown to varying", () => {
@@ -295,6 +344,7 @@ describe("identity binding", () => {
           publicKey: samplePublicKey,
           senderPrefixHex: unknownPrefix,
           prefixMatch: "none",
+          accountId,
         }),
       ).toBe("insufficient");
       expect(
@@ -302,6 +352,7 @@ describe("identity binding", () => {
           publicKey: samplePublicKey,
           senderPrefixHex: unknownPrefix,
           prefixMatch: "none",
+          accountId,
         }),
       ).toBe("insufficient");
       expect(
@@ -309,6 +360,7 @@ describe("identity binding", () => {
           publicKey: samplePublicKey,
           senderPrefixHex: unknownPrefix,
           prefixMatch: "none",
+          accountId,
         }),
       ).toBe("constant-unknown");
       expect(
@@ -316,6 +368,7 @@ describe("identity binding", () => {
           publicKey: samplePublicKey,
           senderPrefixHex: last4,
           prefixMatch: "pubkey-last4",
+          accountId,
         }),
       ).toBe("varying");
     });
@@ -326,9 +379,10 @@ describe("identity binding", () => {
           publicKey: samplePublicKey,
           senderPrefixHex: first4,
           prefixMatch: "pubkey-first4",
+          accountId,
         });
       }
-      expect(getPrefixObservationsForTests(samplePublicKey)).toHaveLength(8);
+      expect(getPrefixObservationsForTests(samplePublicKey, accountId)).toHaveLength(8);
     });
 
     it("persists observations to disk and reloads them", () => {
@@ -351,6 +405,32 @@ describe("identity binding", () => {
         last4,
       ]);
     });
+
+    it("keeps per-account histories isolated", () => {
+      const accountA = "account-a";
+      const accountB = "account-b";
+      for (let i = 0; i < 3; i++) {
+        recordPrefixObservation({
+          publicKey: samplePublicKey,
+          senderPrefixHex: last4,
+          prefixMatch: "pubkey-last4",
+          accountId: accountA,
+        });
+      }
+      expect(readPrefixConsistency(samplePublicKey, accountA)).toBe("pubkey-last4");
+      expect(readPrefixConsistency(samplePublicKey, accountB)).toBe("insufficient");
+      expect(getPrefixObservationsForTests(samplePublicKey, accountB)).toEqual([]);
+
+      resetIdentityBindingStateForTests();
+      const raw = JSON.parse(readFileSync(identityBindingPath, "utf8"));
+      const pubkeyHex = bytesToHex(samplePublicKey).toLowerCase();
+      expect(raw.observations[accountA][pubkeyHex].observations).toEqual([
+        last4,
+        last4,
+        last4,
+      ]);
+      expect(raw.observations[accountB]).toBeUndefined();
+    });
   });
 
   describe("resolveIdentityBinding", () => {
@@ -371,6 +451,17 @@ describe("identity binding", () => {
           signedPlain: true,
           senderPrefixHex: "efbfbd",
           prefixMatch: "unresolved",
+          consistency: "insufficient",
+        }),
+      ).toBe("prefix-only");
+    });
+
+    it("returns prefix-only for lossy signed-plain prefixes", () => {
+      expect(
+        resolveIdentityBinding({
+          signedPlain: true,
+          senderPrefixHex: null,
+          prefixMatch: "lossy",
           consistency: "insufficient",
         }),
       ).toBe("prefix-only");
@@ -513,9 +604,10 @@ describe("identity binding", () => {
           publicKey: samplePublicKey,
           senderPrefixHex: unknownPrefix,
           prefixMatch: "none",
+          accountId,
         });
       }
-      expect(getTrackedConstantPrefix(samplePublicKey)).toBe(unknownPrefix);
+      expect(getTrackedConstantPrefix(samplePublicKey, accountId)).toBe(unknownPrefix);
     });
 
     it("returns the constant prefix when consistency is pubkey-first4", () => {
@@ -524,13 +616,14 @@ describe("identity binding", () => {
           publicKey: samplePublicKey,
           senderPrefixHex: first4,
           prefixMatch: "pubkey-first4",
+          accountId,
         });
       }
-      expect(getTrackedConstantPrefix(samplePublicKey)).toBe(first4);
+      expect(getTrackedConstantPrefix(samplePublicKey, accountId)).toBe(first4);
     });
 
     it("returns undefined when consistency is insufficient", () => {
-      expect(getTrackedConstantPrefix(samplePublicKey)).toBeUndefined();
+      expect(getTrackedConstantPrefix(samplePublicKey, accountId)).toBeUndefined();
     });
 
     it("returns undefined when consistency is varying", () => {
@@ -538,18 +631,21 @@ describe("identity binding", () => {
         publicKey: samplePublicKey,
         senderPrefixHex: first4,
         prefixMatch: "pubkey-first4",
+        accountId,
       });
       recordPrefixObservation({
         publicKey: samplePublicKey,
         senderPrefixHex: last4,
         prefixMatch: "pubkey-last4",
+        accountId,
       });
       recordPrefixObservation({
         publicKey: samplePublicKey,
         senderPrefixHex: first4,
         prefixMatch: "pubkey-first4",
+        accountId,
       });
-      expect(getTrackedConstantPrefix(samplePublicKey)).toBeUndefined();
+      expect(getTrackedConstantPrefix(samplePublicKey, accountId)).toBeUndefined();
     });
   });
 });

@@ -492,7 +492,11 @@ export function rememberContact(
     lastHeardAt: nowSeconds,
     source: entry.source ?? existing?.source ?? "advert",
     discoveredAt: existing?.discoveredAt ?? entry.discoveredAt ?? nowSeconds,
-    identityBasis: existing?.identityBasis ?? entry.identityBasis ?? "unknown",
+    identityBasis:
+      existing?.identityBasis === "firmware-advert-verified" ||
+      entry.identityBasis === "firmware-advert-verified"
+        ? "firmware-advert-verified"
+        : (existing?.identityBasis ?? entry.identityBasis ?? "unknown"),
   };
 
   map.set(hex, merged);

@@ -324,9 +324,62 @@ describe("monitorMeshcoreProvider", () => {
       txtType: 2,
       signedPlain: true,
       senderPrefixHex: "41424344",
+      lossy: false,
       prefixMatch: "pubkey-last4",
+      consistency: "insufficient",
       identityBinding: "extended",
     });
+  });
+
+  it("buildInboundMessage detects mismatch then recovers to prefix-only while varying", () => {
+    const publicKey = hexToBytes(
+      "aabbccdd11223344556677889900aabbccddeeff00112233445566778899aabb",
+    );
+    rememberContact(
+      {
+        publicKey,
+        advName: "SignedPeer",
+        lastAdvert: 1700000000,
+        identityBasis: "firmware-advert-verified",
+      },
+      "default",
+    );
+
+    function build(text: string) {
+      return buildInboundMessage({
+        message: {
+          pubKeyPrefix: publicKey.slice(0, 6),
+          pathLen: 0,
+          txtType: 2,
+          senderTimestamp: 1700000000,
+          text,
+        },
+        handle: createConnection(),
+        isGroup: false,
+        accountId: "default",
+      });
+    }
+
+    const constantPrefix = "deadbeef";
+    const contradictingPrefix = "cafebabe";
+
+    const msg1 = build(`${constantPrefix}one`);
+    expect(msg1!.meshSecurity.identityBinding).toBe("prefix-only");
+    const msg2 = build(`${constantPrefix}two`);
+    expect(msg2!.meshSecurity.identityBinding).toBe("prefix-only");
+    const msg3 = build(`${constantPrefix}three`);
+    expect(msg3!.meshSecurity.identityBinding).toBe("extended");
+    expect(msg3!.meshSecurity.consistency).toBe("constant-unknown");
+
+    const msg4 = build(`${contradictingPrefix}four`);
+    expect(msg4!.meshSecurity.identityBinding).toBe("mismatch");
+    // Consistency is read AFTER recording, so the 4th observation makes the
+    // window varying even though mismatch was detected against the prior constant.
+    expect(msg4!.meshSecurity.consistency).toBe("varying");
+
+    const msg5 = build(`${contradictingPrefix}five`);
+    expect(msg5!.meshSecurity.identityBinding).toBe("prefix-only");
+    expect(msg5!.meshSecurity.consistency).toBe("varying");
   });
 
   it("classifies SignedPlain prefix as pubkey-last4 when contact is known", async () => {

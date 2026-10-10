@@ -434,12 +434,10 @@ export function resolveIdentityBinding(params: {
     return "prefix-only";
   }
 
-  const hasConstant =
-    params.consistency === "pubkey-first4" ||
-    params.consistency === "pubkey-last4" ||
-    params.consistency === "constant-unknown";
-
-  if (hasConstant && params.trackedConstantPrefix !== undefined) {
+  // Mismatch detection relies on the PRE-observation tracked constant. Once a
+  // contradicting prefix is recorded the window may immediately become varying,
+  // so we must flag the contradiction whenever a prior constant exists.
+  if (params.trackedConstantPrefix !== undefined) {
     if ((params.senderPrefixHex?.toLowerCase() ?? "") !== params.trackedConstantPrefix.toLowerCase()) {
       return "mismatch";
     }
