@@ -6,6 +6,21 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## 2026.10.5 — 2026-10-11
+
+**Fixes**
+
+- **OpenClaw 2026.10.1+ compatibility: migrated off removed SDK compat
+  aliases.** `channel-lifecycle`, `channel-message`, and `infra-runtime` were
+  retired in OpenClaw 2026.10.1 (October 1 SDK subpath window); the plugin
+  failed to load on current stable. All four affected imports
+  (`createAccountStatusSink`, `defineChannelMessageAdapter`,
+  `createMessageReceiptFromOutboundResults`/`MessageReceipt`,
+  `sanitizeForPlainText`) now come from the canonical
+  `openclaw/plugin-sdk/channel-outbound`, which exports them on both pre- and
+  post-2026.10 hosts — verified by exports-map resolution of all 27 SDK
+  subpaths in the built artifact against openclaw@2026.10.1.
+
 ## 2026.10.4 — 2026-10-11
 
 **Features**

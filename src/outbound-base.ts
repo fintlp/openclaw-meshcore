@@ -1,4 +1,4 @@
-import { sanitizeForPlainText } from "openclaw/plugin-sdk/infra-runtime";
+import { sanitizeForPlainText } from "openclaw/plugin-sdk/channel-outbound";
 import { MESHCORE_WIRE_CHUNK_LIMIT } from "./send.js";
 
 /**
