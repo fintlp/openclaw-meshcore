@@ -6,6 +6,32 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## 2026.10.4 — 2026-10-11
+
+**Features**
+
+- **Inbound SignedPlain identity hardening** (#31, cycle 2): the plugin now
+  captures and classifies the 4-byte sender prefix on SignedPlain (txtType 2)
+  DMs — `pubkey-first4` / `pubkey-last4` / `constant-unknown` / `varying` —
+  and exposes an `identityBinding` verdict (`extended` / `prefix-only` /
+  `mismatch`) plus trust provenance in the agent-visible message envelope
+  (via `ChannelStructuredContext`). Per-account v2 identity store with
+  automatic legacy v1 migration; lossy frames never poison the observation
+  window. Groundwork for cryptographic sender consistency on mesh DMs.
+- **Outbound SignedPlain support** (#40): new config-gated
+  `outboundSignedPlain` (default **off**) sends DMs as txtType 2 and reserves
+  4 bytes of chunk budget for the sender-prefix field. Live-proven capable
+  (signed DM received on MeshOS); reliability across the air path is still
+  being characterized — enable for testing, not production.
+
+**Docs**
+
+- Node signing oracle **live-proven** (CMD_DEVICE_SIGN: Ed25519 signature over
+  a known message verified against the node pubkey; tamper control correctly
+  fails) — README security model + AGENT-SCOPING tier-3 foundation note.
+- Changelog-driven publish flow: this file now feeds `clawhub package
+  publish --changelog` (docs/PUBLISHING.md).
+
 ## 2026.10.3 — 2026-10-09
 
 **Features**
