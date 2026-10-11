@@ -414,6 +414,10 @@
           "logInboundMessageContent": {
             "type": "boolean"
           },
+          "outboundSignedPlain": {
+            "default": false,
+            "type": "boolean"
+          },
           "advertLat": {
             "type": "number",
             "minimum": -90,
@@ -855,6 +859,10 @@
                 "logInboundMessageContent": {
                   "type": "boolean"
                 },
+                "outboundSignedPlain": {
+                  "default": false,
+                  "type": "boolean"
+                },
                 "advertLat": {
                   "type": "number",
                   "minimum": -90,
@@ -965,6 +973,10 @@
         "logInboundMessageContent": {
           "label": "Log Inbound Message Content",
           "help": "When true, Gateway logs include up to 80 characters of inbound mesh text. Default is false (metadata only: sender, target, message id, length)."
+        },
+        "outboundSignedPlain": {
+          "label": "Outbound SignedPlain",
+          "help": "When true, outbound direct messages are sent as SignedPlain (txtType 2) instead of Plain. The effective text chunk limit is reduced by 4 bytes to reserve space for the sender-prefix field. Group sends always stay Plain. Default false."
         },
         "advertLat": {
           "label": "Advertised Latitude",

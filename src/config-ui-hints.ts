@@ -45,6 +45,10 @@ export const meshcoreChannelConfigUiHints = {
     label: "Log Inbound Message Content",
     help: "When true, Gateway logs include up to 80 characters of inbound mesh text. Default is false (metadata only: sender, target, message id, length).",
   },
+  outboundSignedPlain: {
+    label: "Outbound SignedPlain",
+    help: "When true, outbound direct messages are sent as SignedPlain (txtType 2) instead of Plain. The effective text chunk limit is reduced by 4 bytes to reserve space for the sender-prefix field. Group sends always stay Plain. Default false.",
+  },
   advertLat: {
     label: "Advertised Latitude",
     help: "Override the node's advertised latitude in decimal degrees (-90..90). Both Advertised Latitude and Advertised Longitude must be set to apply; difference must exceed 1e-5° from the node's current position.",

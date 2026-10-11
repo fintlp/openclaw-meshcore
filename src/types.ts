@@ -61,6 +61,8 @@ export type MeshcoreAccountConfig = {
   sendPacing?: MeshcoreSendPacingConfig;
   /** When true, inbound info logs include up to 80 characters of message text (default: metadata only). */
   logInboundMessageContent?: boolean;
+  /** When true, outbound DMs are sent as SignedPlain (txtType 2) instead of Plain (txtType 0). Default false. Group sends always stay Plain. */
+  outboundSignedPlain?: boolean;
   /** Override the node's advertised latitude, decimal degrees (-90..90). Both advertLat and advertLon must be set to apply. */
   advertLat?: number;
   /** Override the node's advertised longitude, decimal degrees (-180..180). Both advertLat and advertLon must be set to apply. */
