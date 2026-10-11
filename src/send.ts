@@ -41,8 +41,12 @@ function raceSendTextMessage(
   pubkey: Uint8Array,
   chunk: string,
   signal: AbortSignal | undefined,
+  txtType?: number,
 ): Promise<{ expectedAckCrc?: number; estTimeout?: number }> {
-  const sendPromise = connection.sendTextMessage(pubkey, chunk);
+  const sendPromise =
+    txtType !== undefined
+      ? connection.sendTextMessage(pubkey, chunk, txtType)
+      : connection.sendTextMessage(pubkey, chunk);
   if (!signal) {
     return sendPromise;
   }
@@ -112,6 +116,15 @@ type SendMeshcoreResult = {
 // Empirical (issue #5): node firmware 1.16 truncates text frames at 127 bytes
 // on the wire; chunking larger silently loses each chunk's tail at the joins.
 export const MESHCORE_WIRE_CHUNK_LIMIT = 127;
+
+// SignedPlain (txtType 2) payloads begin with a 4-byte sender_prefix field
+// inside the wire text frame. The library passes the supplied text through to
+// sendCommandSendTxtMsg unchanged; whether the node firmware prepends the
+// prefix automatically or expects the caller to reserve the first 4 bytes is
+// not statically provable. Shrink the effective text budget conservatively.
+// TODO: verify with a live SignedPlain DM that the recipient parses the prefix
+// correctly (issue #40).
+const MESHCORE_SIGNED_PLAIN_PREFIX_LENGTH = 4;
 
 function recordMeshcoreOutboundActivity(accountId: string): void {
   try {
@@ -246,10 +259,16 @@ export async function sendMessageMeshcore(
   // The firmware drops the TCP companion session when a text frame exceeds
   // 127 bytes (live-proven 2026-10-09), so values above the wire cap are
   // clamped even if an operator sets them.
-  const chunkLimit = Math.min(
+  const plainChunkLimit = Math.min(
     account.config.textChunkLimit ?? MESHCORE_WIRE_CHUNK_LIMIT,
     MESHCORE_WIRE_CHUNK_LIMIT,
   );
+  const outboundSignedPlain = account.config.outboundSignedPlain === true;
+  // SignedPlain payloads embed a 4-byte sender_prefix in the wire text field.
+  // Reserve that space from the text budget to avoid firmware truncation.
+  const chunkLimit = outboundSignedPlain
+    ? Math.max(1, plainChunkLimit - MESHCORE_SIGNED_PLAIN_PREFIX_LENGTH)
+    : plainChunkLimit;
   const chunkNumbering = account.config.chunkNumbering ?? true;
   const chunks = chunkTextWithNumbering(text, chunkLimit, chunkNumbering);
   if (chunks.length === 0) {
@@ -278,6 +297,9 @@ export async function sendMessageMeshcore(
     throw new Error(`Invalid MeshCore DM target: ${target}`);
   }
   const pubkey = nodeIdToPubkey(nodeId, account.accountId);
+
+  // Only DMs may be signed; groups are receive-only and stay Plain.
+  const txtType = outboundSignedPlain ? 2 : undefined;
 
   const pacingConfig = resolveSendPacingConfig(
     account.config.sendPacing as Record<string, unknown> | undefined,
@@ -339,6 +361,7 @@ export async function sendMessageMeshcore(
             pubkey,
             chunk,
             abortController.signal,
+            txtType,
           );
           lastMessageId = String(response.expectedAckCrc ?? response.estTimeout ?? Date.now());
           ctx.afterFrame(chunkBytes, response.expectedAckCrc);

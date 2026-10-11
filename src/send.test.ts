@@ -148,6 +148,105 @@ describe("sendMessageMeshcore", () => {
     expect(sendTextMessage).not.toHaveBeenCalled();
   });
 
+  it("defaults to Plain (no txtType) when outboundSignedPlain is not set", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    await sendMessageMeshcore(TEST_NODE_ID, "hello mesh", {
+      cfg: createConfig(),
+    });
+
+    expect(sendTextMessage).toHaveBeenCalledTimes(1);
+    expect(sendTextMessage).toHaveBeenCalledWith(expect.any(Uint8Array), "hello mesh");
+  });
+
+  it("defaults to Plain (no txtType) when outboundSignedPlain is explicitly false", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    await sendMessageMeshcore(TEST_NODE_ID, "hello mesh", {
+      cfg: createConfig({ outboundSignedPlain: false }),
+    });
+
+    expect(sendTextMessage).toHaveBeenCalledTimes(1);
+    expect(sendTextMessage).toHaveBeenCalledWith(expect.any(Uint8Array), "hello mesh");
+  });
+
+  it("sends DMs with txtType 2 when outboundSignedPlain is enabled", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    await sendMessageMeshcore(TEST_NODE_ID, "hello mesh", {
+      cfg: createConfig({ outboundSignedPlain: true }),
+    });
+
+    expect(sendTextMessage).toHaveBeenCalledTimes(1);
+    expect(sendTextMessage).toHaveBeenCalledWith(expect.any(Uint8Array), "hello mesh", 2);
+  });
+
+  it("rejects group targets even when outboundSignedPlain is enabled", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    await expect(
+      sendMessageMeshcore("channel:0", "broadcast forbidden", {
+        cfg: createConfig({ outboundSignedPlain: true }),
+      }),
+    ).rejects.toThrow(/receive-only/);
+
+    expect(sendTextMessage).not.toHaveBeenCalled();
+  });
+
+  it("shrinks the chunk limit by the SignedPlain prefix length", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    await sendMessageMeshcore(TEST_NODE_ID, "a".repeat(10), {
+      cfg: createConfig({ textChunkLimit: 10, outboundSignedPlain: true }),
+    });
+
+    expect(sendTextMessage).toHaveBeenCalledTimes(2);
+    expect(sendTextMessage).toHaveBeenNthCalledWith(
+      1,
+      expect.any(Uint8Array),
+      "a".repeat(6),
+      2,
+    );
+    expect(sendTextMessage).toHaveBeenNthCalledWith(
+      2,
+      expect.any(Uint8Array),
+      "a".repeat(4),
+      2,
+    );
+  });
+
+  it("does not shrink the chunk limit when SignedPlain is disabled", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    await sendMessageMeshcore(TEST_NODE_ID, "a".repeat(10), {
+      cfg: createConfig({ textChunkLimit: 10, outboundSignedPlain: false }),
+    });
+
+    expect(sendTextMessage).toHaveBeenCalledTimes(1);
+    expect(sendTextMessage).toHaveBeenCalledWith(expect.any(Uint8Array), "a".repeat(10));
+  });
+
+  it("passes txtType 2 through multi-chunk SignedPlain sends", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    await sendMessageMeshcore(TEST_NODE_ID, "a".repeat(20), {
+      cfg: createConfig({ textChunkLimit: 10, outboundSignedPlain: true }),
+    });
+
+    // Effective limit is 10 - 4 = 6 bytes, so 20 bytes -> 4 chunks.
+    expect(sendTextMessage).toHaveBeenCalledTimes(4);
+    for (const call of sendTextMessage.mock.calls) {
+      expect(call[2]).toBe(2);
+    }
+  });
+
   it("marks outbound text before sendTextMessage so local echo is dropped", async () => {
     const sendTextMessage = vi.fn(async (_pubkey: Uint8Array, text: string) => {
       expect(isOutboundEcho(text)).toBe(true);

@@ -391,6 +391,10 @@
     "logInboundMessageContent": {
       "type": "boolean"
     },
+    "outboundSignedPlain": {
+      "default": false,
+      "type": "boolean"
+    },
     "advertLat": {
       "type": "number",
       "minimum": -90,
@@ -832,6 +836,10 @@
           "logInboundMessageContent": {
             "type": "boolean"
           },
+          "outboundSignedPlain": {
+            "default": false,
+            "type": "boolean"
+          },
           "advertLat": {
             "type": "number",
             "minimum": -90,
@@ -1262,6 +1270,10 @@
           "additionalProperties": false
         },
         "logInboundMessageContent": {
+          "type": "boolean"
+        },
+        "outboundSignedPlain": {
+          "default": false,
           "type": "boolean"
         },
         "advertLat": {
