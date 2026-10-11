@@ -133,6 +133,13 @@ regardless of binding; `extended` may shorten the challenge but must not
 replace it. A challenge-response cycle remains the documented follow-up for
 issue #31.
 
+The node's signing oracle is live-proven (2026-10-11): the companion radio
+produces real Ed25519 signatures over arbitrary data (`CMD_DEVICE_SIGN`),
+verified locally against its own pubkey with a tamper negative control. That
+is the our-side foundation for the deferred challenge-response cycle — the
+missing half is a peer that can sign (companion clients cannot; room servers
+can).
+
 ## Recommended baseline (what we run)
 
 - `dmPolicy: "pairing"`, approve by hand.
