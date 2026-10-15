@@ -209,6 +209,11 @@ function waitForEvent<T>(
  */
 function createSelfInfoFetcher(connection: TCPConnection, timeoutMs: number): {
   fetch: () => Promise<Record<string, unknown>>;
+  /**
+   * Remove the pre-connect early listener when fetch() will never run
+   * (e.g. the TCP connect failed). Safe to call anytime (#22).
+   */
+  dispose: () => void;
 } {
   let captured: Record<string, unknown> | undefined;
   let settled = false;
@@ -227,6 +232,7 @@ function createSelfInfoFetcher(connection: TCPConnection, timeoutMs: number): {
   };
 
   return {
+    dispose: cleanup,
     fetch: () => {
       return new Promise<Record<string, unknown>>((resolve, reject) => {
         if (captured) {
@@ -471,40 +477,49 @@ export async function connectMeshcoreDevice(params: MeshcoreConnectOptions): Pro
   // firmware push is captured (race hypothesis #1).
   const selfInfoFetcher = createSelfInfoFetcher(connection, handshakeTimeoutMs);
 
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error(`MeshCore TCP connect timeout (${connectTimeoutMs}ms)`));
-    }, connectTimeoutMs);
-    const onConnected = () => {
-      clearTimeout(timer);
-      cleanup();
-      handle.connected = true;
-      // Fan-out SendConfirmed pushes to any pacing gate waiting on this account
-      // without interfering with other listeners (advert/DM handlers, etc.).
-      attachSendConfirmedHandler(connection, params.accountId);
-      resolve();
-    };
-    const onError = (error: unknown) => {
-      clearTimeout(timer);
-      cleanup();
-      reject(error instanceof Error ? error : new Error(String(error)));
-    };
-    const onClose = () => {
-      clearTimeout(timer);
-      cleanup();
-      reject(new Error("MeshCore TCP socket closed before connected"));
-    };
-    const cleanup = () => {
-      connection.off("connected", onConnected);
-      connection.off("error", onError);
-      connection.off("disconnected", onClose);
-    };
-    connection.on("connected", onConnected);
-    connection.on("error", onError);
-    connection.on("disconnected", onClose);
-    void connection.connect();
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`MeshCore TCP connect timeout (${connectTimeoutMs}ms)`));
+      }, connectTimeoutMs);
+      const onConnected = () => {
+        clearTimeout(timer);
+        cleanup();
+        handle.connected = true;
+        // Fan-out SendConfirmed pushes to any pacing gate waiting on this account
+        // without interfering with other listeners (advert/DM handlers, etc.).
+        attachSendConfirmedHandler(connection, params.accountId);
+        resolve();
+      };
+      const onError = (error: unknown) => {
+        clearTimeout(timer);
+        cleanup();
+        reject(error instanceof Error ? error : new Error(String(error)));
+      };
+      const onClose = () => {
+        clearTimeout(timer);
+        cleanup();
+        reject(new Error("MeshCore TCP socket closed before connected"));
+      };
+      const cleanup = () => {
+        connection.off("connected", onConnected);
+        connection.off("error", onError);
+        connection.off("disconnected", onClose);
+      };
+      connection.on("connected", onConnected);
+      connection.on("error", onError);
+      connection.on("disconnected", onClose);
+      void connection.connect();
+    });
+  } catch (error) {
+    // The connect promise rejected before fetch() could ever run: remove the
+    // pre-connect SelfInfo listener so it does not leak on the discarded
+    // connection (#22). try/catch rather than try/finally so the success path
+    // keeps the early-capture listener attached until fetch() settles.
+    selfInfoFetcher.dispose();
+    throw error;
+  }
 
   // Each connect-time fetch has its own fault-isolated try/catch + timeout so a
   // lost response never forfeits a sibling fetch (issue #20). All failures are

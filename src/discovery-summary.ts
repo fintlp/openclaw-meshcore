@@ -170,6 +170,10 @@ function scheduleThrottledWrite(accountId?: string): void {
  * window. Called on channel stop so a final contact-book change inside the
  * window is not lost to the shutdown (#37). Safe to call anytime; a no-op
  * when nothing is pending.
+ *
+ * Note: the throttle state is process-global, so one account's stop flushes
+ * every account's pending writes too — benign (the writes are idempotent,
+ * merely earlier than the 60s window) and preferable to losing them.
  */
 export function flushPendingDiscoverySummaryWrites(): void {
   if (throttleTimer) {
