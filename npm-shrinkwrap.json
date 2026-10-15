@@ -10,6 +10,7 @@
       "license": "MIT",
       "dependencies": {
         "@liamcottle/meshcore.js": "1.15.0",
+        "@noble/curves": "1.9.7",
         "zod": "4.6.5"
       },
       "devDependencies": {
