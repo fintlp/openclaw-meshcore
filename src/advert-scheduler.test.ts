@@ -3,7 +3,11 @@ import type { TCPConnection } from "@liamcottle/meshcore.js";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startAdvertScheduler, type AdvertSchedulerConfig } from "./advert-scheduler.js";
+import {
+  shouldSkipConnectAdvert,
+  startAdvertScheduler,
+  type AdvertSchedulerConfig,
+} from "./advert-scheduler.js";
 import {
   readNodeStatusSnapshot,
   resetNodeStatusStateForTests,
@@ -313,5 +317,37 @@ describe("advert scheduler", () => {
 
     release?.();
     await vi.advanceTimersByTimeAsync(0);
+  });
+});
+
+describe("shouldSkipConnectAdvert (#37 S3 stale-guard coverage)", () => {
+  const NOW = new Date("2026-10-15T12:00:00Z").getTime();
+
+  it("skips when the last advert is still fresh relative to the interval", () => {
+    const lastAdvertAt = new Date(NOW - 2 * 60 * 60 * 1000).toISOString(); // 2h ago
+    expect(shouldSkipConnectAdvert(lastAdvertAt, 6, NOW)).toBe(true);
+  });
+
+  it("does not skip when the last advert is older than the interval", () => {
+    const lastAdvertAt = new Date(NOW - 7 * 60 * 60 * 1000).toISOString(); // 7h ago
+    expect(shouldSkipConnectAdvert(lastAdvertAt, 6, NOW)).toBe(false);
+  });
+
+  it("does not skip at the exact interval boundary", () => {
+    const lastAdvertAt = new Date(NOW - 6 * 60 * 60 * 1000).toISOString(); // exactly 6h ago
+    expect(shouldSkipConnectAdvert(lastAdvertAt, 6, NOW)).toBe(false);
+  });
+
+  it("does not skip without a snapshot timestamp", () => {
+    expect(shouldSkipConnectAdvert(undefined, 6, NOW)).toBe(false);
+  });
+
+  it("does not skip when the interval is disabled (0)", () => {
+    const lastAdvertAt = new Date(NOW - 60 * 1000).toISOString(); // 1min ago
+    expect(shouldSkipConnectAdvert(lastAdvertAt, 0, NOW)).toBe(false);
+  });
+
+  it("does not skip on an unparseable timestamp", () => {
+    expect(shouldSkipConnectAdvert("not-a-date", 6, NOW)).toBe(false);
   });
 });

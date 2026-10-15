@@ -38,6 +38,29 @@ function hoursToMs(hours: number): number {
   return hours * 60 * 60 * 1000;
 }
 
+/**
+ * Connect-advert staleness guard (#36): advertOnConnect fires on every
+ * reconnect, but on a flaky link that would spam the mesh. Skip the connect
+ * advert when the last successful advert is still fresh relative to the
+ * configured interval. When there is no snapshot timestamp, the interval is
+ * disabled (0), or the timestamp is unparseable, freshness cannot be proven
+ * and the advert goes out.
+ */
+export function shouldSkipConnectAdvert(
+  lastAdvertAt: string | undefined,
+  intervalHours: number,
+  nowMs: number = Date.now(),
+): boolean {
+  if (!lastAdvertAt || intervalHours <= 0) {
+    return false;
+  }
+  const lastMs = new Date(lastAdvertAt).getTime();
+  if (!Number.isFinite(lastMs)) {
+    return false;
+  }
+  return nowMs - lastMs < hoursToMs(intervalHours);
+}
+
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, context: string): Promise<T> {
   return Promise.race([
     promise,

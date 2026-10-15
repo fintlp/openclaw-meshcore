@@ -2,7 +2,7 @@ import { Constants } from "@liamcottle/meshcore.js";
 import { resolveLoggerBackedRuntime } from "openclaw/plugin-sdk/extension-shared";
 import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/status-helpers";
 import { resolveMeshcoreAccount } from "./accounts.js";
-import { startAdvertScheduler } from "./advert-scheduler.js";
+import { shouldSkipConnectAdvert, startAdvertScheduler } from "./advert-scheduler.js";
 import { createAccountStatusSink } from "./channel-api.js";
 import {
   contactHasMissingMetadata,
@@ -28,6 +28,7 @@ import {
   createThrottledContactSync,
   syncContactsFromNode,
 } from "./contact-sync.js";
+import { flushPendingDiscoverySummaryWrites } from "./discovery-summary.js";
 import {
   connectMeshcoreDevice,
   disconnectMeshcoreDevice,
@@ -362,6 +363,9 @@ export function monitorMeshcoreProvider(
       settled = true;
       contactSync.dispose();
       advertScheduler?.dispose();
+      // Flush pending throttled discovery-summary writes so the final
+      // contact-book change of this session is not lost to the stop.
+      flushPendingDiscoverySummaryWrites();
       for (const unsubscribe of unsubscribers) {
         unsubscribe();
       }
@@ -734,17 +738,16 @@ export function monitorMeshcoreProvider(
           // last advert is still fresh relative to the configured interval so
           // we do not spam the mesh on flaky connections.
           const snapshot = readNodeStatusSnapshot(account.accountId);
-          const lastAdvertAt = snapshot?.lastAdvertAt;
           const intervalHours = account.config.advertIntervalHours ?? 0;
-          if (lastAdvertAt && intervalHours > 0) {
+          const lastAdvertAt = snapshot?.lastAdvertAt;
+          if (shouldSkipConnectAdvert(lastAdvertAt, intervalHours)) {
+            // The guard only skips when lastAdvertAt is defined and parseable.
             const elapsedHours =
-              (Date.now() - new Date(lastAdvertAt).getTime()) / (60 * 60 * 1000);
-            if (elapsedHours < intervalHours) {
-              logger.info(
-                `[${account.accountId}] connect advert skipped (last advert ${elapsedHours.toFixed(1)}h ago, interval ${intervalHours}h)`,
-              );
-              return;
-            }
+              (Date.now() - new Date(lastAdvertAt!).getTime()) / (60 * 60 * 1000);
+            logger.info(
+              `[${account.accountId}] connect advert skipped (last advert ${elapsedHours.toFixed(1)}h ago, interval ${intervalHours}h)`,
+            );
+            return;
           }
           await advertScheduler!.sendAdvert();
         } catch (error) {
