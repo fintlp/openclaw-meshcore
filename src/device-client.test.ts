@@ -9,6 +9,7 @@ import {
   clearSendConfirmedStateForTests,
   connectMeshcoreDevice,
   disconnectMeshcoreDevice,
+  getMeshcoreDevice,
   waitForSendConfirmed,
 } from "./device-client.js";
 import {
@@ -18,7 +19,7 @@ import {
 } from "./node-status.js";
 
 const fakeMode = vi.hoisted(() => ({
-  mode: "full" as "full" | "no-self-info" | "sync-push",
+  mode: "full" as "full" | "no-self-info" | "sync-push" | "connect-error",
   selfInfoAdvLat: 0,
   selfInfoAdvLon: 0,
   setAdvertLatLongShouldFail: false,
@@ -28,6 +29,12 @@ vi.mock("@liamcottle/meshcore.js", async (importOriginal) => {
   const { EventEmitter } = await import("node:events");
   const original = await importOriginal<typeof import("@liamcottle/meshcore.js")>();
 
+  // Mock fidelity note: this fake extends node:events EventEmitter, whose
+  // emit() invokes listeners SYNCHRONOUSLY. The real meshcore.js connection
+  // dispatches listener callbacks via setTimeout(fn, 0). Test correctness
+  // holds under both models because what matters is listener presence at
+  // emit-call time — but do not read a passing test here as proof that real
+  // firmware pushes are zero-latency (#22).
   class FakeTCPConnection extends EventEmitter {
     constructor(
       public host: string,
@@ -37,6 +44,12 @@ vi.mock("@liamcottle/meshcore.js", async (importOriginal) => {
     }
 
     async connect() {
+      if (fakeMode.mode === "connect-error") {
+        // Simulate a TCP-level connect failure (refused/unreachable): the
+        // socket errors without ever emitting "connected".
+        this.emit("error", new Error("connect ECONNREFUSED"));
+        return;
+      }
       // Emit synchronously so the connect promise resolves immediately.
       this.emit("connected");
       if (fakeMode.mode === "sync-push") {
@@ -295,6 +308,28 @@ describe("connectMeshcoreDevice numeric response code handshake", () => {
     } finally {
       await disconnectMeshcoreDevice("acct-sync-push");
     }
+  });
+
+  it("removes the pre-connect SelfInfo listener when the TCP connect fails (#22)", async () => {
+    fakeMode.mode = "connect-error";
+    await expect(
+      connectMeshcoreDevice({
+        accountId: "acct-connect-error",
+        host: "127.0.0.1",
+        port: 5000,
+      }),
+    ).rejects.toThrow("ECONNREFUSED");
+
+    // The failed handle stays registered until the next attempt replaces it;
+    // its connection must NOT still carry the fetcher's early SelfInfo
+    // listener (the leak the reviewer flagged: fetch() never ran, so without
+    // the dispose-on-failure path nothing ever removed it).
+    const handle = getMeshcoreDevice("acct-connect-error");
+    expect(handle).toBeDefined();
+    const connection = handle!.connection as unknown as EventEmitter;
+    expect(connection.listenerCount(Constants.ResponseCodes.SelfInfo)).toBe(0);
+
+    await disconnectMeshcoreDevice("acct-connect-error");
   });
 
   it("isolates a lost SelfInfo response so DeviceInfo, contacts, channels and battery still populate (issue #20)", async () => {
