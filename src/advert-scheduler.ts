@@ -20,11 +20,18 @@ export type AdvertSchedulerDeps = {
 };
 
 export type AdvertScheduler = {
-  /** Send one advert immediately, regardless of config. Returns true on success. */
-  sendAdvert: (scope?: AdvertScope) => Promise<boolean>;
+  /**
+   * Send one advert immediately, regardless of config. Returns true on success.
+   * `trigger` tags the log line with the send path (#38: connect vs interval
+   * vs manual sends were indistinguishable in logs, which made an interval
+   * send look like a stale-guard bypass).
+   */
+  sendAdvert: (scope?: AdvertScope, trigger?: AdvertTrigger) => Promise<boolean>;
   /** Stop the recurring advert timer. */
   dispose: () => void;
 };
+
+export type AdvertTrigger = "connect" | "interval" | "manual";
 
 const ADVERT_SEND_TIMEOUT_MS = 5_000;
 
@@ -89,7 +96,10 @@ export function startAdvertScheduler(deps: AdvertSchedulerDeps): AdvertScheduler
   let intervalTimer: ReturnType<typeof setInterval> | null = null;
   let sending = false;
 
-  async function sendAdvert(scope: AdvertScope = config.advertScope): Promise<boolean> {
+  async function sendAdvert(
+    scope: AdvertScope = config.advertScope,
+    trigger: AdvertTrigger = "manual",
+  ): Promise<boolean> {
     if (sending) {
       return false;
     }
@@ -103,7 +113,7 @@ export function startAdvertScheduler(deps: AdvertSchedulerDeps): AdvertScheduler
         `${scope} advert send`,
       );
       const nowIso = new Date().toISOString();
-      log(`[${accountId}] sent ${scope} advert`);
+      log(`[${accountId}] sent ${scope} advert (${trigger})`);
       updateNodeStatusOps({ lastAdvertAt: nowIso, advertScope: scope }, accountId);
       return true;
     } catch (error) {
@@ -122,13 +132,13 @@ export function startAdvertScheduler(deps: AdvertSchedulerDeps): AdvertScheduler
         log(`[${accountId}] scheduled advert skipped (previous send still in flight)`);
         return;
       }
-      void sendAdvert();
+      void sendAdvert(undefined, "interval");
     }, hoursToMs(config.advertIntervalHours));
   }
 
   return {
-    sendAdvert: async (scope?: AdvertScope) => {
-      return await sendAdvert(scope ?? config.advertScope);
+    sendAdvert: async (scope?: AdvertScope, trigger?: AdvertTrigger) => {
+      return await sendAdvert(scope ?? config.advertScope, trigger ?? "manual");
     },
     dispose: () => {
       if (intervalTimer) {

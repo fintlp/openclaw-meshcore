@@ -141,7 +141,9 @@ channels: {
 > unless you have a concrete reason to announce yourself mesh-wide, and
 > keep intervals long. The node-status snapshot records `lastAdvertAt` and
 > `advertScope` so you (and your agent) can audit how often the gateway is
-> advertising.
+> advertising. Every send, skip, and failure is also logged to gateway.log
+> with its trigger (`connect` / `interval` / `manual`) — advert state never
+> changes over the air invisibly.
 
 ## Group monitoring (digest mode)
 

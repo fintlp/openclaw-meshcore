@@ -729,7 +729,10 @@ export function monitorMeshcoreProvider(
         advertIntervalHours: account.config.advertIntervalHours ?? 0,
         advertScope: account.config.advertScope ?? "zero-hop",
       },
-      log: (message) => logger.info(message),
+      // console.log, not logger.info: the child logger's info lines never
+      // reach gateway.log (issue #14 pattern, verified in #38) — adverts
+      // change over-the-air state and must be auditable.
+      log: (message) => console.log(message),
     });
     if (account.config.advertOnConnect) {
       void (async () => {
@@ -744,14 +747,16 @@ export function monitorMeshcoreProvider(
             // The guard only skips when lastAdvertAt is defined and parseable.
             const elapsedHours =
               (Date.now() - new Date(lastAdvertAt!).getTime()) / (60 * 60 * 1000);
-            logger.info(
+            // console.log: guard decisions are airtime evidence (#38) and the
+            // child logger's info lines never reach gateway.log.
+            console.log(
               `[${account.accountId}] connect advert skipped (last advert ${elapsedHours.toFixed(1)}h ago, interval ${intervalHours}h)`,
             );
             return;
           }
-          await advertScheduler!.sendAdvert();
+          await advertScheduler!.sendAdvert(undefined, "connect");
         } catch (error) {
-          logger.info(
+          console.error(
             `[${account.accountId}] connect advert failed: ${error instanceof Error ? error.message : String(error)}`,
           );
         }

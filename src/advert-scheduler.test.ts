@@ -66,7 +66,22 @@ describe("advert scheduler", () => {
 
     expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(1);
     expect(connection.sendFloodAdvert).not.toHaveBeenCalled();
-    expect(logs.some((line) => line.includes("sent zero-hop advert"))).toBe(true);
+    expect(logs.some((line) => line.includes("sent zero-hop advert (manual)"))).toBe(true);
+  });
+
+  it("tags the log line with the connect trigger when given (#38)", async () => {
+    const connection = makeConnection();
+    const scheduler = startAdvertScheduler({
+      connection,
+      accountId,
+      config: makeConfig(),
+      log: (message) => logs.push(message),
+    });
+
+    await scheduler.sendAdvert(undefined, "connect");
+
+    expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(1);
+    expect(logs.some((line) => line.includes("sent zero-hop advert (connect)"))).toBe(true);
   });
 
   it("sends a flood advert when scoped to flood", async () => {
@@ -286,6 +301,23 @@ describe("advert scheduler", () => {
     // Third interval can now fire a new advert.
     vi.advanceTimersByTime(60 * 60 * 1000);
     expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(2);
+  });
+
+  it("tags interval-triggered sends in the log line (#38)", async () => {
+    vi.useFakeTimers();
+    const connection = makeConnection();
+    startAdvertScheduler({
+      connection,
+      accountId,
+      config: makeConfig({ advertIntervalHours: 1 }),
+      log: (message) => logs.push(message),
+    });
+
+    // Async advance so the send's resolution microtasks flush between ticks.
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+
+    expect(connection.sendZeroHopAdvert).toHaveBeenCalledTimes(1);
+    expect(logs.some((line) => line.includes("sent zero-hop advert (interval)"))).toBe(true);
   });
 
   it("does not double-fire when sendAdvert is called while a scheduled advert is in-flight", async () => {
