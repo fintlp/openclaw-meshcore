@@ -22,8 +22,11 @@ describe("advert scheduler", () => {
   beforeEach(() => {
     const dir = mkdtempSync(join(tmpdir(), "meshcore-advert-scheduler-"));
     nodeStatusPath = join(dir, "node-status.json");
-    setNodeStatusPathForTests(nodeStatusPath);
+    // Reset BEFORE setting the path override: reset clears the override, so
+    // the reverse order silently falls back to the shared vitest-state dir
+    // and leaks state between tests (#38 M1 debugging).
     resetNodeStatusStateForTests();
+    setNodeStatusPathForTests(nodeStatusPath);
     sent.length = 0;
     logs.length = 0;
   });

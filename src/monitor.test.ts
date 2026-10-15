@@ -26,6 +26,8 @@ import {
   readNodeStatusSnapshot,
   resetNodeStatusStateForTests,
   setNodeStatusPathForTests,
+  updateNodeStatusOps,
+  writeNodeStatusSnapshot,
 } from "./node-status.js";
 import { bytesToHex, hexToBytes } from "./protocol.js";
 import type { CoreConfig } from "./types.js";
@@ -183,13 +185,16 @@ describe("monitorMeshcoreProvider", () => {
     contactSyncScheduleMock.mockClear();
     resetPositionResyncStateForTests();
     const dir = mkdtempSync(join(tmpdir(), "meshcore-monitor-"));
+    // Reset BEFORE setting path overrides: reset*StateForTests clears the
+    // override, so the reverse order silently falls back to the shared
+    // vitest-state dir and leaks state between tests (#38 M1 debugging).
+    resetContactBookForTests();
+    resetIdentityBindingStateForTests();
+    resetNodeStatusStateForTests();
     setContactBookPathForTests(join(dir, "contacts.json"));
     setGroupLogPathForTests(join(dir, "group-log.jsonl"));
     setNodeStatusPathForTests(join(dir, "node-status.json"));
     setIdentityBindingPathForTests(join(dir, "identity-bindings.json"));
-    resetContactBookForTests();
-    resetIdentityBindingStateForTests();
-    resetNodeStatusStateForTests();
     const { getMeshcoreRuntime } = await import("./runtime.js");
     getMeshcoreRuntime.mockReturnValue(createRuntime());
     resolveMeshcoreAccountMock.mockReturnValue(createResolvedAccount());
@@ -238,6 +243,108 @@ describe("monitorMeshcoreProvider", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     abortController.abort();
 
+    await expect(monitorPromise).resolves.toEqual({ stop: expect.any(Function) });
+  });
+
+  function makeSelfInfo() {
+    return {
+      type: 1,
+      txPower: 20,
+      maxTxPower: 22,
+      publicKey: new Uint8Array(32).fill(2),
+      advLat: 0,
+      advLon: 0,
+      reserved: new Uint8Array(0),
+      manualAddContacts: 0,
+      radioFreq: 868,
+      radioBw: 125000,
+      radioSf: 7,
+      radioCr: 8,
+      name: "testnode",
+    };
+  }
+
+  function advertCapableHandle() {
+    const handle = createConnection();
+    const sendZeroHopAdvert = vi.fn().mockResolvedValue(undefined);
+    (handle.connection as unknown as Record<string, unknown>).sendZeroHopAdvert =
+      sendZeroHopAdvert;
+    return { handle, sendZeroHopAdvert };
+  }
+
+  it("routes the connect-advert skip line through console.log, not the child logger (#38 M1)", async () => {
+    // Fresh lastAdvertAt relative to a 6h interval: the guard must skip — and
+    // the skip line must reach gateway.log via console.*, the exact premise of
+    // #38. A revert to logger.info makes this test fail (console spy sees
+    // nothing), which is the silent-regression the review flagged.
+    const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    writeNodeStatusSnapshot(
+      makeSelfInfo(),
+      { connectionState: "connected", since: Date.now(), reconnectCount: 1 },
+      "default",
+    );
+    updateNodeStatusOps(
+      { lastAdvertAt: new Date().toISOString(), advertScope: "zero-hop" },
+      "default",
+    );
+
+    const account = createResolvedAccount();
+    resolveMeshcoreAccountMock.mockReturnValue(
+      createResolvedAccount({
+        config: { ...account.config, advertOnConnect: true, advertIntervalHours: 6 },
+      }),
+    );
+    const { handle, sendZeroHopAdvert } = advertCapableHandle();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+
+    const abortController = new AbortController();
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      abortSignal: abortController.signal,
+    });
+
+    await vi.waitFor(() => {
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("connect advert skipped"),
+      );
+    });
+    expect(sendZeroHopAdvert).not.toHaveBeenCalled();
+
+    abortController.abort();
+    await expect(monitorPromise).resolves.toEqual({ stop: expect.any(Function) });
+  });
+
+  it("routes the connect-advert send line through console.log with the (connect) trigger (#38 M1)", async () => {
+    // No snapshot: the guard cannot prove freshness, so the connect advert
+    // fires — and the send line must carry the (connect) trigger tag through
+    // console.*.
+    const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const account = createResolvedAccount();
+    resolveMeshcoreAccountMock.mockReturnValue(
+      createResolvedAccount({
+        config: { ...account.config, advertOnConnect: true, advertIntervalHours: 6 },
+      }),
+    );
+    const { handle, sendZeroHopAdvert } = advertCapableHandle();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+
+    const abortController = new AbortController();
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      abortSignal: abortController.signal,
+    });
+
+    await vi.waitFor(() => {
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("sent zero-hop advert (connect)"),
+      );
+    });
+    expect(sendZeroHopAdvert).toHaveBeenCalledTimes(1);
+
+    abortController.abort();
     await expect(monitorPromise).resolves.toEqual({ stop: expect.any(Function) });
   });
 
