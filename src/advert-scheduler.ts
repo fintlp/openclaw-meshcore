@@ -118,7 +118,7 @@ export function startAdvertScheduler(deps: AdvertSchedulerDeps): AdvertScheduler
       return true;
     } catch (error) {
       log(
-        `[${accountId}] ${scope} advert send failed: ${error instanceof Error ? error.message : String(error ?? "no response (Err)")}`,
+        `[${accountId}] ${scope} advert send failed (${trigger}): ${error instanceof Error ? error.message : String(error ?? "no response (Err)")}`,
       );
       return false;
     } finally {
