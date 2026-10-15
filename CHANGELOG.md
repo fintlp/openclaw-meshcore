@@ -6,6 +6,56 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## 2026.10.6 — 2026-10-15
+
+**Features**
+
+- **Ed25519 challenge-response verification machinery** (#31, cycle 3): the
+  verifier half of the tier-3 challenge-response design —
+  `verifyEd25519Signature` (length-guarded, **strict RFC 8032** verification
+  with `zip215: false`, after adversarial review proved noble's cofactored
+  default accepts small-order-key forgeries), canonical single-use
+  challenges (domain separator + 16-byte nonce + timestamp + verifier-pubkey
+  binding), and `verifyChallengeResponse` with a ±10 min freshness window.
+  Proven by 16 known-answer/tamper/forgery tests and a maintenance-window
+  self-test against the node's signing oracle. Intentionally not wired into
+  the inbound DM path yet — no signing-capable peer exists today.
+
+**Fixes**
+
+- **Advert log lines now reach gateway.log** (#38): scheduler send/skip/fail
+  lines were wired to the plugin child logger, which never reached
+  gateway.log; they now route via console.*, and every send carries a
+  trigger tag (`connect` / `interval` / `manual`) so scheduled sends are
+  distinguishable from connect sends. Failure lines carry the trigger too.
+- **V1 contact-book migration no longer writes a stale cross-account
+  discovery summary** (#37): migration persisted with an accountId-less
+  change event, producing a permanently stale `meshcore-discovery.json` on
+  multi-account installs.
+- **Pre-connect SelfInfo listener disposed on TCP-connect failure** (#22):
+  the fetcher's early listener no longer leaks on discarded connections
+  after refused or timed-out connects.
+- **Discovery summary flushes on channel stop** (#37): pending throttled
+  writes are flushed during cleanup instead of being lost to shutdown.
+- **State files pretty-printed uniformly** (#37): contact book and identity
+  bindings now match node-status and discovery-summary formatting.
+
+**Tooling / tests**
+
+- openclaw devDependency exact-pinned at 2026.10.1; @noble/curves added as an
+  exact-pinned direct dependency (1.9.7).
+- Test infrastructure: node-status path override is now reset *before* being
+  set in the monitor and advert-scheduler test hooks, eliminating cross-test
+  state leakage through the shared vitest-state file.
+- Regression pins: console-routing spies for the advert log path (#38 M1),
+  connect-failure listener-count test (#22), V1-migration stale-summary
+  test (#37), connect-advert stale-guard unit tests (#37).
+
+**Docs**
+
+- USAGE.md: discovery-summary throttle semantics; advert send/skip/fail
+  audit trail with trigger tags.
+
 ## 2026.10.5 — 2026-10-11
 
 **Fixes**
