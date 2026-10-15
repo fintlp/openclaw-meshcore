@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,6 +11,7 @@ import {
 } from "./contact-book.js";
 import {
   ensureDiscoverySummarySync,
+  flushPendingDiscoverySummaryWrites,
   readDiscoverySummary,
   resetDiscoverySummaryStateForTests,
   setDiscoverySummaryPathForTests,
@@ -261,6 +262,78 @@ describe("discovery summary", () => {
     expect(summaryB.contacts[0].name).toBe("NodeB");
 
     cleanupPerAccountDiscoveryFiles();
+  });
+
+  it("V1 contact-book migration does not write a stale cross-account summary (#37)", () => {
+    vi.useFakeTimers();
+    // Multi-account install with a legacy V1 cache file: migration must
+    // persist the upgraded v2 file WITHOUT emitting a contact-book change —
+    // every migrated row lands in the legacy bucket, so an event here could
+    // only carry accountId=undefined, which used to schedule a cross-account
+    // meshcore-discovery.json that nothing ever refreshed.
+    setDiscoverySummaryPathForTests(undefined);
+    cleanupPerAccountDiscoveryFiles();
+    const crossAccountPath = `${pluginStateDir()}/meshcore-discovery.json`;
+    if (existsSync(crossAccountPath)) {
+      unlinkSync(crossAccountPath);
+    }
+
+    const legacyHex =
+      "aabbccdd11223344556677889900aabbccddeeff00112233445566778899aabb";
+    writeFileSync(
+      contactBookPath,
+      JSON.stringify([{ publicKeyHex: legacyHex, name: "LegacyNode" }]),
+    );
+
+    setDiscoverySummaryThrottleMsForTests(100);
+    ensureDiscoverySummarySync();
+
+    // Trigger the lazy load + V1 migration; the row sits in the legacy bucket.
+    const migrated = getContactBookEntries();
+    expect(migrated).toHaveLength(1);
+    expect(migrated[0].advName).toBe("LegacyNode");
+
+    // The migration must not have scheduled any summary write.
+    vi.advanceTimersByTime(1_000);
+    expect(existsSync(crossAccountPath)).toBe(false);
+    expect(existsSync(`${pluginStateDir()}/meshcore-discovery.account-a.json`)).toBe(false);
+
+    // First account-scoped touch adopts the legacy row and writes ONLY the
+    // per-account summary.
+    rememberContact(makeAdvert(samplePublicKey, { advName: "NodeA" }), "account-a");
+    vi.advanceTimersByTime(100);
+
+    expect(existsSync(crossAccountPath)).toBe(false);
+    const summaryA = readDiscoverySummary("account-a")!;
+    expect(summaryA.totalContacts).toBe(1);
+    expect(summaryA.contacts[0].name).toBe("NodeA");
+
+    cleanupPerAccountDiscoveryFiles();
+  });
+
+  it("flushPendingDiscoverySummaryWrites flushes ahead of the throttle window (#37)", () => {
+    vi.useFakeTimers();
+    setDiscoverySummaryThrottleMsForTests(60_000);
+    ensureDiscoverySummarySync();
+
+    rememberContact(makeAdvert(samplePublicKey), accountId);
+    // Still inside the throttle window — nothing written yet.
+    expect(readDiscoverySummary()).toBeUndefined();
+
+    flushPendingDiscoverySummaryWrites();
+    const summary = readDiscoverySummary()!;
+    expect(summary.totalContacts).toBe(1);
+
+    // The cleared timer must not fire a second write later.
+    vi.advanceTimersByTime(120_000);
+    expect(summary.totalContacts).toBe(1);
+  });
+
+  it("flushPendingDiscoverySummaryWrites is a no-op with nothing pending", () => {
+    vi.useFakeTimers();
+    ensureDiscoverySummarySync();
+    flushPendingDiscoverySummaryWrites();
+    expect(readDiscoverySummary()).toBeUndefined();
   });
 
   it("throttles contact-book-driven writes", () => {

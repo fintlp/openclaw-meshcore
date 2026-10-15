@@ -166,6 +166,19 @@ function scheduleThrottledWrite(accountId?: string): void {
 }
 
 /**
+ * Flush any pending throttled writes immediately, ahead of the throttle
+ * window. Called on channel stop so a final contact-book change inside the
+ * window is not lost to the shutdown (#37). Safe to call anytime; a no-op
+ * when nothing is pending.
+ */
+export function flushPendingDiscoverySummaryWrites(): void {
+  if (throttleTimer) {
+    clearTimeout(throttleTimer);
+  }
+  flushThrottledWrites();
+}
+
+/**
  * Ensure the discovery summary is rewritten on every contact-book change.
  * Safe to call repeatedly; installs at most one listener.
  *

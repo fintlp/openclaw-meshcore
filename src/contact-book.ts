@@ -296,7 +296,14 @@ function loadContacts(): void {
         }
       }
       // Persist the migrated data immediately so we don't re-migrate next run.
-      persistContacts();
+      // Migration is a storage-format upgrade, not a contact-book change:
+      // write WITHOUT emitting. Every migrated row lands in the legacy bucket
+      // (no accountId), so a change event here could only carry accountId=
+      // undefined — which made discovery-summary write a permanently-stale
+      // cross-account meshcore-discovery.json on multi-account installs.
+      // Scoped notifications happen when an account adopts a legacy row on
+      // first touch (rememberContact → persistContacts(accountId)).
+      writeContactsToDisk();
       return;
     }
     if (data && typeof data === "object" && isV2File(data as Record<string, unknown>)) {
@@ -342,7 +349,9 @@ function emitContactBookChange(accountId?: string): void {
 function atomicWriteJson(path: string, data: unknown): void {
   const tmpPath = `${path}.tmp`;
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(tmpPath, JSON.stringify(data));
+  // Pretty-printed like every other JSON state file (node-status, discovery
+  // summary): these files are operator/agent-readable surfaces (#37).
+  writeFileSync(tmpPath, `${JSON.stringify(data, null, 2)}\n`);
   renameSync(tmpPath, path);
 }
 
@@ -375,7 +384,7 @@ function evictStalestAdvertContact(map: Map<string, ContactBookEntry>, maxEntrie
   }
 }
 
-function persistContacts(accountId?: string): void {
+function writeContactsToDisk(): void {
   const path = getContactBookPath();
   try {
     const payload: ContactBookFileV2 = {
@@ -426,10 +435,14 @@ function persistContacts(accountId?: string): void {
       });
     }
     atomicWriteJson(path, payload);
-    emitContactBookChange(accountId);
   } catch {
     // best-effort persistence
   }
+}
+
+function persistContacts(accountId?: string): void {
+  writeContactsToDisk();
+  emitContactBookChange(accountId);
 }
 
 export function rememberContact(

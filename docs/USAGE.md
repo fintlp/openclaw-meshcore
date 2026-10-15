@@ -76,8 +76,9 @@ into a mesh-facing agent.
 ## Discovery surface
 
 `meshcore-discovery.json` is the zero-airtime way for an agent to answer
-"who is on the mesh?". It is rebuilt from the contact book every time a
-contact is added or updated, so it is always consistent with
+"who is on the mesh?". It is rebuilt from the contact book whenever
+contacts change — writes are throttled (60 s), so a burst of passive
+adverts coalesces into a single rewrite — keeping it consistent with
 `meshcore-advert-contacts.json` without exposing full public keys. Each
 account gets its own discovery file so contacts from different meshes are
 never merged into one list.

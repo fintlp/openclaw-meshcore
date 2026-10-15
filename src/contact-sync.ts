@@ -138,6 +138,10 @@ export function createThrottledContactSync(
       }, deps.throttleMs);
     },
     dispose: () => {
+      // A pending window is dropped, not flushed: firing the sync here would
+      // start a network round-trip while the connection is being torn down.
+      // That is safe to do — every connect runs a full contact sync, so a
+      // dropped trailing window self-heals on the next session.
       if (timer) {
         clearTimeout(timer);
         timer = null;

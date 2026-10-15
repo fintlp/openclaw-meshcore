@@ -189,7 +189,9 @@ function getIdentityBindingPath(): string {
 function atomicWriteJson(path: string, data: unknown): void {
   const tmpPath = `${path}.tmp`;
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(tmpPath, JSON.stringify(data));
+  // Pretty-printed like every other JSON state file (node-status, discovery
+  // summary): these files are operator/agent-readable surfaces (#37).
+  writeFileSync(tmpPath, `${JSON.stringify(data, null, 2)}\n`);
   renameSync(tmpPath, path);
 }
 
