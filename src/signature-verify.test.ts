@@ -12,8 +12,10 @@ import {
 } from "./signature-verify.js";
 
 describe("verifyEd25519Signature (#31 cycle 3)", () => {
-  // Pinned known-answer vector (Ed25519 is deterministic, RFC 8032):
-  // secret key = 32 x 0x07, message = "kat".
+  // Pinned known-answer vector, generated with the project's pinned
+  // @noble/curves (Ed25519 signing is deterministic per RFC 8032, so this is
+  // stable across implementations — but note it is a project-generated KAT,
+  // not one of the RFC 8032 §7.1 test vectors): sk = 32 x 0x07, msg = "kat".
   const KAT_PUBKEY = hexToBytes(
     "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
   );
@@ -54,8 +56,44 @@ describe("verifyEd25519Signature (#31 cycle 3)", () => {
     ).toBe(false);
   });
 
-  it("rejects garbage that makes noble throw, without throwing", () => {
-    // All-ones signature is not a valid point encoding; must fail closed.
+  it("rejects small-order-key forgery (zip215 trap, review M1)", () => {
+    // The Ed25519 identity point (compressed: 0x01 followed by 31 zero bytes)
+    // is a valid point encoding of a small-order key. Under noble's DEFAULT
+    // zip215 cofactored verification, the group equation collapses for such
+    // keys and a forged signature (R = identity, S = 0) verifies for ANY
+    // message with zero private-key knowledge. Our strict-mode verification
+    // must reject it — this is the exact forgery the adversarial review
+    // demonstrated against the shipped call site.
+    const identityPoint = new Uint8Array([1, ...new Array(31).fill(0)]);
+    const forgedSignature = new Uint8Array([
+      1,
+      ...new Array(31).fill(0), // R = identity
+      ...new Array(32).fill(0), // S = 0
+    ]);
+    expect(
+      verifyEd25519Signature(identityPoint, new TextEncoder().encode("attacker controlled"), forgedSignature),
+    ).toBe(false);
+    // And at protocol level: a challenge answered with the same forgery must fail.
+    const challenge = generateChallenge(_testOnlyPublicKey(new Uint8Array(32).fill(0xa1)), 1_000_000);
+    expect(
+      verifyChallengeResponse({
+        challenge,
+        responderPubkey: identityPoint,
+        signature: forgedSignature,
+        nowMs: 1_000_000,
+      }),
+    ).toEqual({ ok: false, reason: "bad-signature" });
+    // Sanity: a normal key rejects the identical forgery too.
+    expect(
+      verifyEd25519Signature(_testOnlyPublicKey(new Uint8Array(32).fill(7)), KAT_MESSAGE, forgedSignature),
+    ).toBe(false);
+  });
+
+  it("rejects garbage signatures without throwing (fail-closed)", () => {
+    // All-ones is not a valid point encoding. noble's own verify() internally
+    // catches point-decoding failures and returns false (noble 1.9.7), so the
+    // outer try/catch in our wrapper is defense-in-depth; the length guards
+    // are the load-bearing part for malformed input. Either way: fail closed.
     expect(
       verifyEd25519Signature(KAT_PUBKEY, KAT_MESSAGE, new Uint8Array(64).fill(0xff)),
     ).toBe(false);
@@ -94,9 +132,37 @@ describe("tier-3 challenge-response (#31 cycle 3)", () => {
   });
 
   it("challenges are single-use random (two generations differ)", () => {
+    // NOTE: single-use enforcement is the CALLER's responsibility — this
+    // module is stateless by design. Cycle 4 (the wiring cycle) must persist
+    // issued challenges and mark them consumed on first use; within the
+    // freshness window the same (challenge, signature) pair replays as valid
+    // here. Tracked on issue #31.
     const a = generateChallenge(verifierPubkey);
     const b = generateChallenge(verifierPubkey);
     expect(a.nonceHex).not.toBe(b.nonceHex);
+  });
+
+  it("accepts answers at the exact freshness boundaries (closed ±10min interval)", () => {
+    const challenge = generateChallenge(verifierPubkey, 1_000_000);
+    const signature = answerChallenge(challenge);
+    // age === +MS exactly: still valid (the window is closed, per the ±10min spec).
+    expect(
+      verifyChallengeResponse({
+        challenge,
+        responderPubkey,
+        signature,
+        nowMs: 1_000_000 + CHALLENGE_FRESHNESS_MS,
+      }),
+    ).toEqual({ ok: true });
+    // age === -MS exactly (responder clock ahead): still valid.
+    expect(
+      verifyChallengeResponse({
+        challenge,
+        responderPubkey,
+        signature,
+        nowMs: 1_000_000 - CHALLENGE_FRESHNESS_MS,
+      }),
+    ).toEqual({ ok: true });
   });
 
   it("rejects a stale answer", () => {

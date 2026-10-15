@@ -42,7 +42,14 @@ export function verifyEd25519Signature(
     return false;
   }
   try {
-    return ed25519.verify(signature, message, publicKey);
+    // zip215: false — strict RFC 8032 verification. noble's default
+    // (zip215: true) accepts small-order public keys, and a degenerate key
+    // (e.g. the identity point) makes the verification equation collapse
+    // independent of the signature: forged "valid" responses with zero key
+    // knowledge (proven by adversarial review against this exact call site).
+    // This module's entire purpose is proof of private-key possession, so
+    // cofactored verification is the wrong default here.
+    return ed25519.verify(signature, message, publicKey, { zip215: false });
   } catch {
     return false;
   }
@@ -65,7 +72,10 @@ export type Tier3Challenge = {
   verifierPubkey: Uint8Array;
 };
 
-/** Create a fresh single-use challenge. The caller persists it until answered. */
+/** Create a fresh single-use challenge. The caller persists it until answered
+ *  and MUST mark it consumed on first use — this module is stateless by
+ *  design, so replay protection within the freshness window depends entirely
+ *  on the caller's store (cycle 4 wiring; see issue #31). */
 export function generateChallenge(
   verifierPubkey: Uint8Array,
   nowMs: number = Date.now(),
@@ -87,7 +97,7 @@ export function buildChallengeMessage(challenge: Tier3Challenge): Uint8Array {
     CHALLENGE_DOMAIN,
     challenge.nonceHex,
     String(challenge.issuedAtMs),
-    bytesToHex(challenge.verifierPubkey).toLowerCase(),
+    bytesToHex(challenge.verifierPubkey),
   ].join("\n");
   return new TextEncoder().encode(body);
 }
