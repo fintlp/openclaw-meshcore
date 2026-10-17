@@ -14,6 +14,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hexToBytes } from "./protocol.js";
 
+vi.mock("openclaw/plugin-sdk/routing", () => ({
+  resolveAgentRoute: vi.fn(({ peer }) => ({
+    agentId: "meshcore",
+    sessionKey: `meshcore:${peer?.kind === "group" ? "channel:0" : peer?.id ?? "unknown"}`,
+    accountId: "default",
+  })),
+}));
+
+vi.mock("openclaw/plugin-sdk/channel-inbound", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("openclaw/plugin-sdk/channel-inbound")>();
+  return {
+    ...actual,
+    resolveInboundSessionEnvelopeContext: vi.fn(() => ({
+      storePath: "/tmp/sessions.json",
+      envelopeOptions: {},
+      previousTimestamp: undefined,
+    })),
+    createChannelInboundEnvelopeBuilder: vi.fn(() =>
+      vi.fn(({ body }) => body),
+    ),
+  };
+});
+
 const {
   buildMentionRegexesMock,
   hasControlCommandMock,

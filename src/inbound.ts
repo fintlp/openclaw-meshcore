@@ -1,4 +1,8 @@
-import { logInboundDrop } from "openclaw/plugin-sdk/channel-inbound";
+import {
+  createChannelInboundEnvelopeBuilder,
+  logInboundDrop,
+  resolveInboundSessionEnvelopeContext,
+} from "openclaw/plugin-sdk/channel-inbound";
 import {
   channelIngressRoutes,
   createChannelIngressResolver,
@@ -6,11 +10,11 @@ import {
 } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { createChannelPairingController } from "openclaw/plugin-sdk/channel-pairing";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { resolveInboundRouteEnvelopeBuilderWithRuntime } from "openclaw/plugin-sdk/inbound-envelope";
 import {
   deliverFormattedTextWithAttachments,
   type OutboundReplyPayload,
 } from "openclaw/plugin-sdk/reply-payload";
+import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import {
   GROUP_POLICY_BLOCKED_LABEL,
@@ -361,24 +365,35 @@ export async function handleMeshcoreInbound(params: {
   }
 
   const peerId = message.isGroup ? message.target : message.senderNodeId;
-  const { route, buildEnvelope } = resolveInboundRouteEnvelopeBuilderWithRuntime({
+  const peerKind = message.isGroup ? "group" : "direct";
+  const route = resolveAgentRoute({
     cfg: config as OpenClawConfig,
     channel: CHANNEL_ID,
     accountId: account.accountId,
     peer: {
-      kind: message.isGroup ? "group" : "direct",
+      kind: peerKind,
       id: peerId,
     },
-    runtime: core.channel,
-    sessionStore: config.session?.store,
   });
 
   const fromLabel = message.isGroup ? message.target : message.senderNodeId;
-  const { storePath, body } = buildEnvelope({
+  const { storePath, envelopeOptions, previousTimestamp } =
+    resolveInboundSessionEnvelopeContext({
+      cfg: config as OpenClawConfig,
+      agentId: route.agentId,
+      sessionKey: route.sessionKey,
+    });
+  const buildEnvelope = createChannelInboundEnvelopeBuilder({
+    cfg: config as OpenClawConfig,
+    route: { agentId: route.agentId, sessionKey: route.sessionKey },
+  });
+  const body = buildEnvelope({
     channel: "MeshCore",
     from: fromLabel,
     timestamp: message.timestamp,
     body: rawBody,
+    previousTimestamp,
+    envelope: envelopeOptions,
   });
 
   const groupSystemPrompt = groupMatch.groupConfig?.systemPrompt?.trim() || undefined;
