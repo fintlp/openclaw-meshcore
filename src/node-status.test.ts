@@ -194,4 +194,50 @@ describe("node status snapshot", () => {
     expect(snapshot.batteryMv).toBe(3900);
     expect(snapshot.connectionState).toBe("disconnected");
   });
+
+  it("carries lastAdvertAt/advertScope over from the previous snapshot on reconnect (#42)", () => {
+    const lastAdvertAt = new Date(1_700_000_000_000).toISOString();
+    writeNodeStatusSnapshot(makeSelfInfo(), {
+      connectionState: "connected",
+      since: 1_700_000_000_000,
+      reconnectCount: 1,
+    });
+    updateNodeStatusOps({ lastAdvertAt, advertScope: "flood" });
+
+    writeNodeStatusSnapshot(
+      makeSelfInfo({ name: "TestNode2" }),
+      {
+        connectionState: "connected",
+        since: 1_700_000_001_000,
+        reconnectCount: 2,
+      },
+    );
+
+    const snapshot = readNodeStatusSnapshot()!;
+    expect(snapshot.name).toBe("TestNode2");
+    expect(snapshot.reconnectCount).toBe(2);
+    expect(snapshot.lastAdvertAt).toBe(lastAdvertAt);
+    expect(snapshot.advertScope).toBe("flood");
+  });
+
+  it("does not invent lastAdvertAt/advertScope when the previous snapshot has none", () => {
+    writeNodeStatusSnapshot(makeSelfInfo(), {
+      connectionState: "connected",
+      since: 1_700_000_000_000,
+      reconnectCount: 1,
+    });
+
+    writeNodeStatusSnapshot(
+      makeSelfInfo(),
+      {
+        connectionState: "connected",
+        since: 1_700_000_001_000,
+        reconnectCount: 2,
+      },
+    );
+
+    const snapshot = readNodeStatusSnapshot()!;
+    expect(snapshot.lastAdvertAt).toBeUndefined();
+    expect(snapshot.advertScope).toBeUndefined();
+  });
 });

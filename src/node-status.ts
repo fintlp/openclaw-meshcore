@@ -107,6 +107,8 @@ export function buildNodeStatusSnapshot(
     reconnectCount: number;
     lastRestartReason?: string;
     lastRestartAt?: number;
+    lastAdvertAt?: string;
+    advertScope?: "zero-hop" | "flood";
   },
   accountId?: string,
   batteryMv?: number,
@@ -138,6 +140,8 @@ export function buildNodeStatusSnapshot(
     reconnectCount: ops.reconnectCount,
     lastRestartReason: ops.lastRestartReason,
     lastRestartAt: ops.lastRestartAt !== undefined ? toIso(ops.lastRestartAt) : undefined,
+    lastAdvertAt: ops.lastAdvertAt,
+    advertScope: ops.advertScope,
     accountId,
     batteryMv,
   };
@@ -156,9 +160,14 @@ export function writeNodeStatusSnapshot(
   accountId?: string,
   batteryMv?: number,
 ): void {
+  const prior = readSnapshot(accountId);
   atomicWriteJson(
     getNodeStatusPath(accountId),
-    buildNodeStatusSnapshot(selfInfo, ops, accountId, batteryMv),
+    buildNodeStatusSnapshot(selfInfo, {
+      ...ops,
+      lastAdvertAt: prior.lastAdvertAt,
+      advertScope: prior.advertScope,
+    }, accountId, batteryMv),
   );
 }
 
