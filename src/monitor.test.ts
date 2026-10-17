@@ -348,6 +348,104 @@ describe("monitorMeshcoreProvider", () => {
     await expect(monitorPromise).resolves.toEqual({ stop: expect.any(Function) });
   });
 
+  it("skips connect advert after snapshot rewrite when last advert is fresh (#41/#42 integration)", async () => {
+    // Simulate the real reconnect path: device-client.ts calls
+    // writeNodeStatusSnapshot during the handshake, which used to drop
+    // lastAdvertAt/advertScope and defeat the stale guard.
+    const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    writeNodeStatusSnapshot(
+      makeSelfInfo(),
+      { connectionState: "connected", since: Date.now(), reconnectCount: 1 },
+      "default",
+    );
+    updateNodeStatusOps(
+      { lastAdvertAt: new Date().toISOString(), advertScope: "zero-hop" },
+      "default",
+    );
+
+    const account = createResolvedAccount();
+    resolveMeshcoreAccountMock.mockReturnValue(
+      createResolvedAccount({
+        config: { ...account.config, advertOnConnect: true, advertIntervalHours: 6 },
+      }),
+    );
+    const { handle, sendZeroHopAdvert } = advertCapableHandle();
+    connectMeshcoreDeviceMock.mockImplementation(async () => {
+      // Mirror device-client.ts: rewrite the snapshot from SelfInfo on connect.
+      writeNodeStatusSnapshot(
+        makeSelfInfo(),
+        { connectionState: "connected", since: Date.now(), reconnectCount: 2 },
+        "default",
+      );
+      return handle;
+    });
+
+    const abortController = new AbortController();
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      abortSignal: abortController.signal,
+    });
+
+    await vi.waitFor(() => {
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("connect advert skipped"),
+      );
+    });
+    expect(sendZeroHopAdvert).not.toHaveBeenCalled();
+
+    abortController.abort();
+    await expect(monitorPromise).resolves.toEqual({ stop: expect.any(Function) });
+  });
+
+  it("sends connect advert after snapshot rewrite when last advert is stale (#41/#42 integration)", async () => {
+    const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    writeNodeStatusSnapshot(
+      makeSelfInfo(),
+      { connectionState: "connected", since: Date.now(), reconnectCount: 1 },
+      "default",
+    );
+    updateNodeStatusOps(
+      { lastAdvertAt: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(), advertScope: "zero-hop" },
+      "default",
+    );
+
+    const account = createResolvedAccount();
+    resolveMeshcoreAccountMock.mockReturnValue(
+      createResolvedAccount({
+        config: { ...account.config, advertOnConnect: true, advertIntervalHours: 6 },
+      }),
+    );
+    const { handle, sendZeroHopAdvert } = advertCapableHandle();
+    connectMeshcoreDeviceMock.mockImplementation(async () => {
+      writeNodeStatusSnapshot(
+        makeSelfInfo(),
+        { connectionState: "connected", since: Date.now(), reconnectCount: 2 },
+        "default",
+      );
+      return handle;
+    });
+
+    const abortController = new AbortController();
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      abortSignal: abortController.signal,
+    });
+
+    await vi.waitFor(() => {
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("sent zero-hop advert (connect)"),
+      );
+    });
+    expect(sendZeroHopAdvert).toHaveBeenCalledTimes(1);
+
+    abortController.abort();
+    await expect(monitorPromise).resolves.toEqual({ stop: expect.any(Function) });
+  });
+
   it("strips the 4 leading signature bytes from SignedPlain DMs (txtType=2)", async () => {
     const handle = createConnection();
     connectMeshcoreDeviceMock.mockResolvedValue(handle);
