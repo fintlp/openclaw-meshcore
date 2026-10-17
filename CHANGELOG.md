@@ -6,6 +6,36 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## 2026.10.7 — 2026-10-17
+
+**Fixes**
+
+- **Connect-advert stale guard no longer defeated by snapshot rewrite** (#42):
+  `writeNodeStatusSnapshot` now carries `lastAdvertAt`/`advertScope` forward
+  from the previous snapshot when rebuilding from SelfInfo on a clean
+  reconnect handshake. The monitor's `shouldSkipConnectAdvert` guard can
+  again prove freshness, stopping zero-hop advert spam on every ~35-minute
+  stale-socket reconnect.
+
+**Refactors**
+
+- **Migrated off deprecated `openclaw/plugin-sdk/inbound-envelope`** (#43):
+  replaced the single `resolveInboundRouteEnvelopeBuilderWithRuntime` call
+  with the explicit modern sequence — `resolveAgentRoute` for routing,
+  `resolveInboundSessionEnvelopeContext` for session store path / previous
+  timestamp / envelope options, and `createChannelInboundEnvelopeBuilder`
+  for envelope formatting. The deprecated module is no longer imported
+  anywhere in the plugin.
+
+**Tooling / tests**
+
+- **Connect-advert integration coverage** (#41): two monitor-level tests now
+  simulate the real reconnect snapshot rewrite and assert the correct send
+  (stale/absent `lastAdvertAt`) or skip (fresh `lastAdvertAt`) outcome.
+- **Envelope golden-format tests** (#43): direct-DM and group envelope
+  strings are pinned so the SDK migration cannot silently change the
+  agent-visible message format and shift existing sessions/history.
+
 ## 2026.10.6 — 2026-10-15
 
 **Features**
