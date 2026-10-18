@@ -95,6 +95,21 @@ export type PacingFrameContext = {
    * Call immediately after a successful transmission.
    */
   afterFrame: (frameBytes: number, expectedAckCode?: number) => void;
+  /**
+   * Await the delivery report (SendConfirmed push) for a frame whose ack tag
+   * is known — intended for the FINAL frame of a sequence, whose pre-registered
+   * waiter would otherwise never be observed by a subsequent beforeFrame.
+   * Takes over that waiter (same tag) so the report is still observed exactly
+   * once; when no waiter was pre-registered (pacing disabled or time mode) a
+   * fresh one is registered with the given timeout. Resolves with the payload
+   * on confirm, or { timeout: true } when no confirm arrives within timeoutMs.
+   * Must be called synchronously after the frame's afterFrame so no confirm
+   * can interleave between registration and takeover.
+   */
+  awaitFrameReport: (
+    expectedAckCode: number,
+    timeoutMs: number,
+  ) => Promise<SendConfirmedPayload | { timeout: true }>;
 };
 
 export type WithPacedSendOptions = {
@@ -230,6 +245,48 @@ export async function withPacedSend<T>(
           promise.catch(() => {});
           state.pendingAckWait = { ackCode: expectedAckCode, promise };
         }
+      },
+      awaitFrameReport: async (expectedAckCode, timeoutMs) => {
+        throwIfAborted(signal);
+        // Take over the waiter pre-registered by afterFrame for this exact tag
+        // (single-waiter invariant: a confirm is always credited to exactly one
+        // observer). The takeover removes it from the dispatch queue and clears
+        // its timer; the fresh waiter below then waits with the caller's own
+        // (typically firmware-estimated) timeout. Called synchronously after
+        // afterFrame, so no confirm event can interleave and be lost.
+        const pending = state.pendingAckWait;
+        if (pending && pending.ackCode === expectedAckCode) {
+          state.pendingAckWait = null;
+          removeSendConfirmedWait(accountId, expectedAckCode);
+          // The taken-over waiter's promise never settles now (timer cleared,
+          // queue entry removed); its catch guard in afterFrame keeps that
+          // from surfacing as an unhandled rejection.
+        }
+        const promise = waitForSendConfirmed({ accountId, expectedAckCode, timeoutMs });
+        if (!signal) {
+          return await promise;
+        }
+        return await new Promise<SendConfirmedPayload | { timeout: true }>((resolve, reject) => {
+          const onAbort = () => {
+            removeSendConfirmedWait(accountId, expectedAckCode);
+            reject(createAbortError(signal.reason));
+          };
+          if (signal.aborted) {
+            onAbort();
+            return;
+          }
+          signal.addEventListener("abort", onAbort, { once: true });
+          promise.then(
+            (value) => {
+              signal.removeEventListener("abort", onAbort);
+              resolve(value);
+            },
+            (error: unknown) => {
+              signal.removeEventListener("abort", onAbort);
+              reject(error instanceof Error ? error : new Error(String(error)));
+            },
+          );
+        });
       },
     });
   })();
