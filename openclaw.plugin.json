@@ -443,6 +443,38 @@
             ],
             "additionalProperties": false
           },
+          "sendRetry": {
+            "default": {
+              "enabled": false,
+              "maxAttempts": 2,
+              "backoffMs": 30000
+            },
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "default": false,
+                "type": "boolean"
+              },
+              "maxAttempts": {
+                "default": 2,
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              },
+              "backoffMs": {
+                "default": 30000,
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 600000
+              }
+            },
+            "required": [
+              "enabled",
+              "maxAttempts",
+              "backoffMs"
+            ],
+            "additionalProperties": false
+          },
           "logInboundMessageContent": {
             "type": "boolean"
           },
@@ -920,6 +952,38 @@
                   ],
                   "additionalProperties": false
                 },
+                "sendRetry": {
+                  "default": {
+                    "enabled": false,
+                    "maxAttempts": 2,
+                    "backoffMs": 30000
+                  },
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "default": false,
+                      "type": "boolean"
+                    },
+                    "maxAttempts": {
+                      "default": 2,
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 5
+                    },
+                    "backoffMs": {
+                      "default": 30000,
+                      "type": "integer",
+                      "minimum": 1000,
+                      "maximum": 600000
+                    }
+                  },
+                  "required": [
+                    "enabled",
+                    "maxAttempts",
+                    "backoffMs"
+                  ],
+                  "additionalProperties": false
+                },
                 "logInboundMessageContent": {
                   "type": "boolean"
                 },
@@ -977,7 +1041,8 @@
                 "dmPolicy",
                 "groupPolicy",
                 "sendPacing",
-                "sendRateLimit"
+                "sendRateLimit",
+                "sendRetry"
               ],
               "additionalProperties": false
             }
@@ -991,7 +1056,8 @@
           "dmPolicy",
           "groupPolicy",
           "sendPacing",
-          "sendRateLimit"
+          "sendRateLimit",
+          "sendRetry"
         ],
         "additionalProperties": false
       },
@@ -1039,6 +1105,10 @@
         "sendRateLimit": {
           "label": "Send Rate Limit",
           "help": "Flood guard: caps outbound airtime packets per rolling window (default 20 per 10 minutes). Refuses with a retry hint when tripped. Set enabled:false to disable."
+        },
+        "sendRetry": {
+          "label": "DM Delivery Retry",
+          "help": "Auto-retry DMs that the mesh never confirms (default off). Waits for the node's delivery report, then retransmits up to maxAttempts-1 times with backoffMs between attempts. Every attempt consumes Send Rate Limit budget."
         },
         "logInboundMessageContent": {
           "label": "Log Inbound Message Content",

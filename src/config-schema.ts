@@ -90,6 +90,19 @@ const MeshcoreAccountSchemaBase = z
         maxSends: 20,
         windowMs: 600_000,
       }),
+    sendRetry: z
+      .object({
+        enabled: z.boolean().optional().default(false),
+        maxAttempts: z.number().int().min(1).max(5).optional().default(2),
+        backoffMs: z.number().int().min(1_000).max(600_000).optional().default(30_000),
+      })
+      .strict()
+      .optional()
+      .default({
+        enabled: false,
+        maxAttempts: 2,
+        backoffMs: 30_000,
+      }),
     advertLat: z.number().min(-90).max(90).optional(),
     advertLon: z.number().min(-180).max(180).optional(),
     groupMonitorMode: z.enum(["digest", "session"]).optional().default("digest"),
