@@ -23,6 +23,10 @@ Tests
 
 - Retry on timeout report, no retry on success, pacing-waiter takeover in ack mode, attempt cap, fixed backoff schedule (injected clock), fail-closed non-matching ack tag, late-ACK guard, per-attempt rate-limit accounting, disabled-by-default parity, and no-ack-tag skip.
 
+Docs
+
+- Hardening recipes for mesh DM sessions (issue #9): README Security model point 6 plus a rewritten AGENT-SCOPING Layer 2 — per-sender tool denies via the gateway global tools.toolsBySender (channel:meshcore:nodeId keys) and a dedicated restricted mesh agent via multiAgent bindings, both copy-paste ready. Plugin-native per-DM policy remains blocked on the upstream core hook (openclaw/openclaw#176348).
+
 ## 2026.10.10 — 2026-10-18
 
 Airtime protection and a responsible-disclosure policy.

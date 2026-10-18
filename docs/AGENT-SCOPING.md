@@ -28,11 +28,45 @@ Verified incident (own deployment, 2026-10-03): a mesh DM session, left with def
 
 ## Layer 2 — what sessions can do (tools & skills)
 
-Today, tool policy is scoped **per group** (and per sender within groups) and **per agent** globally — there is no per-DM-peer tool policy yet (that's issue #9).
+Admission is not authorization: `dmPolicy` decides who gets in, tool policy decides what they can make the agent do. The layers available **today**, weakest-to-strongest operational effort:
 
-What you can do **today**:
+- **Per-DM-sender denies via the gateway's global `tools.toolsBySender` (works now, recommended).** The core sender-policy layer applies to mesh DM turns — keys are `channel:meshcore:<nodeId>` where the node id is the sender id this plugin stamps (also shown in the pairing flow and sessions list). Example — every mesh contact loses shell and filesystem tools, your own handheld keeps them:
 
-- **Agent-level tool policy (global, applies to mesh DMs too):** if the agent persona serving the mesh does not need `exec`, config editing, or outbound messaging, deny them at the agent level. The strongest available boundary for DM sessions.
+```json5
+{
+  tools: {
+    toolsBySender: {
+      "channel:meshcore:AB12CD34EF56": {}, // your handheld: no extra restriction
+      "channel:meshcore:DEADBEEF0102": { deny: ["exec", "process", "write", "edit", "apply_patch", "gateway"] },
+    },
+  },
+}
+```
+
+Match order is channel+id, id, e164, username, name, then wildcard — put specific node ids first. Caveat, stated plainly: this filters what a sender may *invoke*; it does not *authenticate* them (mesh DM identity stays convenience-grade, see the trust model above). It is defense-in-depth, not a lock.
+
+- **A dedicated restricted agent for the mesh (strongest isolation).** `multiAgent` bindings route mesh DMs to their own agent entry — separate workspace, model policy, and tool allow/deny — so a mesh-originated session never shares blast radius with your primary agent:
+
+```json5
+{
+  agents: {
+    ownership: "explicit",
+    entries: {
+      main: { workspace: "~/.openclaw/workspace" },
+      mesh: {
+        workspace: "~/.openclaw/workspace-mesh",
+        tools: { deny: ["exec", "process", "write", "edit", "apply_patch", "gateway", "sessions_spawn"] },
+        systemPrompt: "You are the mesh-facing persona. Terse. No system changes, ever.",
+      },
+    },
+  },
+  bindings: [
+    { agentId: "mesh", match: { channel: "meshcore", accountId: "*" } },
+    { agentId: "main", match: { channel: "*", accountId: "*" } },
+  ],
+}
+```
+
 - **Group sessions** (if you enable `groupPolicy` monitoring with agent dispatch): full per-group control —
 
 ```json
@@ -50,7 +84,7 @@ What you can do **today**:
 - **`toolsBySender`** for known peers inside groups — e.g. your own handheld gets more reach than everyone else.
 - **Smart-home control from the mesh** — see the recipe below: a dedicated mesh-facing agent with a minimal tool set, and the three risk tiers (read-only / reversible / physical access).
 
-What you cannot do yet (issue #9): per-DM-peer tool policies. Until then, the effective knob for DM sessions is `dmPolicy` discipline + agent-level policy.
+What does not exist yet (issue #9): **plugin-native** per-DM tool config — a `channels.meshcore...toolsBySender` mirroring the group shape, resolved by the plugin. Blocked on a core hook: the gateway's tool-policy resolution only consults channel plugins for group scopes, never for DM turns (upstream feature request openclaw/openclaw#176348). Until it lands, the two recipes above are the supported path.
 
 ## Layer 3 — operational hygiene
 
