@@ -41,6 +41,10 @@ export const meshcoreChannelConfigUiHints = {
     label: "Send Pacing",
     help: "Outbound chunk pacing: delays between multi-chunk sends by the estimated LoRa frame airtime plus a safety margin, so the node can drain its tx queue. Default enabled; single-chunk sends are unaffected.",
   },
+  sendRateLimit: {
+    label: "Send Rate Limit",
+    help: "Flood guard: caps outbound airtime packets per rolling window (default 20 per 10 minutes). Refuses with a retry hint when tripped. Set enabled:false to disable.",
+  },
   logInboundMessageContent: {
     label: "Log Inbound Message Content",
     help: "When true, Gateway logs include up to 80 characters of inbound mesh text. Default is false (metadata only: sender, target, message id, length).",

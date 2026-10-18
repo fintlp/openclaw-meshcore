@@ -59,6 +59,8 @@ export type MeshcoreAccountConfig = {
   blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
   responsePrefix?: string;
   sendPacing?: MeshcoreSendPacingConfig;
+  /** Outbound flood guard: cap airtime packets per rolling window (default 20 per 10 min). Refuses with a retry hint when tripped. Set enabled:false to disable. */
+  sendRateLimit?: { enabled?: boolean; maxSends?: number; windowMs?: number };
   /** When true, inbound info logs include up to 80 characters of message text (default: metadata only). */
   logInboundMessageContent?: boolean;
   /** When true, outbound DMs are sent as SignedPlain (txtType 2) instead of Plain (txtType 0). Default false. Group sends always stay Plain. */

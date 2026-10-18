@@ -62,6 +62,10 @@ The most important safety property of this plugin is that **the agent can never 
 
 Why so strict? Because LoRa airtime is a shared commons. Every transmission on a public channel is heard by everyone and occupies the frequency for everyone. A chatty agent would not just embarrass you — it would degrade the mesh for every other user in range. Being a good mesh citizen is part of the design.
 
+### The flood guard: the agent cannot shout in DMs either
+
+Even in direct messages, airtime is shared — so a second code-level rail caps how much the agent may transmit at all. Outbound sends are budgeted in airtime packets per rolling window (**20 packets per 10 minutes** by default), and the send path refuses a message when the budget is exhausted — before the first frame goes on air, with a retry-after hint in the error. A message is always sent whole or refused whole, never partially aired. Tune it via `sendRateLimit` (`maxSends`, `windowMs`, or `enabled: false` to disable) — but think twice before raising it: this limit exists for the mesh, not for you.
+
 ### Radio parameters: read-only, on purpose
 
 The node's radio parameters — frequency, bandwidth, spreading factor, coding rate — are the shared "meeting channel" the whole mesh agreed on. If your node changes its own settings, it does not get an error message; it simply stops hearing and being heard, and fixing it means physical access or a maintenance window with the companion app. Frequency choice is also regulated (for example, 869.618 MHz is the EU868 setting used in Austria), which makes it a matter of law rather than taste.

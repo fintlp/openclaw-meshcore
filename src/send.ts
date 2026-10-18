@@ -23,6 +23,7 @@ import { withPacedSend, type WithPacedSendOptions } from "./pacing.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig } from "./types.js";
 import { resolveSendPacingConfig } from "./airtime.js";
+import { assertSendRateLimit, resolveSendRateLimitConfig } from "./rate-limit.js";
 
 function createAbortError(reason: unknown): Error {
   if (reason instanceof Error) {
@@ -300,6 +301,17 @@ export async function sendMessageMeshcore(
 
   // Only DMs may be signed; groups are receive-only and stay Plain.
   const txtType = outboundSignedPlain ? 2 : undefined;
+
+  // Flood guard: refuse the whole message (never partially aired) when the
+  // account's rolling airtime budget is exhausted.
+  assertSendRateLimit({
+    accountId: account.accountId,
+    packets: chunks.length,
+    config: resolveSendRateLimitConfig(
+      account.config.sendRateLimit as Record<string, unknown> | undefined,
+    ),
+    scope: "DM",
+  });
 
   const pacingConfig = resolveSendPacingConfig(
     account.config.sendPacing as Record<string, unknown> | undefined,

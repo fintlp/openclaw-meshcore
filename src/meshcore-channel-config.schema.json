@@ -388,6 +388,38 @@
       ],
       "additionalProperties": false
     },
+    "sendRateLimit": {
+      "default": {
+        "enabled": true,
+        "maxSends": 20,
+        "windowMs": 600000
+      },
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "maxSends": {
+          "default": 20,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "windowMs": {
+          "default": 600000,
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "enabled",
+        "maxSends",
+        "windowMs"
+      ],
+      "additionalProperties": false
+    },
     "logInboundMessageContent": {
       "type": "boolean"
     },
@@ -833,6 +865,38 @@
             ],
             "additionalProperties": false
           },
+          "sendRateLimit": {
+            "default": {
+              "enabled": true,
+              "maxSends": 20,
+              "windowMs": 600000
+            },
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "default": true,
+                "type": "boolean"
+              },
+              "maxSends": {
+                "default": 20,
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "windowMs": {
+                "default": 600000,
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "enabled",
+              "maxSends",
+              "windowMs"
+            ],
+            "additionalProperties": false
+          },
           "logInboundMessageContent": {
             "type": "boolean"
           },
@@ -863,7 +927,8 @@
           "transport",
           "dmPolicy",
           "groupPolicy",
-          "sendPacing"
+          "sendPacing",
+          "sendRateLimit"
         ],
         "additionalProperties": false
       }
@@ -876,7 +941,8 @@
     "transport",
     "dmPolicy",
     "groupPolicy",
-    "sendPacing"
+    "sendPacing",
+    "sendRateLimit"
   ],
   "additionalProperties": false,
   "$defs": {
@@ -1269,6 +1335,38 @@
           ],
           "additionalProperties": false
         },
+        "sendRateLimit": {
+          "default": {
+            "enabled": true,
+            "maxSends": 20,
+            "windowMs": 600000
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            },
+            "maxSends": {
+              "default": 20,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "windowMs": {
+              "default": 600000,
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "enabled",
+            "maxSends",
+            "windowMs"
+          ],
+          "additionalProperties": false
+        },
         "logInboundMessageContent": {
           "type": "boolean"
         },
@@ -1325,7 +1423,8 @@
         "transport",
         "dmPolicy",
         "groupPolicy",
-        "sendPacing"
+        "sendPacing",
+        "sendRateLimit"
       ],
       "additionalProperties": false
     }

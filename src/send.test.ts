@@ -4,6 +4,7 @@ import { estimateChunkAirtimeMs, resolveSendPacingConfig } from "./airtime.js";
 import { clearSendConfirmedStateForTests } from "./device-client.js";
 import { clearOutboundEchoCache, isOutboundEcho } from "./echo-dedupe.js";
 import { clearPacingStateForTests } from "./pacing.js";
+import { clearSendRateLimitState } from "./rate-limit.js";
 import { MeshcoreSendAbortedError, sendMessageMeshcore } from "./send.js";
 import type { CoreConfig } from "./types.js";
 
@@ -90,6 +91,7 @@ describe("sendMessageMeshcore", () => {
     vi.clearAllMocks();
     clearPacingStateForTests();
     clearSendConfirmedStateForTests();
+    clearSendRateLimitState();
   });
 
   it("sends a DM and returns a receipt", async () => {
@@ -195,6 +197,34 @@ describe("sendMessageMeshcore", () => {
     ).rejects.toThrow(/receive-only/);
 
     expect(sendTextMessage).not.toHaveBeenCalled();
+  });
+
+  it("refuses a whole message when its chunks exceed the rate-limit budget", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    await expect(
+      sendMessageMeshcore(TEST_NODE_ID, "a".repeat(11), {
+        cfg: createConfig({ textChunkLimit: 5, sendRateLimit: { maxSends: 2 } }),
+      }),
+    ).rejects.toThrow(/rate limit/);
+
+    expect(sendTextMessage).not.toHaveBeenCalled();
+  });
+
+  it("allows sends within budget, then refuses until the window slides", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+    const cfg = createConfig({ sendRateLimit: { maxSends: 2, windowMs: 60_000 } });
+
+    await sendMessageMeshcore(TEST_NODE_ID, "one", { cfg });
+    await sendMessageMeshcore(TEST_NODE_ID, "two", { cfg });
+    expect(sendTextMessage).toHaveBeenCalledTimes(2);
+
+    await expect(sendMessageMeshcore(TEST_NODE_ID, "three", { cfg })).rejects.toThrow(
+      /rate limit/,
+    );
+    expect(sendTextMessage).toHaveBeenCalledTimes(2);
   });
 
   it("shrinks the chunk limit by the SignedPlain prefix length", async () => {

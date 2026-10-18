@@ -77,6 +77,19 @@ const MeshcoreAccountSchemaBase = z
         defaultBw: 62_500,
         defaultCr: 8,
       }),
+    sendRateLimit: z
+      .object({
+        enabled: z.boolean().optional().default(true),
+        maxSends: z.number().int().min(1).optional().default(20),
+        windowMs: z.number().int().min(1_000).optional().default(600_000),
+      })
+      .strict()
+      .optional()
+      .default({
+        enabled: true,
+        maxSends: 20,
+        windowMs: 600_000,
+      }),
     advertLat: z.number().min(-90).max(90).optional(),
     advertLon: z.number().min(-180).max(180).optional(),
     groupMonitorMode: z.enum(["digest", "session"]).optional().default("digest"),
