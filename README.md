@@ -269,6 +269,7 @@ A DM correspondent who passes the normal admission gate (pairing / allowlist / o
 | `!ping` | Answers "pong" plus the node name, from the local status snapshot. | Only the reply itself. |
 | `!status` | Answers with the local node's status snapshot (connection, battery, position, advert age, reconnects). | Only the reply itself. |
 | `!neighbours <node>` | Asks a repeater-class contact which nodes it currently hears, and answers with the edge list: pubkey prefix, last-heard age, SNR, and the contact name when known. Companion-class firmware may refuse or ignore the query — a timeout answer means "no answer arrived", not "no neighbours". | **On air**: one request frame to the target node, plus the reply. Counts against the `sendRateLimit` budget. |
+| `!rstatus <node>` | Pulls a remote node's status frame and answers with its stack/radio health: battery, tx queue, noise floor, RSSI, packet counters, airtime, uptime, error count, SNR, duplicate counts. Repeater-class feature; a timeout answer means the target did not respond. | **On air**: one request frame to the target node, plus the reply. Counts against the `sendRateLimit` budget. |
 
 Commands marked **on air** transmit real LoRa frames into the mesh in addition to their reply. They exist for on-demand diagnostics — never schedule them and never poll them in a loop. Targets are addressed the same way as DMs: a full `!nodeId` or any known contact prefix.
 

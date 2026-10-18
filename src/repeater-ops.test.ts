@@ -13,7 +13,9 @@ import { clearSendRateLimitState } from "./rate-limit.js";
 import {
   formatHeardAge,
   formatNeighboursReply,
+  formatRemoteStatusReply,
   queryNodeNeighbours,
+  queryRemoteNodeStatus,
   RepeaterOpsTargetError,
   runRepeaterOpsCommand,
   type RepeaterNeighboursResult,
@@ -275,6 +277,167 @@ describe("repeater ops: neighbours query (issue #35)", () => {
       deviceHandle: createDeviceHandle({ getNeighbours }),
     });
     expect(reply).toBe("query failed: socket exploded");
+  });
+});
+
+describe("repeater ops: remote status request (issue #34)", () => {
+  beforeEach(() => {
+    const dir = mkdtempSync(join(tmpdir(), "meshcore-repeater-ops-"));
+    setContactBookPathForTests(join(dir, "contacts.json"));
+    resetContactBookForTests();
+    rememberContact({ publicKey: REPEATER_PUBKEY, advName: "HillRepeater" }, accountId);
+  });
+
+  afterEach(() => {
+    resetContactBookForTests();
+    setContactBookPathForTests(undefined);
+    clearSendRateLimitState();
+  });
+
+  const SAMPLE_STATS = {
+    batt_milli_volts: 12_140,
+    curr_tx_queue_len: 2,
+    noise_floor: -98,
+    last_rssi: -45,
+    n_packets_recv: 12_345,
+    n_packets_sent: 6_789,
+    total_air_time_secs: 1_234,
+    total_up_time_secs: 190_080,
+    n_sent_flood: 100,
+    n_sent_direct: 200,
+    n_recv_flood: 300,
+    n_recv_direct: 400,
+    err_events: 3,
+    last_snr: 22, // quarter-dB: 5.5 dB
+    n_direct_dups: 1,
+    n_flood_dups: 2,
+  };
+
+  it("normalizes the library repeater stats (snr quarter-dB scaled)", async () => {
+    const getStatus = vi.fn(async () => SAMPLE_STATS);
+    const handle = createDeviceHandle({ getStatus });
+
+    const { targetLabel, result } = await queryRemoteNodeStatus({
+      account: createAccount(),
+      targetArg: "aabbccdd1122",
+      deviceHandle: handle,
+    });
+
+    expect(getStatus).toHaveBeenCalledTimes(1);
+    expect(bytesToHex(getStatus.mock.calls[0][0] as Uint8Array)).toBe(REPEATER_PUBKEY_HEX);
+    expect(targetLabel).toBe("HillRepeater");
+    expect(result).toEqual({
+      batteryMv: 12_140,
+      txQueueLen: 2,
+      noiseFloorDbm: -98,
+      lastRssiDbm: -45,
+      packetsRecv: 12_345,
+      packetsSent: 6_789,
+      airtimeSecs: 1_234,
+      uptimeSecs: 190_080,
+      sentFlood: 100,
+      sentDirect: 200,
+      recvFlood: 300,
+      recvDirect: 400,
+      errEvents: 3,
+      lastSnrDb: 5.5,
+      directDups: 1,
+      floodDups: 2,
+    });
+  });
+
+  it("formats the health readout compactly", async () => {
+    const getStatus = vi.fn(async () => SAMPLE_STATS);
+    const reply = await runRepeaterOpsCommand({
+      op: "rstatus",
+      targetArg: "aabbccdd1122",
+      account: createAccount(),
+      deviceHandle: createDeviceHandle({ getStatus }),
+    });
+    expect(reply).toBe(
+      "HillRepeater bat:12.14V txq:2 nf:-98 rssi:-45 rx:12345 tx:6789 " +
+        "air:20m up:2d err:3 snr:5.5 dup:1/2",
+    );
+  });
+
+  it("scales a negative snr reading from quarter-dB", () => {
+    expect(
+      formatRemoteStatusReply("HillRepeater", {
+        batteryMv: 3_900,
+        txQueueLen: 0,
+        noiseFloorDbm: -105,
+        lastRssiDbm: -87,
+        packetsRecv: 0,
+        packetsSent: 0,
+        airtimeSecs: 45,
+        uptimeSecs: 59,
+        sentFlood: 0,
+        sentDirect: 0,
+        recvFlood: 0,
+        recvDirect: 0,
+        errEvents: 0,
+        lastSnrDb: -9 / 4,
+        directDups: 0,
+        floodDups: 0,
+      }),
+    ).toBe(
+      "HillRepeater bat:3.90V txq:0 nf:-105 rssi:-87 rx:0 tx:0 air:45s up:59s " +
+        "err:0 snr:-2.3 dup:0/0",
+    );
+  });
+
+  it("maps the library bare-string timeout to the soft no-answer reply", async () => {
+    const getStatus = vi.fn(async () => {
+      throw "timeout";
+    });
+    const reply = await runRepeaterOpsCommand({
+      op: "rstatus",
+      targetArg: "aabbccdd1122",
+      account: createAccount(),
+      deviceHandle: createDeviceHandle({ getStatus }),
+    });
+    expect(reply).toContain("no answer from aabbccdd1122 (timeout)");
+  });
+
+  it("counts against the airtime budget before the request goes on air", async () => {
+    const account = createAccount({
+      config: {
+        dmPolicy: "pairing",
+        allowFrom: [],
+        groupPolicy: "disabled",
+        groupAllowFrom: [],
+        channels: [0],
+        sendRateLimit: { enabled: true, maxSends: 1, windowMs: 600_000 },
+      },
+    });
+    const getStatus = vi.fn(async () => SAMPLE_STATS);
+    const handle = createDeviceHandle({ getStatus });
+
+    const first = await runRepeaterOpsCommand({
+      op: "rstatus",
+      targetArg: "aabbccdd1122",
+      account,
+      deviceHandle: handle,
+    });
+    expect(first).toMatch(/^HillRepeater bat:/);
+
+    const second = await runRepeaterOpsCommand({
+      op: "rstatus",
+      targetArg: "aabbccdd1122",
+      account,
+      deviceHandle: handle,
+    });
+    expect(second).toMatch(/^airtime budget exhausted/);
+    expect(getStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers with usage text when the node argument is missing", async () => {
+    const reply = await runRepeaterOpsCommand({
+      op: "rstatus",
+      targetArg: "",
+      account: createAccount(),
+    });
+    expect(reply).toMatch(/^usage: !rstatus <node>/);
   });
 });
 

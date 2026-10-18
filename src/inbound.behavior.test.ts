@@ -953,6 +953,40 @@ describe("meshcore inbound behavior", () => {
         expect(sendReply).not.toHaveBeenCalled();
         expect(inboundRunMock).toHaveBeenCalledTimes(1);
       });
+
+      it("answers !rstatus <node> directly for an allowlisted sender (issue #34)", async () => {
+        const sendReply = vi.fn(async () => undefined);
+        const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+        setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+
+        await handleMeshcoreInbound({
+          message: createMessage({
+            senderNodeId: "!aabbccdd1122",
+            target: "!aabbccdd1122",
+            text: "!rstatus !ff00ff00ff00",
+          }),
+          account: createAccount({
+            config: {
+              dmPolicy: "allowlist",
+              allowFrom: ["!aabbccdd1122"],
+              groupPolicy: "disabled",
+              groupAllowFrom: [],
+              channels: [0],
+            },
+          }),
+          config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+          runtime: createRuntimeEnv(),
+          sendReply,
+        });
+
+        expect(runRepeaterOpsCommandMock).toHaveBeenCalledWith({
+          op: "rstatus",
+          targetArg: "!ff00ff00ff00",
+          account: expect.objectContaining({ accountId: "default" }),
+        });
+        expect(sendReply).toHaveBeenCalledWith("!aabbccdd1122", "ops reply", undefined);
+        expect(inboundRunMock).not.toHaveBeenCalled();
+      });
     });
   });
 });

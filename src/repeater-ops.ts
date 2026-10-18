@@ -27,7 +27,7 @@ import {
 } from "./rate-limit.js";
 import type { ResolvedMeshcoreAccount } from "./accounts.js";
 
-export type RepeaterOpsKind = "neighbours";
+export type RepeaterOpsKind = "neighbours" | "rstatus";
 
 /** The target argument did not resolve to a node we can address. */
 export class RepeaterOpsTargetError extends Error {}
@@ -52,7 +52,27 @@ export type RepeaterNeighboursResult = {
   neighbours: RepeaterNeighbour[];
 };
 
+export type RemoteNodeStatus = {
+  batteryMv: number;
+  txQueueLen: number;
+  noiseFloorDbm: number;
+  lastRssiDbm: number;
+  packetsRecv: number;
+  packetsSent: number;
+  airtimeSecs: number;
+  uptimeSecs: number;
+  sentFlood: number;
+  sentDirect: number;
+  recvFlood: number;
+  recvDirect: number;
+  errEvents: number;
+  lastSnrDb: number;
+  directDups: number;
+  floodDups: number;
+};
+
 export const NEIGHBOURS_QUERY_TIMEOUT_MS = 30_000;
+export const STATUS_REQUEST_TIMEOUT_MS = 30_000;
 
 // Airtime of the response scales with the requested count (the repeater's
 // frames, our shared frequency), so keep the page small; 8 entries fit the
@@ -229,10 +249,72 @@ export function formatNeighboursReply(
   return `${targetLabel} hears ${result.totalNeighboursCount}${shownNote}: ${entries.join("; ")}`;
 }
 
+/**
+ * Pull a remote node's status frame: repeater-class stack/radio health
+ * counters. Issue #34. ON AIR: the request is a SendStatusReq frame to the
+ * target node.
+ */
+export async function queryRemoteNodeStatus(params: {
+  account: ResolvedMeshcoreAccount;
+  targetArg: string;
+  deviceHandle?: MeshcoreDeviceHandle;
+  /** Test hook: override the outer timeout budget. */
+  timeoutMs?: number;
+}): Promise<{ targetLabel: string; result: RemoteNodeStatus }> {
+  const accountId = params.account.accountId;
+  const pubkey = resolveTargetPubkey(params.targetArg, accountId);
+  const handle = requireConnectedHandle(accountId, params.deviceHandle);
+  assertOpsRateLimit(params.account, "status request");
+
+  const raw = await withOpsTimeout(
+    handle.connection.getStatus(pubkey),
+    params.timeoutMs ?? STATUS_REQUEST_TIMEOUT_MS,
+    "status request",
+  );
+
+  return {
+    targetLabel: targetLabelFor(pubkey, accountId),
+    result: {
+      batteryMv: raw.batt_milli_volts,
+      txQueueLen: raw.curr_tx_queue_len,
+      noiseFloorDbm: raw.noise_floor,
+      lastRssiDbm: raw.last_rssi,
+      packetsRecv: raw.n_packets_recv,
+      packetsSent: raw.n_packets_sent,
+      airtimeSecs: raw.total_air_time_secs,
+      uptimeSecs: raw.total_up_time_secs,
+      sentFlood: raw.n_sent_flood,
+      sentDirect: raw.n_sent_direct,
+      recvFlood: raw.n_recv_flood,
+      recvDirect: raw.n_recv_direct,
+      errEvents: raw.err_events,
+      // Every other SNR field in the companion protocol is quarter-dB; the
+      // repeater status frame follows the same convention (verify against
+      // live firmware when a repeater contact exists, issue #24).
+      lastSnrDb: raw.last_snr / 4,
+      directDups: raw.n_direct_dups,
+      floodDups: raw.n_flood_dups,
+    },
+  };
+}
+
+export function formatRemoteStatusReply(targetLabel: string, result: RemoteNodeStatus): string {
+  return (
+    `${targetLabel} bat:${(result.batteryMv / 1000).toFixed(2)}V ` +
+    `txq:${result.txQueueLen} nf:${result.noiseFloorDbm} rssi:${result.lastRssiDbm} ` +
+    `rx:${result.packetsRecv} tx:${result.packetsSent} ` +
+    `air:${formatHeardAge(result.airtimeSecs)} up:${formatHeardAge(result.uptimeSecs)} ` +
+    `err:${result.errEvents} snr:${formatSnrDb(result.lastSnrDb)} ` +
+    `dup:${result.directDups}/${result.floodDups}`
+  );
+}
+
 function usageFor(op: RepeaterOpsKind): string {
   switch (op) {
     case "neighbours":
       return "usage: !neighbours <node> — who does a repeater hear (full !nodeId or known contact prefix)";
+    case "rstatus":
+      return "usage: !rstatus <node> — pull a remote node's health frame (full !nodeId or known contact prefix)";
   }
 }
 
@@ -265,6 +347,15 @@ export async function runRepeaterOpsCommand(params: {
           timeoutMs: params.timeoutMs,
         });
         return formatNeighboursReply(targetLabel, result);
+      }
+      case "rstatus": {
+        const { targetLabel, result } = await queryRemoteNodeStatus({
+          account,
+          targetArg,
+          deviceHandle: params.deviceHandle,
+          timeoutMs: params.timeoutMs,
+        });
+        return formatRemoteStatusReply(targetLabel, result);
       }
     }
   } catch (error) {

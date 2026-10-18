@@ -11,6 +11,7 @@ canonical source for that text.
 Features
 
 - Neighbours query, issue #35: new DM command !neighbours <node> asks a repeater-class contact which nodes it currently hears and replies with the edge list — pubkey prefix, last-heard age, SNR, and the contact name when the prefix resolves in the contact book. Airtime honesty: the query rides an on-air SendBinaryReq frame to the target node (meshcore.js getNeighbours is not a local query), so each call counts one packet against the sendRateLimit budget, and the command is DM-admission-gated and group-silent like !ping/!status. Targets that ignore the request fail soft with a timeout answer. Live verification against a real repeater is deferred to a maintenance window (blocked on node discovery, issue #24); all coverage here is mock-based.
+- Remote status request, issue #34: new DM command !rstatus <node> pulls a remote node's status frame and replies with its stack/radio health — battery, tx queue depth, noise floor, RSSI, packet counters, total airtime, uptime, error events, SNR, duplicate counts. On air like the neighbours query (SendStatusReq frame, one packet against the sendRateLimit budget), DM-admission-gated and group-silent. The last_snr field is scaled from quarter-dB following the protocol convention used by every other SNR field; verify against live repeater firmware when one is reachable (issue #24). On-demand only, never scheduled.
 
 ## 2026.10.10 — 2026-10-18
 

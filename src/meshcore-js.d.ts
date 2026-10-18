@@ -75,6 +75,27 @@ declare module "@liamcottle/meshcore.js" {
     neighbours: MeshcoreNeighbour[];
   };
 
+  /** Repeater health counters parsed by the library from a StatusResponse push. */
+  export type MeshcoreRepeaterStats = {
+    batt_milli_volts: number;
+    curr_tx_queue_len: number;
+    noise_floor: number;
+    last_rssi: number;
+    n_packets_recv: number;
+    n_packets_sent: number;
+    total_air_time_secs: number;
+    total_up_time_secs: number;
+    n_sent_flood: number;
+    n_sent_direct: number;
+    n_recv_flood: number;
+    n_recv_direct: number;
+    err_events: number;
+    /** Raw int16; quarter-dB like every other SNR field in the protocol. */
+    last_snr: number;
+    n_direct_dups: number;
+    n_flood_dups: number;
+  };
+
   export class TCPConnection extends EventEmitter {
     constructor(host: string, port: number);
     connect(): Promise<void>;
@@ -119,6 +140,16 @@ declare module "@liamcottle/meshcore.js" {
       orderBy?: number,
       pubKeyPrefixLength?: number,
     ): Promise<MeshcoreNeighboursResponse>;
+
+    /**
+     * Pull a remote node's status frame (repeater-class feature: stack/radio
+     * health counters). Rejects with the bare string "timeout" when the
+     * request expires. ON AIR: implemented via SendStatusReq to the target.
+     */
+    getStatus(
+      contactPublicKey: Uint8Array,
+      extraTimeoutMillis?: number,
+    ): Promise<MeshcoreRepeaterStats>;
 
     // NOTE: the library emits most response events by numeric code
     // (Constants.ResponseCodes / PushCodes), not by friendly name.
