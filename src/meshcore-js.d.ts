@@ -63,6 +63,58 @@ declare module "@liamcottle/meshcore.js" {
     0x8a: (advert: Record<string, unknown>) => void;
   };
 
+  export type MeshcoreNeighbour = {
+    publicKeyPrefix: Uint8Array;
+    heardSecondsAgo: number;
+    /** SNR in dB (library pre-scales the raw quarter-dB byte). */
+    snr: number;
+  };
+
+  export type MeshcoreNeighboursResponse = {
+    totalNeighboursCount: number;
+    neighbours: MeshcoreNeighbour[];
+  };
+
+  /** TraceData (0x89) push payload as parsed by the library. */
+  export type MeshcoreTraceData = {
+    reserved: number;
+    pathLen: number;
+    flags: number;
+    tag: number;
+    authCode: number;
+    /** One 1-byte pubkey hash per traversed hop, in path order. */
+    pathHashes: Uint8Array;
+    /**
+     * Per-hop SNR as RAW signed bytes in quarter-dB — the library does NOT
+     * scale this array (unlike lastSnr). Reinterpret each byte as int8, then
+     * divide by 4.
+     */
+    pathSnrs: Uint8Array;
+    /** SNR of the final link back to the requesting node, in dB (library-scaled). */
+    lastSnr: number;
+  };
+
+  /** Repeater health counters parsed by the library from a StatusResponse push. */
+  export type MeshcoreRepeaterStats = {
+    batt_milli_volts: number;
+    curr_tx_queue_len: number;
+    noise_floor: number;
+    last_rssi: number;
+    n_packets_recv: number;
+    n_packets_sent: number;
+    total_air_time_secs: number;
+    total_up_time_secs: number;
+    n_sent_flood: number;
+    n_sent_direct: number;
+    n_recv_flood: number;
+    n_recv_direct: number;
+    err_events: number;
+    /** Raw int16; quarter-dB like every other SNR field in the protocol. */
+    last_snr: number;
+    n_direct_dups: number;
+    n_flood_dups: number;
+  };
+
   export class TCPConnection extends EventEmitter {
     constructor(host: string, port: number);
     connect(): Promise<void>;
@@ -94,6 +146,37 @@ declare module "@liamcottle/meshcore.js" {
     sendZeroHopAdvert(): Promise<void>;
     /** Send a self-advert that is flooded across the mesh. */
     sendFloodAdvert(): Promise<void>;
+
+    /**
+     * Ask a (repeater-class) node which neighbours it currently hears.
+     * Rejects with the bare string "timeout" when the request expires.
+     * ON AIR: implemented via SendBinaryReq to the target node.
+     */
+    getNeighbours(
+      publicKey: Uint8Array,
+      count?: number,
+      offset?: number,
+      orderBy?: number,
+      pubKeyPrefixLength?: number,
+    ): Promise<MeshcoreNeighboursResponse>;
+
+    /**
+     * Pull a remote node's status frame (repeater-class feature: stack/radio
+     * health counters). Rejects with the bare string "timeout" when the
+     * request expires. ON AIR: implemented via SendStatusReq to the target.
+     */
+    getStatus(
+      contactPublicKey: Uint8Array,
+      extraTimeoutMillis?: number,
+    ): Promise<MeshcoreRepeaterStats>;
+
+    /**
+     * MeshCore traceroute: fire a trace-path request toward a contact and
+     * resolve with the route the frame took. Rejects with the bare string
+     * "timeout" when the request expires. ON AIR: SendTracePath frame, plus
+     * forwarding airtime on every relay along the path.
+     */
+    tracePath(path: Uint8Array, extraTimeoutMillis?: number): Promise<MeshcoreTraceData>;
 
     // NOTE: the library emits most response events by numeric code
     // (Constants.ResponseCodes / PushCodes), not by friendly name.
