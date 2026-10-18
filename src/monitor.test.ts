@@ -446,6 +446,35 @@ describe("monitorMeshcoreProvider", () => {
     await expect(monitorPromise).resolves.toEqual({ stop: expect.any(Function) });
   });
 
+  it("patches lastTransportActivityAt on every received frame (rx) so the gateway health monitor sees a live socket on a silent mesh (#3)", async () => {
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const statusSink = vi.fn();
+
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      statusSink,
+    });
+
+    // Let the async IIFE attach handlers.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    statusSink.mockClear();
+
+    // meshcore.js emits "rx" per received frame (connection.js) — adverts,
+    // flood traffic, and our own poll responses keep this firing even when no
+    // DM/group message ever arrives.
+    handle.connection.emit("rx", new Uint8Array([0x00]));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(statusSink).toHaveBeenCalledWith(
+      expect.objectContaining({ lastTransportActivityAt: expect.any(Number) }),
+    );
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
   it("strips the 4 leading signature bytes from SignedPlain DMs (txtType=2)", async () => {
     const handle = createConnection();
     connectMeshcoreDeviceMock.mockResolvedValue(handle);

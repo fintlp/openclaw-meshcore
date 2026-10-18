@@ -6,6 +6,12 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## Unreleased
+
+Fixes
+
+- Health-monitor false positives (issue #3). The monitor now forwards every received radio frame (the meshcore.js rx event — adverts, flood traffic, poll responses) as transport activity, so the gateway watchdog no longer restarts a healthy but quiet channel every ~35 minutes on a silent mesh. Forensics: 90.5% of 643 observed restarts landed on exactly 2100.000s — a watchdog artifact, never a socket failure. Unit test pins rx to lastTransportActivityAt.
+
 ## 2026.10.10 — 2026-10-18
 
 Airtime protection and a responsible-disclosure policy.

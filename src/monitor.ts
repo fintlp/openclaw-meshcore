@@ -582,6 +582,19 @@ export function monitorMeshcoreProvider(
     unsubscribers.push(() => handle.connection.off(EVENT_CHANNEL_MSG_RECV, onChannelMsgRecv));
     unsubscribers.push(() => handle.connection.off("disconnected", onDisconnected));
 
+    // The gateway health monitor restarts channels whose transport looks idle
+    // (stale-socket on a 30-min threshold). On a quiet mesh no DM/group frame
+    // arrives for hours, but meshcore.js still receives frames constantly
+    // (adverts, flood traffic, our own poll responses) and emits "rx" per
+    // frame. Forward that as transport activity so the watchdog sees the
+    // truth: the socket is alive, just silent (issue #3 — 90.5% of observed
+    // restarts landed on exactly 2100.000s, a watchdog artifact, not a drop).
+    const onRx = () => {
+      opts.statusSink?.({ lastTransportActivityAt: Date.now() });
+    };
+    handle.connection.on("rx", onRx);
+    unsubscribers.push(() => handle.connection.off("rx", onRx));
+
     // Advert pushes carry full pubkeys (PushCodes.Advert = 0x80 in auto-add mode,
     // PushCodes.NewAdvert = 0x8A in manual-add mode) — cache them so 6-byte DM
     // prefixes become addressable reply targets. NewAdvert carries the full
