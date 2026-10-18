@@ -14,10 +14,13 @@ import {
   formatHeardAge,
   formatNeighboursReply,
   formatRemoteStatusReply,
+  formatTraceReply,
+  normalizeTraceData,
   queryNodeNeighbours,
   queryRemoteNodeStatus,
   RepeaterOpsTargetError,
   runRepeaterOpsCommand,
+  tracePathToNode,
   type RepeaterNeighboursResult,
 } from "./repeater-ops.js";
 import type { MeshcoreDeviceHandle } from "./device-client.js";
@@ -441,3 +444,189 @@ describe("repeater ops: remote status request (issue #34)", () => {
   });
 });
 
+
+/**
+ * Byte-level replica of meshcore.js onTraceDataPush (Connection class), used
+ * to build the push payload from realistic wire bytes so the known-answer
+ * tests below pin the FULL path: wire frame -> library parse -> our
+ * normalization. Layout: reserved(1) pathLen(1) flags(1) tag(u32le)
+ * auth(u32le) pathHashes(pathLen) pathSnrs(pathLen) lastSnr(int8, /4).
+ */
+function parseTraceDataFrameLikeTheLibrary(frame: Uint8Array): {
+  reserved: number;
+  pathLen: number;
+  flags: number;
+  tag: number;
+  authCode: number;
+  pathHashes: Uint8Array;
+  pathSnrs: Uint8Array;
+  lastSnr: number;
+} {
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  const reserved = view.getUint8(0);
+  const pathLen = view.getUint8(1);
+  return {
+    reserved,
+    pathLen,
+    flags: view.getUint8(2),
+    tag: view.getUint32(3, true),
+    authCode: view.getUint32(7, true),
+    pathHashes: frame.slice(11, 11 + pathLen),
+    pathSnrs: frame.slice(11 + pathLen, 11 + 2 * pathLen),
+    lastSnr: view.getInt8(11 + 2 * pathLen) / 4,
+  };
+}
+
+describe("repeater ops: trace path (issue #33)", () => {
+  beforeEach(() => {
+    const dir = mkdtempSync(join(tmpdir(), "meshcore-repeater-ops-"));
+    setContactBookPathForTests(join(dir, "contacts.json"));
+    resetContactBookForTests();
+    rememberContact({ publicKey: REPEATER_PUBKEY, advName: "HillRepeater" }, accountId);
+    // Unique 0x4f-prefix contact: hop hash 4f resolves to this name.
+    rememberContact(
+      { publicKey: hexToBytes("4f" + "aa".repeat(31)), advName: "RelayA" },
+      accountId,
+    );
+  });
+
+  afterEach(() => {
+    resetContactBookForTests();
+    setContactBookPathForTests(undefined);
+    clearSendRateLimitState();
+  });
+
+  it("KAT: parses a realistic 2-hop trace frame (negative SNR byte included)", () => {
+    // Wire capture shape: 2 hops 4f -> 9c, hop SNRs 5.5 dB and -2.0 dB
+    // (0xf8 = -8 quarter-dB), final link 5.0 dB, flags=1 (response).
+    const frame = hexToBytes("00020178563412efbeadde4f9c16f814");
+    const push = parseTraceDataFrameLikeTheLibrary(frame);
+
+    const result = normalizeTraceData(push, accountId);
+
+    expect(push.pathLen).toBe(2);
+    expect(push.tag).toBe(0x12345678);
+    expect(result).toEqual({
+      hops: [
+        { hashHex: "4f", snrDb: 5.5, name: "RelayA" },
+        { hashHex: "9c", snrDb: -2, name: undefined },
+      ],
+      lastSnrDb: 5,
+    });
+    expect(formatTraceReply("HillRepeater", result)).toBe(
+      "path to HillRepeater: 2 hops 4f(RelayA) 5.5dB > 9c -2.0dB (final-link 5.0dB)",
+    );
+  });
+
+  it("KAT: parses a direct-path trace frame (zero hops)", () => {
+    const frame = hexToBytes("0000010100000000000000" + "18");
+    const push = parseTraceDataFrameLikeTheLibrary(frame);
+
+    const result = normalizeTraceData(push, accountId);
+
+    expect(result.hops).toEqual([]);
+    expect(result.lastSnrDb).toBe(6);
+    expect(formatTraceReply("HillRepeater", result)).toBe(
+      "path to HillRepeater: direct (final-link 6.0dB)",
+    );
+  });
+
+  it("leaves a hop unnamed when its hash byte is ambiguous in the contact book", () => {
+    // A second 0x4f-prefix contact makes the 4f byte ambiguous.
+    rememberContact(
+      { publicKey: hexToBytes("4f" + "bb".repeat(31)), advName: "RelayB" },
+      accountId,
+    );
+    const frame = hexToBytes("00010178563412efbeadde" + "4f" + "16" + "14");
+    const push = parseTraceDataFrameLikeTheLibrary(frame);
+
+    const result = normalizeTraceData(push, accountId);
+
+    expect(result.hops).toEqual([{ hashHex: "4f", snrDb: 5.5, name: undefined }]);
+  });
+
+  it("never reads past the reported arrays when pathLen overclaims", () => {
+    // Corrupt/truncated shape: pathLen says 3 hops but only 1 hash byte and
+    // no SNR bytes follow. The min() guard must cap at the available data.
+    const push = {
+      pathLen: 3,
+      pathHashes: new Uint8Array([0x4f]),
+      pathSnrs: new Uint8Array(0),
+      lastSnr: 1.5,
+    };
+    const result = normalizeTraceData(push, accountId);
+    expect(result.hops).toEqual([{ hashHex: "4f", snrDb: 0, name: "RelayA" }]);
+  });
+
+  it("runs the full op against a mocked connection", async () => {
+    const frame = hexToBytes("00020178563412efbeadde4f9c16f814");
+    const tracePath = vi.fn(async () => parseTraceDataFrameLikeTheLibrary(frame));
+    const handle = createDeviceHandle({ tracePath });
+
+    const { targetLabel, result } = await tracePathToNode({
+      account: createAccount(),
+      targetArg: "aabbccdd1122",
+      deviceHandle: handle,
+    });
+
+    expect(tracePath).toHaveBeenCalledTimes(1);
+    expect(bytesToHex(tracePath.mock.calls[0][0] as Uint8Array)).toBe(REPEATER_PUBKEY_HEX);
+    expect(targetLabel).toBe("HillRepeater");
+    expect(result.hops).toHaveLength(2);
+  });
+
+  it("maps the library bare-string timeout to the soft no-answer reply", async () => {
+    const tracePath = vi.fn(async () => {
+      throw "timeout";
+    });
+    const reply = await runRepeaterOpsCommand({
+      op: "trace",
+      targetArg: "aabbccdd1122",
+      account: createAccount(),
+      deviceHandle: createDeviceHandle({ tracePath }),
+    });
+    expect(reply).toContain("no answer from aabbccdd1122 (timeout)");
+  });
+
+  it("counts against the airtime budget before the request goes on air", async () => {
+    const account = createAccount({
+      config: {
+        dmPolicy: "pairing",
+        allowFrom: [],
+        groupPolicy: "disabled",
+        groupAllowFrom: [],
+        channels: [0],
+        sendRateLimit: { enabled: true, maxSends: 1, windowMs: 600_000 },
+      },
+    });
+    const frame = hexToBytes("0000010100000000000000" + "18");
+    const tracePath = vi.fn(async () => parseTraceDataFrameLikeTheLibrary(frame));
+    const handle = createDeviceHandle({ tracePath });
+
+    const first = await runRepeaterOpsCommand({
+      op: "trace",
+      targetArg: "aabbccdd1122",
+      account,
+      deviceHandle: handle,
+    });
+    expect(first).toMatch(/^path to HillRepeater: direct/);
+
+    const second = await runRepeaterOpsCommand({
+      op: "trace",
+      targetArg: "aabbccdd1122",
+      account,
+      deviceHandle: handle,
+    });
+    expect(second).toMatch(/^airtime budget exhausted/);
+    expect(tracePath).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers with usage text when the node argument is missing", async () => {
+    const reply = await runRepeaterOpsCommand({
+      op: "trace",
+      targetArg: "",
+      account: createAccount(),
+    });
+    expect(reply).toMatch(/^usage: !trace <node>/);
+  });
+});

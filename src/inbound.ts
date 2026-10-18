@@ -127,6 +127,7 @@ const COMMAND_REPLIES = new Set(["!ping", "!status"]);
 const REPEATER_OPS_COMMANDS: ReadonlyArray<{ command: string; op: RepeaterOpsKind }> = [
   { command: "!neighbours", op: "neighbours" },
   { command: "!rstatus", op: "rstatus" },
+  { command: "!trace", op: "trace" },
 ];
 
 function parseRepeaterOpsInvocation(

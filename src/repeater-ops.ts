@@ -13,7 +13,7 @@
  *
  * Ops are on-demand diagnostics only: never scheduled, never polled.
  */
-import { getContactByPubkey, resolveContactByPrefix } from "./contact-book.js";
+import { getContactByPubkey, getContactBookEntries, resolveContactByPrefix } from "./contact-book.js";
 import {
   getMeshcoreDevice,
   nodeIdToPubkey,
@@ -27,7 +27,7 @@ import {
 } from "./rate-limit.js";
 import type { ResolvedMeshcoreAccount } from "./accounts.js";
 
-export type RepeaterOpsKind = "neighbours" | "rstatus";
+export type RepeaterOpsKind = "neighbours" | "rstatus" | "trace";
 
 /** The target argument did not resolve to a node we can address. */
 export class RepeaterOpsTargetError extends Error {}
@@ -71,8 +71,28 @@ export type RemoteNodeStatus = {
   floodDups: number;
 };
 
+export type TraceHop = {
+  /** One-byte path hash of the hop as reported in the TraceData frame, hex. */
+  hashHex: string;
+  snrDb: number;
+  /**
+   * Contact-book advert name, only when exactly one known contact carries
+   * this hash byte (single-byte hashes collide easily; ambiguous = unnamed).
+   */
+  name?: string;
+};
+
+export type TracePathResult = {
+  hops: TraceHop[];
+  /** SNR of the final link back to us, dB (library pre-scales this one). */
+  lastSnrDb: number;
+};
+
 export const NEIGHBOURS_QUERY_TIMEOUT_MS = 30_000;
 export const STATUS_REQUEST_TIMEOUT_MS = 30_000;
+// Multi-hop round trips stack per-relay airtime, so the trace budget is the
+// largest of the three.
+export const TRACE_PATH_TIMEOUT_MS = 45_000;
 
 // Airtime of the response scales with the requested count (the repeater's
 // frames, our shared frequency), so keep the page small; 8 entries fit the
@@ -309,12 +329,99 @@ export function formatRemoteStatusReply(targetLabel: string, result: RemoteNodeS
   );
 }
 
+/** Reinterpret an unsigned byte as signed int8. */
+function int8(byte: number): number {
+  return byte > 127 ? byte - 256 : byte;
+}
+
+function resolveHopName(hashHex: string, accountId: string): string | undefined {
+  const matches = getContactBookEntries(accountId).filter((entry) =>
+    bytesToHex(entry.publicKey).startsWith(hashHex),
+  );
+  if (matches.length !== 1) {
+    return undefined;
+  }
+  return matches[0].advName || undefined;
+}
+
+/**
+ * Normalize a TraceData push payload (as parsed by meshcore.js) into a hop
+ * list. The library scales lastSnr but leaves pathSnrs as raw bytes, so the
+ * quarter-dB int8 conversion happens here.
+ */
+export function normalizeTraceData(
+  raw: {
+    pathLen: number;
+    pathHashes: Uint8Array;
+    pathSnrs: Uint8Array;
+    lastSnr: number;
+  },
+  accountId: string,
+): TracePathResult {
+  const hopCount = Math.min(raw.pathLen, raw.pathHashes.length);
+  const hops: TraceHop[] = [];
+  for (let i = 0; i < hopCount; i += 1) {
+    const hashHex = raw.pathHashes[i].toString(16).padStart(2, "0");
+    const snrRaw = i < raw.pathSnrs.length ? int8(raw.pathSnrs[i]) : 0;
+    hops.push({
+      hashHex,
+      snrDb: snrRaw / 4,
+      name: resolveHopName(hashHex, accountId),
+    });
+  }
+  return { hops, lastSnrDb: raw.lastSnr };
+}
+
+/**
+ * MeshCore traceroute toward a contact: the reply reports the route the
+ * frame took through the mesh. Issue #33. ON AIR: a SendTracePath frame,
+ * plus forwarding airtime on every relay along the path.
+ */
+export async function tracePathToNode(params: {
+  account: ResolvedMeshcoreAccount;
+  targetArg: string;
+  deviceHandle?: MeshcoreDeviceHandle;
+  /** Test hook: override the outer timeout budget. */
+  timeoutMs?: number;
+}): Promise<{ targetLabel: string; result: TracePathResult }> {
+  const accountId = params.account.accountId;
+  const pubkey = resolveTargetPubkey(params.targetArg, accountId);
+  const handle = requireConnectedHandle(accountId, params.deviceHandle);
+  assertOpsRateLimit(params.account, "path trace");
+
+  const raw = await withOpsTimeout(
+    handle.connection.tracePath(pubkey),
+    params.timeoutMs ?? TRACE_PATH_TIMEOUT_MS,
+    "path trace",
+  );
+
+  return {
+    targetLabel: targetLabelFor(pubkey, accountId),
+    result: normalizeTraceData(raw, accountId),
+  };
+}
+
+export function formatTraceReply(targetLabel: string, result: TracePathResult): string {
+  if (result.hops.length === 0) {
+    return `path to ${targetLabel}: direct (final-link ${formatSnrDb(result.lastSnrDb)}dB)`;
+  }
+  const hops = result.hops
+    .map((hop) => `${hop.hashHex}${hop.name ? `(${hop.name})` : ""} ${formatSnrDb(hop.snrDb)}dB`)
+    .join(" > ");
+  return (
+    `path to ${targetLabel}: ${result.hops.length} hop${result.hops.length === 1 ? "" : "s"} ` +
+    `${hops} (final-link ${formatSnrDb(result.lastSnrDb)}dB)`
+  );
+}
+
 function usageFor(op: RepeaterOpsKind): string {
   switch (op) {
     case "neighbours":
       return "usage: !neighbours <node> — who does a repeater hear (full !nodeId or known contact prefix)";
     case "rstatus":
       return "usage: !rstatus <node> — pull a remote node's health frame (full !nodeId or known contact prefix)";
+    case "trace":
+      return "usage: !trace <node> — traceroute through the mesh (full !nodeId or known contact prefix)";
   }
 }
 
@@ -356,6 +463,15 @@ export async function runRepeaterOpsCommand(params: {
           timeoutMs: params.timeoutMs,
         });
         return formatRemoteStatusReply(targetLabel, result);
+      }
+      case "trace": {
+        const { targetLabel, result } = await tracePathToNode({
+          account,
+          targetArg,
+          deviceHandle: params.deviceHandle,
+          timeoutMs: params.timeoutMs,
+        });
+        return formatTraceReply(targetLabel, result);
       }
     }
   } catch (error) {

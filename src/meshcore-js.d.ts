@@ -75,6 +75,25 @@ declare module "@liamcottle/meshcore.js" {
     neighbours: MeshcoreNeighbour[];
   };
 
+  /** TraceData (0x89) push payload as parsed by the library. */
+  export type MeshcoreTraceData = {
+    reserved: number;
+    pathLen: number;
+    flags: number;
+    tag: number;
+    authCode: number;
+    /** One 1-byte pubkey hash per traversed hop, in path order. */
+    pathHashes: Uint8Array;
+    /**
+     * Per-hop SNR as RAW signed bytes in quarter-dB — the library does NOT
+     * scale this array (unlike lastSnr). Reinterpret each byte as int8, then
+     * divide by 4.
+     */
+    pathSnrs: Uint8Array;
+    /** SNR of the final link back to the requesting node, in dB (library-scaled). */
+    lastSnr: number;
+  };
+
   /** Repeater health counters parsed by the library from a StatusResponse push. */
   export type MeshcoreRepeaterStats = {
     batt_milli_volts: number;
@@ -150,6 +169,14 @@ declare module "@liamcottle/meshcore.js" {
       contactPublicKey: Uint8Array,
       extraTimeoutMillis?: number,
     ): Promise<MeshcoreRepeaterStats>;
+
+    /**
+     * MeshCore traceroute: fire a trace-path request toward a contact and
+     * resolve with the route the frame took. Rejects with the bare string
+     * "timeout" when the request expires. ON AIR: SendTracePath frame, plus
+     * forwarding airtime on every relay along the path.
+     */
+    tracePath(path: Uint8Array, extraTimeoutMillis?: number): Promise<MeshcoreTraceData>;
 
     // NOTE: the library emits most response events by numeric code
     // (Constants.ResponseCodes / PushCodes), not by friendly name.
