@@ -6,22 +6,13 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
-## Unreleased
+## 2026.10.8 — 2026-10-18
 
-**Docs**
+Docs-only release — no code or behavior changes since 2026.10.7.
 
-- **README reworked to be use-case-forward** (#44): new opening with the
-  plugin icon, a use-case tour (off-grid assistant, backup channel, site
-  monitor, expedition hub, community bot), and a story-style lead-in to the
-  quickstart. The safety-by-default section is unchanged — it is a selling
-  point, not a caveat.
-- **New "Compatibility & maintenance policy" section** (#45): the tracked
-  `plugin-sdk` surface (with an audit one-liner), the deprecation-response
-  precedent (inbound-envelope migration, v2026.10.7), the stable-tracking
-  release rule (beta-only SDK surfaces wait for stable), the host-floor
-  bump policy (≥ 2026.5.26; floor moves ship in a minor with a changelog
-  callout), and where breakage surfaces first. Cross-linked from
-  `docs/COMPATIBILITY.md`.
+- README reworked to be use-case-forward (issue #44): new opening with the plugin icon, a use-case tour (off-grid messaging assistant, emergency/backup channel, repeater-site monitor, field-expedition comms hub, festival/community bot), and a story-style lead-in to the quickstart with the two gotchas flagged up front. The safety-by-default section is unchanged — it is a selling point, not a caveat.
+- New Compatibility and maintenance policy section in the README (issue #45): the tracked plugin-sdk surface with an audit one-liner, the deprecation-response precedent (inbound-envelope migration shipped in 2026.10.7, removal window ends 2026-12-31), the stable-tracking release rule (beta-only SDK surfaces are adopted only after they reach stable), the host-floor bump policy (floor is OpenClaw 2026.5.26 or newer; moves ship in a minor release with a changelog callout), and where breakage surfaces first. Cross-linked from docs/COMPATIBILITY.md.
+- package.json description is now use-case-led. npm-shrinkwrap version fields re-synced (they had drifted behind at 2026.10.6).
 
 ## 2026.10.7 — 2026-10-17
 
