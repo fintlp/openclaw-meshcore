@@ -6,6 +6,23 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## Unreleased
+
+**Docs**
+
+- **README reworked to be use-case-forward** (#44): new opening with the
+  plugin icon, a use-case tour (off-grid assistant, backup channel, site
+  monitor, expedition hub, community bot), and a story-style lead-in to the
+  quickstart. The safety-by-default section is unchanged — it is a selling
+  point, not a caveat.
+- **New "Compatibility & maintenance policy" section** (#45): the tracked
+  `plugin-sdk` surface (with an audit one-liner), the deprecation-response
+  precedent (inbound-envelope migration, v2026.10.7), the stable-tracking
+  release rule (beta-only SDK surfaces wait for stable), the host-floor
+  bump policy (≥ 2026.5.26; floor moves ship in a minor with a changelog
+  callout), and where breakage surfaces first. Cross-linked from
+  `docs/COMPATIBILITY.md`.
+
 ## 2026.10.7 — 2026-10-17
 
 **Fixes**

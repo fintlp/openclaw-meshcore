@@ -4,6 +4,8 @@ Verified combinations, with the date and evidence class. "Verified" = exercised 
 
 ## Plugin ↔ OpenClaw
 
+The maintenance policy behind this matrix — tracked SDK surface, deprecation response, stable-tracking releases, host-floor bumps — lives in the [README](../README.md#compatibility--maintenance-policy).
+
 | OpenClaw | Plugin | Status |
 |---|---|---|
 | 2026.9.6 | 2026.10.1 | ✅ verified (2026-10-01 → 10-03) |

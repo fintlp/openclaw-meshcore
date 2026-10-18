@@ -1,8 +1,33 @@
+<p align="center">
+  <img src="assets/icon.png" alt="openclaw-meshcore" width="128">
+</p>
+
 # openclaw-meshcore
 
-OpenClaw channel plugin for MeshCore LoRa nodes via the Companion Protocol over TCP.
+**An AI agent on your mesh.** This plugin connects your [OpenClaw](https://docs.openclaw.ai) gateway to a MeshCore LoRa node and puts your agent on the radio: reachable by direct message from any node in range, with no internet anywhere in the loop.
 
-## What it does
+## What you can do with it
+
+- **Off-grid messaging assistant.** Your agent — the same one that knows your notes, your calendar, your home automation — answering DMs from a €25 LoRa handheld with zero internet in the path. Mesh in, answers out.
+- **Emergency / backup channel.** When the internet dies, the mesh doesn't. A node in the attic keeps your agent reachable when everything else is dark.
+- **Repeater-site and unattended-node monitor.** Put a node somewhere remote and ask it how it's doing — battery and radio state where the node answers, plus the mesh traffic it has heard.
+- **Field-expedition comms hub.** A gateway at base camp, handhelds in the field. Everyone DMs the hub; the hub answers in DM — weather, schedules, "where is everybody."
+- **Festival / mesh-community bot.** A pairing-gated assistant on your event's mesh. New contacts get a pairing challenge, you approve the ones you know, and the bot never spams the public channel — it can't, see below.
+
+One thing shapes all of these: **the agent listens on group channels but never speaks on them.** Receive-only is enforced in the code, not in the AI's instructions, and everything two-way happens in DMs. That is deliberate, and it is what makes this plugin a good mesh citizen — the full story is in the safety section below, and honestly, it is worth the read.
+
+## From a shrink-wrapped board to your first DM in ~15 minutes
+
+The whole path is shorter than most people's first LoRa evening:
+
+1. **Get a board.** A Heltec WiFi LoRa 32 (V3 or V4, ~€20–30) is the verified path; any ESP32 board with a MeshCore companion build works.
+2. **Flash the MeshCore companion firmware with WiFi** — the build that speaks the Companion Protocol over TCP (port 5000). Set your region's band, name your node, put it on your LAN.
+3. **Install the plugin:** `openclaw channels add meshcore --host <node-ip>`. Keep the defaults (`dmPolicy: "pairing"`, groups receive-only).
+4. **Send yourself a DM** from a second device — a handheld, or a phone app paired to another node. Watch your agent answer. Over LoRa.
+
+Two gotchas cost real evenings, so they live at the top of the quickstart instead of the bottom: the node serves **one companion client at a time** (do node admin with the gateway channel disabled), and current firmware **silently drops DMs from senders not in the node's contact list** (enable auto-add, or add your peer on the node itself). Five minutes of reading saves the evening: [docs/QUICKSTART.md](docs/QUICKSTART.md).
+
+## What it does, in one breath
 
 This plugin connects OpenClaw to a MeshCore node acting as a companion server on your local network. It supports:
 
@@ -59,6 +84,20 @@ For the operator-level detail (trust model, per-group tool policies, hardened ex
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — releasing this plugin to ClawHub: metadata contract, the entrypoint trap, and the release flow.
 
 The full config reference lives below in this README.
+
+## Compatibility & maintenance policy
+
+OpenClaw core ships often, and its plugin SDK evolves with it. This plugin is maintained against that reality under an explicit policy, so you can rely on it long-term:
+
+- **Tracked surface.** The plugin builds exclusively against the public `openclaw/plugin-sdk/*` subpath exports — no deep imports into OpenClaw internals. The exact set is auditable at any time:
+  ```bash
+  grep -rhoE "openclaw/plugin-sdk[a-z/-]*" src/ *.ts | sort -u
+  ```
+  Today it spans ~30 subpaths covering the channel lifecycle (inbound, outbound, pairing, setup, status), account & config contracts, routing, and runtime helpers.
+- **Deprecation response.** When OpenClaw announces the retirement of an SDK surface we use, we migrate off it **before the removal date** and record the migration in the [changelog](CHANGELOG.md). Precedent: the `plugin-sdk/inbound-envelope` module was deprecated with a removal window ending 2026-12-31 — the plugin migrated to the modern explicit sequence in **v2026.10.7** (issue #43), ahead of the deadline, with golden-format tests pinning the agent-visible message format so the migration could not silently change behavior.
+- **Stable-tracking releases.** Plugin releases track OpenClaw **stable**. SDK surfaces that exist only in beta releases are adopted only after they reach stable (decision recorded 2026-10-18: the Async inbound-envelope APIs shipping in 2026.10.10-beta.1 land here with the first stable that carries them — not before). We don't run beta hosts on the production path, and we don't ship plugin releases that require them.
+- **Host support window.** The declared floor is **OpenClaw ≥ 2026.5.26** (enforced via `peerDependencies` and the install manifest). When the floor moves, it follows the oldest stable still inside its compatibility window, ships in a minor release, and gets a changelog callout — never silently in a patch.
+- **Where you see breakage first.** Verified host/plugin combinations live in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md); known incompatibilities are filed on the [issues page](https://github.com/fintlp/openclaw-meshcore/issues); the ClawHub page reflects the current state of this README.
 
 ## Architecture
 
