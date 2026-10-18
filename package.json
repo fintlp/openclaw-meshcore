@@ -66,6 +66,10 @@
         {
           "flags": "--host <host>",
           "description": "MeshCore node host or IP (optionally host:5000)"
+        },
+        {
+          "flags": "--dm-policy <policy>",
+          "description": "pairing (default), allowlist, open, or disabled"
         }
       ]
     },

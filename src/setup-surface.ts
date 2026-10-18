@@ -12,11 +12,13 @@ import {
 } from "openclaw/plugin-sdk/setup";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveDefaultMeshcoreAccountId, resolveMeshcoreAccount } from "./accounts.js";
+import { probeMeshcore } from "./probe.js";
 import {
   formatMeshcoreChannelTarget,
   normalizeMeshcoreAllowEntry,
   normalizeMeshcoreMessagingTarget,
 } from "./normalize.js";
+import { diagnoseMeshcoreProbeFailure, splitHostPort } from "./setup-detect.js";
 import { formatMeshcoreEndpoint } from "./transport.js";
 import {
   meshcoreSetupAdapter,
@@ -24,7 +26,7 @@ import {
   setMeshcoreGroupAccess,
   updateMeshcoreAccountConfig,
 } from "./setup-core.js";
-import type { CoreConfig } from "./types.js";
+import type { CoreConfig, MeshcoreAccountConfig, MeshcoreProbe } from "./types.js";
 
 const t = createSetupTranslator();
 const channel = "meshcore" as const;
@@ -53,6 +55,44 @@ function resolveMeshcoreConfigKeys(accountId?: string): { policyKey: string; all
   };
 }
 
+function readAccountSection(
+  cfg: CoreConfig,
+  accountId: string,
+): MeshcoreAccountConfig | undefined {
+  const section = cfg.channels?.meshcore;
+  if (!section) {
+    return undefined;
+  }
+  if (accountId === DEFAULT_ACCOUNT_ID) {
+    return section;
+  }
+  return section.accounts?.[accountId];
+}
+
+/** Mesh group entries created during setup default to mention-gated.
+ * Existing explicit values are never clobbered. */
+function withDefaultRequireMention(cfg: CoreConfig, accountId: string): CoreConfig {
+  const section = readAccountSection(cfg, accountId);
+  const groups = section?.groups;
+  if (!groups || typeof groups !== "object") {
+    return cfg;
+  }
+  let changed = false;
+  const nextGroups = Object.fromEntries(
+    Object.entries(groups).map(([key, value]) => {
+      if (value && typeof value === "object" && value.requireMention === undefined) {
+        changed = true;
+        return [key, { ...value, requireMention: true }];
+      }
+      return [key, value];
+    }),
+  );
+  if (!changed) {
+    return cfg;
+  }
+  return updateMeshcoreAccountConfig(cfg, accountId, { groups: nextGroups });
+}
+
 export { meshcoreSetupAdapter };
 
 export const meshcoreSetupWizard: ChannelSetupWizard = {
@@ -79,31 +119,108 @@ export const meshcoreSetupWizard: ChannelSetupWizard = {
   introNote: {
     title: "MeshCore setup",
     lines: [
-      "Connect via Companion TCP protocol (port 5000).",
+      "Connect via Companion TCP protocol (default port 5000).",
+      "The wizard probes the node before anything is written, so typos cost seconds, not evenings.",
+      "Heads-up: a MeshCore node serves ONE companion client at a time — disconnect the phone app first.",
       `Docs: ${formatDocsLink("/channels/meshcore", "channels/meshcore")}`,
     ],
   },
   credentials: [],
   finalize: async ({ cfg, prompter, accountId }) => {
     const resolvedAccountId = accountId ?? resolveDefaultMeshcoreAccountId(cfg as CoreConfig);
+    let workingCfg = cfg as CoreConfig;
     const account = resolveMeshcoreAccount({
-      cfg: cfg as CoreConfig,
+      cfg: workingCfg,
       accountId: resolvedAccountId,
     });
 
-    const host = normalizeOptionalString(
-      await prompter.text({
+    let endpoint = {
+      host: account.host,
+      port: account.port || 5000,
+    };
+    let probeOk = false;
+    let probeResult: MeshcoreProbe | null = null;
+
+    // ── Endpoint → probe (with diagnosis), retry loop ───────────────────
+    for (;;) {
+      const hostRaw = await prompter.text({
         message: "MeshCore node host or IP",
-        initialValue: account.host || process.env.MESHCORE_HOST || "",
+        placeholder: "192.168.1.226 or node.local (host:port also works)",
+        initialValue: endpoint.host || process.env.MESHCORE_HOST || "",
         validate: (value: string) => (normalizeOptionalString(value) ? undefined : "Required"),
-      }),
-    );
-    const portRaw = await prompter.text({
-      message: "TCP port",
-      initialValue: String(account.port || 5000),
-    });
+      });
+      const split = splitHostPort(hostRaw);
+      endpoint.host = split.host;
+      endpoint.port = parsePort(
+        await prompter.text({
+          message: "TCP port",
+          initialValue: String(split.port ?? endpoint.port ?? 5000),
+        }),
+        split.port ?? 5000,
+      );
+
+      const candidateCfg = updateMeshcoreAccountConfig(workingCfg, resolvedAccountId, {
+        host: endpoint.host,
+        port: endpoint.port,
+      });
+      const target = formatMeshcoreEndpoint(endpoint);
+      const progress = prompter.progress(`Probing ${target}…`);
+      const probe = await probeMeshcore(candidateCfg, {
+        accountId: resolvedAccountId,
+        timeoutMs: 8000,
+      });
+      if (probe.ok) {
+        progress.stop(`Node answers at ${target} — ${probe.latencyMs}ms`);
+        probeOk = true;
+        probeResult = probe;
+        workingCfg = candidateCfg;
+        break;
+      }
+
+      progress.stop(`No answer from ${target}`);
+      const diagnosis = diagnoseMeshcoreProbeFailure({
+        host: endpoint.host,
+        port: endpoint.port,
+        error: probe.error,
+      });
+      await prompter.note(
+        [diagnosis.summary, "", ...diagnosis.hints.map((hint) => `• ${hint}`)].join("\n"),
+        "Connection diagnosis",
+      );
+      const retry = await prompter.confirm({
+        message: "Re-enter connection details? (No = save anyway and troubleshoot later)",
+        initialValue: true,
+      });
+      if (!retry) {
+        workingCfg = candidateCfg;
+        break;
+      }
+    }
+
+    // ── Node identity (returned by a successful probe) ──────────────────
+    const selfInfo = probeOk ? probeResult?.selfInfo : undefined;
+    if (selfInfo) {
+      const lines: string[] = [];
+      if (selfInfo.longName) {
+        lines.push(`Name: ${selfInfo.longName}`);
+      }
+      if (selfInfo.hardwareModel) {
+        lines.push(`Hardware: ${selfInfo.hardwareModel}`);
+      }
+      if (selfInfo.firmwareVersion) {
+        lines.push(`Firmware: ${selfInfo.firmwareVersion}`);
+      }
+      if (typeof selfInfo.batteryMv === "number" && selfInfo.batteryMv > 0) {
+        lines.push(`Battery: ${(selfInfo.batteryMv / 1000).toFixed(2)} V`);
+      }
+      if (lines.length > 0) {
+        await prompter.note(lines.join("\n"), `Node ${selfInfo.nodeId}`);
+      }
+    }
+
+    // ── Mesh channels to listen ─────────────────────────────────────────
     const channelsRaw = await prompter.text({
-      message: "Mesh channel indices to listen (comma-separated, 0-7)",
+      message: "Mesh channel indices to listen on (comma-separated, 0-7)",
       initialValue: (account.config.channels ?? [0]).join(","),
     });
     const channels = channelsRaw
@@ -111,15 +228,40 @@ export const meshcoreSetupWizard: ChannelSetupWizard = {
       .map((entry: string) => Number.parseInt(entry.trim(), 10))
       .filter((value: number) => Number.isFinite(value) && value >= 0 && value <= 7);
 
-    const next = setSetupChannelEnabled(
-      updateMeshcoreAccountConfig(cfg as CoreConfig, resolvedAccountId, {
-        host,
-        port: parsePort(String(portRaw), 5000),
-        channels: channels.length ? channels : [0],
-      }),
-      channel,
-      true,
-    ) as CoreConfig;
+    // ── The airtime rule (MeshCore groups are receive-only by design) ────
+    await prompter.note(
+      [
+        "LoRa airtime is a shared commons: every node in range hears every channel message, and there is no delete button on the airwaves.",
+        "",
+        "This plugin keeps MeshCore groups RECEIVE-ONLY: the agent can listen and answer DMs, but it will never transmit on a channel. That is a code-level decision, not a config toggle.",
+      ].join("\n"),
+      "The airtime rule",
+    );
+
+    // ── Write, default mention-gating, summary ──────────────────────────
+    let next = updateMeshcoreAccountConfig(workingCfg, resolvedAccountId, {
+      host: endpoint.host,
+      port: endpoint.port,
+      channels: channels.length ? channels : [0],
+    });
+    next = withDefaultRequireMention(next, resolvedAccountId);
+    next = setSetupChannelEnabled(next, channel, true) as CoreConfig;
+
+    const finalAccount = resolveMeshcoreAccount({ cfg: next, accountId: resolvedAccountId });
+    await prompter.note(
+      [
+        `Endpoint: ${formatMeshcoreEndpoint(endpoint)}${probeOk ? " (probe passed)" : " (not verified — saved anyway)"}`,
+        selfInfo
+          ? `Node: ${selfInfo.nodeId}${selfInfo.longName ? ` "${selfInfo.longName}"` : ""}`
+          : "",
+        `DM policy: ${finalAccount.config.dmPolicy ?? "pairing"} — groups: receive-only (code-level)`,
+        "",
+        `Self-test: send a DM to ${selfInfo?.nodeId ?? "your node"} from a MeshCore companion app — expect a reply within about a minute (LoRa is slow).`,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      "MeshCore configured",
+    );
 
     return { cfg: next };
   },

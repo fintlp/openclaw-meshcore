@@ -22,10 +22,10 @@ The whole path is shorter than most people's first LoRa evening:
 
 1. **Get a board.** A Heltec WiFi LoRa 32 (V3 or V4, ~€20–30) is the verified path; any ESP32 board with a MeshCore companion build works.
 2. **Flash the MeshCore companion firmware with WiFi** — the build that speaks the Companion Protocol over TCP (port 5000). Set your region's band, name your node, put it on your LAN.
-3. **Install the plugin:** `openclaw channels add meshcore --host <node-ip>`. Keep the defaults (`dmPolicy: "pairing"`, groups receive-only).
+3. **Install the plugin and run the guided setup:** `openclaw plugins install clawhub:@fintlp/openclaw-meshcore` then `openclaw onboard` (choose MeshCore). The wizard **probes the node before writing anything** — with targeted fixes for the classic traps, including the one-client busy slot — and reads the node's identity (name, hardware, firmware, battery) as proof. Prefer one-liners? `openclaw channels add meshcore --host <node-ip>` works too (`--dm-policy pairing|allowlist|open|disabled` also available). Keep the defaults (`dmPolicy: "pairing"`, groups receive-only).
 4. **Send yourself a DM** from a second device — a handheld, or a phone app paired to another node. Watch your agent answer. Over LoRa.
 
-Two gotchas cost real evenings, so they live at the top of the quickstart instead of the bottom: the node serves **one companion client at a time** (do node admin with the gateway channel disabled), and current firmware **silently drops DMs from senders not in the node's contact list** (enable auto-add, or add your peer on the node itself). Five minutes of reading saves the evening: [docs/QUICKSTART.md](docs/QUICKSTART.md).
+Two gotchas cost real evenings, so they live at the top of the quickstart instead of the bottom: the node serves **one companion client at a time** (do node admin with the gateway channel disabled — the wizard's probe will fight the phone app for the slot, so disconnect it first), and current firmware **silently drops DMs from senders not in the node's contact list** (enable auto-add, or add your peer on the node itself). Five minutes of reading saves the evening: [docs/QUICKSTART.md](docs/QUICKSTART.md).
 
 ## What it does, in one breath
 

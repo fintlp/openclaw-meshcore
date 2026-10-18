@@ -8,6 +8,7 @@ import {
   createTopLevelChannelDmPolicySetter,
   patchScopedAccountConfig,
 } from "openclaw/plugin-sdk/setup";
+import { splitHostPort } from "./setup-detect.js";
 import type { CoreConfig, MeshcoreAccountConfig } from "./types.js";
 
 const channel = "meshcore" as const;
@@ -17,7 +18,15 @@ const setMeshcoreTopLevelAllowFrom = createTopLevelChannelAllowFromSetter({ chan
 type MeshcoreSetupInput = ChannelSetupInput & {
   host?: string;
   port?: number | string;
+  dmPolicy?: string;
 };
+
+const DM_POLICIES: readonly string[] = ["pairing", "allowlist", "open", "disabled"];
+
+function normalizeDmPolicyInput(raw?: string): DmPolicy | undefined {
+  const value = raw?.trim().toLowerCase();
+  return value && DM_POLICIES.includes(value) ? (value as DmPolicy) : undefined;
+}
 
 export function parsePort(raw: string, fallback: number): number {
   const trimmed = raw.trim();
@@ -97,10 +106,12 @@ export const meshcoreSetupAdapter: ChannelSetupAdapter = {
     });
     const portInput =
       typeof setupInput.port === "number" ? String(setupInput.port) : (setupInput.port ?? "");
+    const hostParts = setupInput.host?.trim() ? splitHostPort(setupInput.host) : undefined;
     const patch: Partial<MeshcoreAccountConfig> = {
       enabled: true,
-      host: setupInput.host?.trim(),
-      port: portInput ? parsePort(portInput, 5000) : undefined,
+      host: hostParts?.host || undefined,
+      port: parsePort(portInput, hostParts?.port ?? 5000),
+      dmPolicy: normalizeDmPolicyInput(setupInput.dmPolicy),
     };
     return updateMeshcoreAccountConfig(namedConfig as CoreConfig, accountId, patch);
   },
