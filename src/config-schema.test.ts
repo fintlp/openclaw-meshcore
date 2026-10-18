@@ -734,6 +734,67 @@ describe("meshcore config schema", () => {
     expect(issues.some((issue) => issue.path.join(".").startsWith("sendPacing.defaultCr"))).toBe(true);
   });
 
+  it("applies sendRetry defaults (disabled, conservative bounds)", () => {
+    const config = expectValidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+      }),
+    );
+
+    expect(config.sendRetry).toEqual({
+      enabled: false,
+      maxAttempts: 2,
+      backoffMs: 30_000,
+    });
+  });
+
+  it("accepts sendRetry overrides", () => {
+    const config = expectValidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        sendRetry: {
+          enabled: true,
+          maxAttempts: 3,
+          backoffMs: 60_000,
+        },
+      }),
+    );
+
+    expect(config.sendRetry).toEqual({
+      enabled: true,
+      maxAttempts: 3,
+      backoffMs: 60_000,
+    });
+  });
+
+  it("rejects sendRetry above the attempt cap", () => {
+    const issues = expectInvalidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        sendRetry: {
+          enabled: true,
+          maxAttempts: 6,
+        },
+      }),
+    );
+
+    expect(issues.some((issue) => issue.path.join(".") === "sendRetry.maxAttempts")).toBe(true);
+  });
+
+  it("rejects sendRetry with a sub-second backoff", () => {
+    const issues = expectInvalidConfig(
+      MeshcoreConfigSchema.safeParse({
+        host: "192.168.1.10",
+        sendRetry: {
+          enabled: true,
+          backoffMs: 500,
+        },
+      }),
+    );
+
+    expect(issues.some((issue) => issue.path.join(".") === "sendRetry.backoffMs")).toBe(true);
+  });
+
   it("rejects textChunkLimit below the schema minimum", () => {
     const issues = expectInvalidConfig(
       MeshcoreConfigSchema.safeParse({
