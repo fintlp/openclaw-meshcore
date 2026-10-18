@@ -9,7 +9,10 @@ import {
   connectMeshcoreDevice,
   getMeshcoreDevice,
   nodeIdToPubkey,
+  removeSendConfirmedWait,
+  waitForSendConfirmed,
   type MeshcoreDeviceHandle,
+  type SendConfirmedPayload,
 } from "./device-client.js";
 import { rememberOutboundEcho } from "./echo-dedupe.js";
 import {
@@ -24,6 +27,12 @@ import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig } from "./types.js";
 import { resolveSendPacingConfig } from "./airtime.js";
 import { assertSendRateLimit, resolveSendRateLimitConfig } from "./rate-limit.js";
+import {
+  DELIVERY_REPORT_TIMEOUT_MAX_MS,
+  MeshcoreDeliveryFailedError,
+  resolveDeliveryReportTimeoutMs,
+  resolveSendRetryConfig,
+} from "./send-retry.js";
 
 function createAbortError(reason: unknown): Error {
   if (reason instanceof Error) {
@@ -92,6 +101,8 @@ type SendMeshcoreOptions = {
   deviceHandle?: MeshcoreDeviceHandle;
   /** Internal override for the queue watchdog budget (tests only). */
   sendQueueBudgetMs?: number;
+  /** Internal override for the retry backoff clock (tests only). */
+  retryBackoffSleep?: (ms: number) => Promise<void>;
 };
 
 /** Error thrown when a paced send is aborted mid-sequence. */
@@ -302,28 +313,16 @@ export async function sendMessageMeshcore(
   // Only DMs may be signed; groups are receive-only and stay Plain.
   const txtType = outboundSignedPlain ? 2 : undefined;
 
-  // Flood guard: refuse the whole message (never partially aired) when the
-  // account's rolling airtime budget is exhausted.
-  assertSendRateLimit({
-    accountId: account.accountId,
-    packets: chunks.length,
-    config: resolveSendRateLimitConfig(
-      account.config.sendRateLimit as Record<string, unknown> | undefined,
-    ),
-    scope: "DM",
-  });
-
   const pacingConfig = resolveSendPacingConfig(
     account.config.sendPacing as Record<string, unknown> | undefined,
   );
 
-  const sendQueueBudgetMs =
-    opts.sendQueueBudgetMs ??
-    Math.max(
-      SEND_QUEUE_BUDGET_MIN_MS,
-      chunks.length * (pacingConfig.maxDelayMs + pacingConfig.ackTimeoutMs) +
-        SEND_QUEUE_BUDGET_PAD_MS,
-    );
+  const retryConfig = resolveSendRetryConfig(
+    account.config.sendRetry as Record<string, unknown> | undefined,
+  );
+  const backoffSleep =
+    opts.retryBackoffSleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
   // Stable id used for dead-letter logging if the queue watchdog has to kill
   // this send before the final frame id is known.
@@ -332,72 +331,208 @@ export async function sendMessageMeshcore(
   const abortController = new AbortController();
   const pacingOptions: WithPacedSendOptions = { abortSignal: abortController.signal };
 
-  let budgetTimer: ReturnType<typeof setTimeout> | null = null;
-  let onDisconnected: (() => void) | null = null;
-
-  const disposeAbortWatchdogs = () => {
-    if (budgetTimer) {
-      clearTimeout(budgetTimer);
-      budgetTimer = null;
-    }
-    if (onDisconnected) {
-      handle.connection.off("disconnected", onDisconnected);
-      onDisconnected = null;
-    }
-  };
-
-  onDisconnected = () => {
+  const onDisconnected = () => {
     abortController.abort(new MeshcoreSendAbortedError("connection lost", "connection_lost"));
   };
   handle.connection.on("disconnected", onDisconnected);
 
-  budgetTimer = setTimeout(() => {
-    abortController.abort(
-      new MeshcoreSendAbortedError("send queue budget exceeded", "queue_budget_exceeded"),
-    );
-  }, sendQueueBudgetMs);
+  type TransmitOutcome = {
+    result: SendMeshcoreResult;
+    /** Ack tag of the final frame, when the node returned one. */
+    finalAckCode?: number;
+    /** Delivery report for the final frame (only awaited when retry is on). */
+    report?: SendConfirmedPayload | { timeout: true };
+  };
+
+  const transmitOnce = async (): Promise<TransmitOutcome> => {
+    // Flood guard: refuse the whole message (never partially aired) when the
+    // account's rolling airtime budget is exhausted. Runs per attempt: every
+    // (re)transmission burns airtime and must consume budget through the same
+    // choke point, so a refused retry stops the loop whole.
+    assertSendRateLimit({
+      accountId: account.accountId,
+      packets: chunks.length,
+      config: resolveSendRateLimitConfig(
+        account.config.sendRateLimit as Record<string, unknown> | undefined,
+      ),
+      scope: "DM",
+    });
+
+    const sendQueueBudgetMs =
+      opts.sendQueueBudgetMs ??
+      Math.max(
+        SEND_QUEUE_BUDGET_MIN_MS,
+        chunks.length * (pacingConfig.maxDelayMs + pacingConfig.ackTimeoutMs) +
+          (retryConfig.enabled ? DELIVERY_REPORT_TIMEOUT_MAX_MS : 0) +
+          SEND_QUEUE_BUDGET_PAD_MS,
+      );
+
+    const budgetTimer = setTimeout(() => {
+      abortController.abort(
+        new MeshcoreSendAbortedError("send queue budget exceeded", "queue_budget_exceeded"),
+      );
+    }, sendQueueBudgetMs);
+
+    try {
+      return await withPacedSend(
+        account.accountId,
+        account.config.sendPacing as Record<string, unknown> | undefined,
+        handle.selfInfo,
+        async (ctx) => {
+          let lastMessageId = "";
+          let lastAckCode: number | undefined;
+          let lastEstTimeout: number | undefined;
+          for (const chunk of chunks) {
+            const chunkBytes = utf8ByteLength(chunk);
+            await ctx.beforeFrame(chunkBytes);
+            rememberOutboundEcho(chunk);
+            const response = await raceSendTextMessage(
+              handle.connection,
+              pubkey,
+              chunk,
+              abortController.signal,
+              txtType,
+            );
+            lastMessageId = String(response.expectedAckCrc ?? response.estTimeout ?? Date.now());
+            lastAckCode = response.expectedAckCrc;
+            lastEstTimeout = response.estTimeout;
+            ctx.afterFrame(chunkBytes, response.expectedAckCrc);
+          }
+
+          recordMeshcoreOutboundActivity(account.accountId);
+
+          const result: SendMeshcoreResult = {
+            messageId: lastMessageId,
+            target,
+            receipt: createMessageReceiptFromOutboundResults({
+              results: [
+                {
+                  channel: "meshcore",
+                  messageId: lastMessageId,
+                  conversationId: target,
+                },
+              ],
+              kind: "text",
+              ...(opts.replyTo ? { replyToId: opts.replyTo } : {}),
+            }),
+          };
+
+          // Delivery-report wait (issue #25): only when retry is enabled and
+          // the node returned an ack tag for the final frame. The wait runs
+          // inside the paced work so it takes over the pre-registered waiter
+          // synchronously (no confirm can interleave and be dropped), and so
+          // the send queue stays serialized while the report is pending. The
+          // window derives from the firmware's own estTimeout — the same
+          // window the MeshOS app uses before flagging non-delivery — which
+          // makes a timeout the protocol's definitive non-delivery signal.
+          let report: SendConfirmedPayload | { timeout: true } | undefined;
+          if (retryConfig.enabled && lastAckCode !== undefined) {
+            const reportTimeoutMs = resolveDeliveryReportTimeoutMs({
+              estTimeoutMs: lastEstTimeout,
+              fallbackMs: pacingConfig.ackTimeoutMs,
+            });
+            report = await ctx.awaitFrameReport(lastAckCode, reportTimeoutMs);
+          }
+
+          return { result, finalAckCode: lastAckCode, report };
+        },
+        pacingOptions,
+      );
+    } finally {
+      clearTimeout(budgetTimer);
+    }
+  };
 
   try {
-    return await withPacedSend(
-      account.accountId,
-      account.config.sendPacing as Record<string, unknown> | undefined,
-      handle.selfInfo,
-      async (ctx) => {
-        let lastMessageId = "";
-        for (const chunk of chunks) {
-          const chunkBytes = utf8ByteLength(chunk);
-          await ctx.beforeFrame(chunkBytes);
-          rememberOutboundEcho(chunk);
-          const response = await raceSendTextMessage(
-            handle.connection,
-            pubkey,
-            chunk,
-            abortController.signal,
-            txtType,
+    if (!retryConfig.enabled) {
+      // Default (fire-and-forget) path: identical behavior to pre-retry sends.
+      return (await transmitOnce()).result;
+    }
+
+    let attempt = 0;
+    while (true) {
+      attempt += 1;
+      const outcome = await transmitOnce();
+
+      if (outcome.finalAckCode === undefined) {
+        // The node returned no ack tag for the final frame, so delivery cannot
+        // be correlated to a report. Retrying blind would be timeout-ambiguous
+        // (issue #25: retry only on definitive non-delivery) — fire-and-forget.
+        return outcome.result;
+      }
+
+      if (outcome.report && !("timeout" in outcome.report)) {
+        if (attempt > 1) {
+          console.log(
+            `[meshcore] DM to ${target} confirmed delivered on attempt ${attempt}/${retryConfig.maxAttempts}`,
           );
-          lastMessageId = String(response.expectedAckCrc ?? response.estTimeout ?? Date.now());
-          ctx.afterFrame(chunkBytes, response.expectedAckCrc);
         }
+        return outcome.result;
+      }
 
-        recordMeshcoreOutboundActivity(account.accountId);
+      if (attempt >= retryConfig.maxAttempts) {
+        break;
+      }
 
-        return {
-          messageId: lastMessageId,
-          target,
-          receipt: createMessageReceiptFromOutboundResults({
-            results: [
-              {
-                channel: "meshcore",
-                messageId: lastMessageId,
-                conversationId: target,
-              },
-            ],
-            kind: "text",
-            ...(opts.replyTo ? { replyToId: opts.replyTo } : {}),
-          }),
-        };
-      },
-      pacingOptions,
+      // console.log, not logger.info: retries burn shared LoRa airtime and
+      // must be auditable (issue #14 pattern, same as adverts/rate-limit).
+      console.log(
+        `[meshcore] DM to ${target} not confirmed within report window; ` +
+          `retry ${attempt + 1}/${retryConfig.maxAttempts} in ${retryConfig.backoffMs}ms`,
+      );
+
+      // Late-ACK guard: the backoff window doubles as a last listen for a
+      // tardy SendConfirmed. A confirm arriving during backoff cancels the
+      // retry, so a late delivery report never causes a duplicate send.
+      const lateReport = waitForSendConfirmed({
+        accountId: account.accountId,
+        expectedAckCode: outcome.finalAckCode,
+        timeoutMs: retryConfig.backoffMs,
+      });
+      const backoffOutcome = await new Promise<"confirmed" | "elapsed" | "aborted">(
+        (resolve) => {
+          let settled = false;
+          const finish = (value: "confirmed" | "elapsed" | "aborted") => {
+            if (!settled) {
+              settled = true;
+              abortController.signal.removeEventListener("abort", onAbort);
+              resolve(value);
+            }
+          };
+          const onAbort = () => finish("aborted");
+          if (abortController.signal.aborted) {
+            finish("aborted");
+            return;
+          }
+          abortController.signal.addEventListener("abort", onAbort, { once: true });
+          lateReport.then((report) => finish("timeout" in report ? "elapsed" : "confirmed"));
+          backoffSleep(retryConfig.backoffMs).then(
+            () => finish("elapsed"),
+            () => finish("elapsed"),
+          );
+        },
+      );
+
+      if (backoffOutcome === "confirmed") {
+        console.log(
+          `[meshcore] DM to ${target} confirmed by late delivery report during backoff; no retry sent`,
+        );
+        return outcome.result;
+      }
+      // Not confirmed: cancel the guard waiter (no-op if its timer already
+      // settled it) so a later confirm is dropped, never credited elsewhere.
+      removeSendConfirmedWait(account.accountId, outcome.finalAckCode);
+      if (backoffOutcome === "aborted") {
+        throw createAbortError(abortController.signal.reason);
+      }
+    }
+
+    console.error(
+      `[meshcore] DM to ${target} not confirmed delivered after ${retryConfig.maxAttempts} attempt(s); giving up`,
+    );
+    throw new MeshcoreDeliveryFailedError(
+      `MeshCore DM to ${target} was not confirmed delivered after ${retryConfig.maxAttempts} attempt(s)`,
+      retryConfig.maxAttempts,
     );
   } catch (error) {
     if (error instanceof MeshcoreSendAbortedError) {
@@ -409,6 +544,6 @@ export async function sendMessageMeshcore(
     }
     throw error;
   } finally {
-    disposeAbortWatchdogs();
+    handle.connection.off("disconnected", onDisconnected);
   }
 }
