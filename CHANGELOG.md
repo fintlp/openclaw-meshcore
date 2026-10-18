@@ -6,6 +6,16 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## Unreleased
+
+Features
+
+- DM delivery-report auto-retry (issue #25), opt-in via channels.meshcore.sendRetry and disabled by default. When enabled, the send path awaits the node delivery report (the SendConfirmed push for the final frame's ack tag) for the firmware's own estimated ACK window, clamped to 0.5 to 30 seconds. No report in time is treated as definitive non-delivery and the message is retransmitted, bounded by maxAttempts (default 2, counting the initial send; hard cap 5) with a fixed backoffMs between attempts (default 30000). The backoff window doubles as a late-ACK guard: a tardy confirm cancels the retry so a late report never causes a duplicate send. Every attempt consumes sendRateLimit airtime budget like any other send, and a budget-refused retry stops whole. After the final attempt the send fails with a MeshcoreDeliveryFailedError so the caller learns the DM was not delivered. Sends whose final frame carries no ack tag stay fire-and-forget, because retrying blind would be timeout-ambiguous. With retry disabled (the default) the send path is unchanged.
+
+Tests
+
+- Retry on timeout report, no retry on success, pacing-waiter takeover in ack mode, attempt cap, fixed backoff schedule (injected clock), fail-closed non-matching ack tag, late-ACK guard, per-attempt rate-limit accounting, disabled-by-default parity, and no-ack-tag skip.
+
 ## 2026.10.10 — 2026-10-18
 
 Airtime protection and a responsible-disclosure policy.

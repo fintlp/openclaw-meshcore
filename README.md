@@ -64,7 +64,7 @@ Why so strict? Because LoRa airtime is a shared commons. Every transmission on a
 
 ### The flood guard: the agent cannot shout in DMs either
 
-Even in direct messages, airtime is shared — so a second code-level rail caps how much the agent may transmit at all. Outbound sends are budgeted in airtime packets per rolling window (**20 packets per 10 minutes** by default), and the send path refuses a message when the budget is exhausted — before the first frame goes on air, with a retry-after hint in the error. A message is always sent whole or refused whole, never partially aired. Tune it via `sendRateLimit` (`maxSends`, `windowMs`, or `enabled: false` to disable) — but think twice before raising it: this limit exists for the mesh, not for you.
+Even in direct messages, airtime is shared — so a second code-level rail caps how much the agent may transmit at all. Outbound sends are budgeted in airtime packets per rolling window (**20 packets per 10 minutes** by default), and the send path refuses a message when the budget is exhausted — before the first frame goes on air, with a retry-after hint in the error. A message is always sent whole or refused whole, never partially aired. Tune it via `sendRateLimit` (`maxSends`, `windowMs`, or `enabled: false` to disable) — but think twice before raising it: this limit exists for the mesh, not for you. The optional delivery retry (`sendRetry`, below) spends from this same budget: every retransmission is an airtime purchase, accounted like any other.
 
 ### Radio parameters: read-only, on purpose
 
@@ -221,6 +221,7 @@ You can also set the environment variable `MESHCORE_HOST` for the default accoun
 | `textChunkLimit` | number (40–500) | `127` | Max **UTF-8 bytes** per outbound text chunk (the wire frame limit is byte-based). Chunks split at word boundaries where possible and never inside a multibyte character. Default 127 matches the observed wire cap — see Known Limitations. |
 | `outboundSignedPlain` | boolean | `false` | When `true`, outbound DMs are sent as SignedPlain (`txtType 2`) instead of Plain. Reserves 4 bytes from the chunk limit for the SignedPlain `sender_prefix`. Group sends always stay Plain. |
 | `sendPacing` | object | see below | Outbound airtime pacing for multi-chunk sends. |
+| `sendRetry` | object | see below | DM delivery-report auto-retry (default **off**). |
 | `logInboundMessageContent` | boolean | `false` | When `true`, inbound log lines include up to 80 chars of text. |
 | `advertLat` | number (-90..90) | — | Override the node's advertised latitude. Requires `advertLon` and a difference >1e-5° from current position. |
 | `advertLon` | number (-180..180) | — | Override the node's advertised longitude. Requires `advertLat` and a difference >1e-5° from current position. |
@@ -248,6 +249,20 @@ Long replies are split into multiple MeshCore text messages. Sending them back-t
 **How pacing works (design).** In `"ack"` mode (default), each frame of a multi-frame sequence awaits the node's `SendConfirmed` push (opcode `0x82`) before the next frame is sent. Matching is **per-frame**: the tag returned by the send call is compared against the incoming `ackCode`; a confirm that matches no pending frame is dropped, never credited to another frame (fail-closed). If no confirm arrives within `ackTimeoutMs`, pacing falls back to the time-based estimate (`airtime × airtimeMargin`, clamped to `[minDelayMs, maxDelayMs]`). Frames whose send resolved without a tag skip the ack wait and take the time-based floor.
 
 This design came out of issue #10, where the node's tx path waits on the over-the-air ACK before draining its queue: measured ACK round-trips at 869.618 MHz / SF8 / BW 62.5 kHz are **1.3–3.1 s**, far above the LoRa airtime alone (~1.2 s per 127-byte frame). An airtime-only gap of ~1.45 s therefore enqueued frame 3 while the node still held frames 1–2 awaiting ACK — the tail frame was silently dropped (reproduced twice). With per-frame ACK-gated pacing the same 300-byte payload (3 frames) delivers completely.
+
+#### `sendRetry`
+
+By default the send path is **fire-and-forget**: a message is considered sent once its frames are transmitted, and whether the mesh actually delivered it is not tracked. `sendRetry` (issue #25) opts into **delivery-report auto-retry** for DMs — the plugin equivalent of the MeshOS app's red cross: when the node never confirms delivery, the message is retransmitted, bounded and backed off.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable delivery-report auto-retry for DMs. Off by default (conservative send doctrine). |
+| `maxAttempts` | integer 1–5 | `2` | Maximum **total** transmission attempts, including the initial send. `2` = one retry. |
+| `backoffMs` | integer 1000–600000 | `30000` | Fixed wait between attempts. |
+
+**How it works.** After the final frame is transmitted, the plugin awaits the node's delivery report — the `SendConfirmed` (0x82) push carrying that frame's ack tag — for the firmware's own estimated ACK window (`estTimeout`, clamped to 0.5–30 s; the same window the MeshOS app uses before flagging non-delivery). A report in time means delivered. No report in time is the protocol's definitive non-delivery signal, and only then is the message retransmitted — never on success, and never when the node returned no ack tag to correlate (that case stays fire-and-forget, because retrying blind would be timeout-ambiguous). The backoff window doubles as a **late-ACK guard**: a tardy confirm arriving during the backoff cancels the retry, so a late report never causes a duplicate send. Retries retransmit the whole message (the protocol confirms per frame; there is no way to know which frames of a multi-chunk message arrived).
+
+**Airtime accounting.** Every attempt passes through the `sendRateLimit` flood guard again — retries burn the same rolling airtime budget as first sends, and a retry refused by the budget stops the loop whole, before any frame goes on air. If no attempt is confirmed after `maxAttempts`, the send fails with a `MeshcoreDeliveryFailedError` so the caller (and your agent) learns the DM was not delivered, instead of silently assuming success.
 
 ### Group config (`groups["channel:0"]`)
 
