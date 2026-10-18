@@ -6,6 +6,10 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## Unreleased
+
+- Added SECURITY.md: responsible-disclosure policy (private reporting via GitHub Security Advisories, scope, response expectations).
+
 ## 2026.10.9 — 2026-10-18
 
 Install metadata pass — no code or behavior changes since 2026.10.8.
