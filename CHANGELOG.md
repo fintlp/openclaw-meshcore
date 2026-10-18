@@ -6,7 +6,9 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
-## Unreleased
+## 2026.10.11 — 2026-10-18
+
+Same-day follow-up: repeater-ops commands, delivery-report auto-retry, the stale-socket fix, and DM hardening recipes. The changelog date is the true ship date.
 
 Features
 
