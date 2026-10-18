@@ -31,7 +31,7 @@ The wizard **probes the node before writing any config** — with targeted fixes
 Non-interactive alternative:
 
 ```bash
-openclaw channels add meshcore --host 192.168.1.226
+openclaw channels add meshcore --host 192.168.1.20
 # also: --dm-policy pairing|allowlist|open|disabled
 ```
 

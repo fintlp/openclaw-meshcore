@@ -6,6 +6,29 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## 2026.10.12 — 2026-10-19
+
+Guided onboarding: the setup wizard now probes the node before writing
+anything and reads its identity back as evidence — with the one-client
+rule taught as a first-class diagnosis.
+
+Features
+
+- Probe-before-write onboarding wizard. `openclaw onboard` (or re-running channel setup) now parses `host:port` suffixes and PROBES the candidate connection before any config is written. Failures get MeshCore-specific diagnoses instead of a bare error: the single-companion-slot rule is detected from both of its signatures (socket accepted then immediately dropped; connected but SelfInfo never arrives) and explained — disconnect the phone app or the other client first — alongside refused connections, VLAN-isolation timeouts, and the dead-battery lookalike (a battery-powered node that died while its TCP state lingers). Retry in place, or save-anyway for later troubleshooting.
+- Node identity readback. A successful probe surfaces the node's identity in the wizard: node ID, name, hardware model, firmware version, and battery voltage.
+- The airtime rule is now a setup screen: MeshCore groups are receive-only by code-level design, and onboarding says so explicitly. Group entries created during setup default to mention-gated (`requireMention: true`).
+- Non-interactive setup: `--host` now parses `host:port` suffixes, the port is written explicitly (default 5000), and a new `--dm-policy` flag sets the DM access policy non-interactively.
+
+Tooling-tests
+
+- 427/427 tests. New suites pin host:port parsing, port defaulting, dmPolicy normalization, and every probe-diagnosis mapping (busy-slot both signatures, refused, timeout, generic).
+
+Docs
+
+- README quickstart notes the wizard probe and reminds operators to disconnect the companion app before onboarding (one-client rule).
+- New companion skill on ClawHub (`@fintlp/meshcore-connect`): the verified onboarding path plus the trap guide (one-client rule, contact-list DM drop, dead battery), for agents asked "make my OpenClaw speak MeshCore".
+- Example host IPs in docs and wizard placeholders are generic (192.168.1.10/.20), not any operator's node.
+
 ## 2026.10.11 — 2026-10-18
 
 Same-day follow-up: repeater-ops commands, delivery-report auto-retry, the stale-socket fix, and DM hardening recipes. The changelog date is the true ship date.

@@ -145,7 +145,7 @@ export const meshcoreSetupWizard: ChannelSetupWizard = {
     for (;;) {
       const hostRaw = await prompter.text({
         message: "MeshCore node host or IP",
-        placeholder: "192.168.1.226 or node.local (host:port also works)",
+        placeholder: "192.168.1.20 or meshcore.local (host:port also works)",
         initialValue: endpoint.host || process.env.MESHCORE_HOST || "",
         validate: (value: string) => (normalizeOptionalString(value) ? undefined : "Required"),
       });
