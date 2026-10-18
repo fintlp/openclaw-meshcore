@@ -6,6 +6,21 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## 2026.10.9 — 2026-10-18
+
+Install metadata pass — no code or behavior changes since 2026.10.8.
+
+Docs / install metadata
+
+- package.json gains keywords (openclaw, meshcore, lora, mesh, radio,
+  off-grid and friends) and a homepage link for registry and search
+  surfaces.
+- install.defaultChoice flipped from npm to clawhub: the package is not
+  published on npm, so an npm-preferred install path would fail. The
+  documented install command was already the ClawHub one; now the
+  metadata agrees. Twin of the same fix in openclaw-meshtastic v2026.10.21.
+- README now cross-links the Meshtastic sibling plugin.
+
 ## 2026.10.8 — 2026-10-18
 
 Docs-only release — no code or behavior changes since 2026.10.7.

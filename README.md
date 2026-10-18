@@ -83,6 +83,8 @@ For the operator-level detail (trust model, per-group tool policies, hardened ex
 - [docs/AGENT-SCOPING.md](docs/AGENT-SCOPING.md) — what a mesh-reachable agent can do, and how to bound it.
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — releasing this plugin to ClawHub: metadata contract, the entrypoint trap, and the release flow.
 
+**Sibling:** running Meshtastic hardware instead of MeshCore? Same agent, other mesh — [openclaw-meshtastic](https://github.com/fintlp/openclaw-meshtastic) (`openclaw plugins install clawhub:@fintlp/openclaw-meshtastic`).
+
 The full config reference lives below in this README.
 
 ## Compatibility & maintenance policy
