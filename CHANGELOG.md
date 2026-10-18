@@ -6,10 +6,17 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
-## Unreleased
+## 2026.10.10 — 2026-10-18
 
-- **Outbound flood guard.** The send path now budgets airtime packets per rolling window (default 20 per 10 minutes per account) and refuses a message with a retry hint when the budget is exhausted — before the first frame is transmitted, never partially aired. Tune via channels.meshcore.sendRateLimit (maxSends / windowMs / enabled:false to disable). Tests pin the cap, the whole-message refusal, per-account isolation, and window sliding.
-- Added SECURITY.md: responsible-disclosure policy (private reporting via GitHub Security Advisories, scope, response expectations).
+Airtime protection and a responsible-disclosure policy.
+
+Features
+
+- Outbound flood guard. The send path now budgets airtime packets per rolling window (default 20 per 10 minutes per account) and refuses a message with a retry hint when the budget is exhausted — before the first frame is transmitted, never partially aired. Tune via channels.meshcore.sendRateLimit (maxSends / windowMs / enabled false to disable). Tests pin the cap, the whole-message refusal, per-account isolation, and window sliding.
+
+Docs
+
+- SECURITY.md: responsible-disclosure policy (private reporting via GitHub Security Advisories, scope, response expectations).
 
 ## 2026.10.9 — 2026-10-18
 
