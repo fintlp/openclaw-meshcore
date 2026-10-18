@@ -31,6 +31,7 @@ import {
 } from "./normalize.js";
 import { resolveMeshcoreGroupMatch, resolveMeshcoreRequireMention } from "./policy.js";
 import { readNodeStatusSnapshot } from "./node-status.js";
+import { runRepeaterOpsCommand, type RepeaterOpsKind } from "./repeater-ops.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
 
@@ -117,6 +118,29 @@ async function deliverMeshcoreReply(params: {
 }
 
 const COMMAND_REPLIES = new Set(["!ping", "!status"]);
+
+/**
+ * Repeater-ops commands take a node argument (!neighbours <node>, ...), so
+ * they cannot live in the exact-match COMMAND_REPLIES set. They share the
+ * same gate: DM-only, admission === "dispatch", commandRepliesEnabled.
+ */
+const REPEATER_OPS_COMMANDS: ReadonlyArray<{ command: string; op: RepeaterOpsKind }> = [
+  { command: "!neighbours", op: "neighbours" },
+];
+
+function parseRepeaterOpsInvocation(
+  rawBody: string,
+): { op: RepeaterOpsKind; arg: string } | undefined {
+  for (const { command, op } of REPEATER_OPS_COMMANDS) {
+    if (rawBody === command) {
+      return { op, arg: "" };
+    }
+    if (rawBody.startsWith(`${command} `)) {
+      return { op, arg: rawBody.slice(command.length + 1).trim() };
+    }
+  }
+  return undefined;
+}
 
 function formatStatusReply(snapshot: ReturnType<typeof readNodeStatusSnapshot>): string {
   if (!snapshot) {
@@ -279,19 +303,38 @@ export async function handleMeshcoreInbound(params: {
   });
   const commandAuthorized = access.commandAccess.authorized;
 
-  // Plugin-level !ping / !status replies: answered directly for DMs that pass
+  // Plugin-level command replies: answered directly for DMs that pass
   // the same admission gate as a normal dispatch. Unknown/pairing-required
   // senders fall through to the normal pairing flow so we never leak gateway
-  // internals to strangers.
+  // internals to strangers. Covers !ping/!status (exact match) and the
+  // repeater-ops commands (!neighbours <node>, ...) which put frames on air.
   const commandRepliesEnabled = account.config.commandRepliesEnabled ?? true;
   if (
     commandRepliesEnabled &&
     !message.isGroup &&
-    access.ingress.admission === "dispatch" &&
-    COMMAND_REPLIES.has(rawBody)
+    access.ingress.admission === "dispatch"
   ) {
-    const replyText = buildCommandReply(rawBody, account.accountId);
-    if (replyText !== undefined) {
+    if (COMMAND_REPLIES.has(rawBody)) {
+      const replyText = buildCommandReply(rawBody, account.accountId);
+      if (replyText !== undefined) {
+        await deliverMeshcoreReply({
+          payload: { text: replyText },
+          cfg: config,
+          target: message.senderNodeId,
+          accountId: account.accountId,
+          sendReply: params.sendReply,
+          statusSink: params.statusSink,
+        });
+        return;
+      }
+    }
+    const opsInvocation = parseRepeaterOpsInvocation(rawBody);
+    if (opsInvocation) {
+      const replyText = await runRepeaterOpsCommand({
+        op: opsInvocation.op,
+        targetArg: opsInvocation.arg,
+        account,
+      });
       await deliverMeshcoreReply({
         payload: { text: replyText },
         cfg: config,

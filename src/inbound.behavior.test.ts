@@ -22,6 +22,14 @@ vi.mock("openclaw/plugin-sdk/routing", () => ({
   })),
 }));
 
+const { runRepeaterOpsCommandMock } = vi.hoisted(() => ({
+  runRepeaterOpsCommandMock: vi.fn(async () => "ops reply"),
+}));
+
+vi.mock("./repeater-ops.js", () => ({
+  runRepeaterOpsCommand: runRepeaterOpsCommandMock,
+}));
+
 vi.mock("openclaw/plugin-sdk/channel-inbound", async (importOriginal) => {
   const actual = await importOriginal<typeof import("openclaw/plugin-sdk/channel-inbound")>();
   return {
@@ -743,6 +751,208 @@ describe("meshcore inbound behavior", () => {
 
       expect(sendReply).not.toHaveBeenCalled();
       expect(inboundRunMock).toHaveBeenCalledTimes(1);
+    });
+
+    describe("repeater-ops commands (issue #35)", () => {
+      beforeEach(() => {
+        runRepeaterOpsCommandMock.mockReset().mockResolvedValue("ops reply");
+      });
+
+      it("answers !neighbours <node> directly for an allowlisted sender, no session", async () => {
+        const sendReply = vi.fn(async () => undefined);
+        const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+        setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+
+        await handleMeshcoreInbound({
+          message: createMessage({
+            senderNodeId: "!aabbccdd1122",
+            target: "!aabbccdd1122",
+            text: "!neighbours !ff00ff00ff00",
+          }),
+          account: createAccount({
+            config: {
+              dmPolicy: "allowlist",
+              allowFrom: ["!aabbccdd1122"],
+              groupPolicy: "disabled",
+              groupAllowFrom: [],
+              channels: [0],
+            },
+          }),
+          config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+          runtime: createRuntimeEnv(),
+          sendReply,
+        });
+
+        expect(runRepeaterOpsCommandMock).toHaveBeenCalledTimes(1);
+        expect(runRepeaterOpsCommandMock).toHaveBeenCalledWith({
+          op: "neighbours",
+          targetArg: "!ff00ff00ff00",
+          account: expect.objectContaining({ accountId: "default" }),
+        });
+        expect(sendReply).toHaveBeenCalledTimes(1);
+        expect(sendReply).toHaveBeenCalledWith("!aabbccdd1122", "ops reply", undefined);
+        expect(inboundRunMock).not.toHaveBeenCalled();
+      });
+
+      it("forwards a missing node argument so the op can answer with usage text", async () => {
+        const sendReply = vi.fn(async () => undefined);
+        const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+        setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+
+        await handleMeshcoreInbound({
+          message: createMessage({
+            senderNodeId: "!aabbccdd1122",
+            target: "!aabbccdd1122",
+            text: "!neighbours",
+          }),
+          account: createAccount({
+            config: {
+              dmPolicy: "allowlist",
+              allowFrom: ["!aabbccdd1122"],
+              groupPolicy: "disabled",
+              groupAllowFrom: [],
+              channels: [0],
+            },
+          }),
+          config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+          runtime: createRuntimeEnv(),
+          sendReply,
+        });
+
+        expect(runRepeaterOpsCommandMock).toHaveBeenCalledWith({
+          op: "neighbours",
+          targetArg: "",
+          account: expect.objectContaining({ accountId: "default" }),
+        });
+        expect(inboundRunMock).not.toHaveBeenCalled();
+      });
+
+      it("stays silent for ops commands in group channels", async () => {
+        const sendReply = vi.fn(async () => undefined);
+        const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+        setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+
+        await handleMeshcoreInbound({
+          message: createMessage({
+            isGroup: true,
+            target: "channel:0",
+            senderNodeId: "channel:0",
+            text: "!neighbours !ff00ff00ff00",
+          }),
+          account: createAccount({
+            config: {
+              dmPolicy: "pairing",
+              allowFrom: [],
+              groupPolicy: "allowlist",
+              groupAllowFrom: [],
+              channels: [0],
+              groups: {
+                "channel:0": {
+                  requireMention: false,
+                },
+              },
+            },
+          }),
+          config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+          runtime: createRuntimeEnv(),
+          sendReply,
+        });
+
+        expect(runRepeaterOpsCommandMock).not.toHaveBeenCalled();
+        expect(sendReply).not.toHaveBeenCalled();
+        expect(inboundRunMock).toHaveBeenCalledTimes(1);
+      });
+
+      it("does not run ops commands for unknown senders (pairing flow instead)", async () => {
+        const sendReply = vi.fn(async () => undefined);
+        const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+        setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+
+        await handleMeshcoreInbound({
+          message: createMessage({
+            senderNodeId: "!aabbccdd1122",
+            target: "!aabbccdd1122",
+            text: "!neighbours !ff00ff00ff00",
+          }),
+          account: createAccount({
+            config: {
+              dmPolicy: "pairing",
+              allowFrom: [],
+              groupPolicy: "disabled",
+              groupAllowFrom: [],
+              channels: [0],
+            },
+          }),
+          config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+          runtime: createRuntimeEnv(),
+          sendReply,
+        });
+
+        expect(runRepeaterOpsCommandMock).not.toHaveBeenCalled();
+        expect(upsertPairingRequestMock).toHaveBeenCalled();
+        expect(inboundRunMock).not.toHaveBeenCalled();
+      });
+
+      it("respects commandRepliesEnabled:false for ops commands", async () => {
+        const sendReply = vi.fn(async () => undefined);
+        const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+        setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+
+        await handleMeshcoreInbound({
+          message: createMessage({
+            senderNodeId: "!aabbccdd1122",
+            target: "!aabbccdd1122",
+            text: "!neighbours !ff00ff00ff00",
+          }),
+          account: createAccount({
+            config: {
+              dmPolicy: "allowlist",
+              allowFrom: ["!aabbccdd1122"],
+              groupPolicy: "disabled",
+              groupAllowFrom: [],
+              channels: [0],
+              commandRepliesEnabled: false,
+            },
+          }),
+          config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+          runtime: createRuntimeEnv(),
+          sendReply,
+        });
+
+        expect(runRepeaterOpsCommandMock).not.toHaveBeenCalled();
+        expect(sendReply).not.toHaveBeenCalled();
+        expect(inboundRunMock).toHaveBeenCalledTimes(1);
+      });
+
+      it("does not mistake a longer word for an ops command", async () => {
+        const sendReply = vi.fn(async () => undefined);
+        const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+        setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+
+        await handleMeshcoreInbound({
+          message: createMessage({
+            senderNodeId: "!aabbccdd1122",
+            target: "!aabbccdd1122",
+            text: "!neighbourhood watch",
+          }),
+          account: createAccount({
+            config: {
+              dmPolicy: "allowlist",
+              allowFrom: ["!aabbccdd1122"],
+              groupPolicy: "disabled",
+              groupAllowFrom: [],
+              channels: [0],
+            },
+          }),
+          config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+          runtime: createRuntimeEnv(),
+          sendReply,
+        });
+
+        expect(runRepeaterOpsCommandMock).not.toHaveBeenCalled();
+        expect(sendReply).not.toHaveBeenCalled();
+        expect(inboundRunMock).toHaveBeenCalledTimes(1);
+      });
     });
   });
 });

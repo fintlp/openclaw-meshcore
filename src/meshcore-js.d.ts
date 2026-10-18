@@ -63,6 +63,18 @@ declare module "@liamcottle/meshcore.js" {
     0x8a: (advert: Record<string, unknown>) => void;
   };
 
+  export type MeshcoreNeighbour = {
+    publicKeyPrefix: Uint8Array;
+    heardSecondsAgo: number;
+    /** SNR in dB (library pre-scales the raw quarter-dB byte). */
+    snr: number;
+  };
+
+  export type MeshcoreNeighboursResponse = {
+    totalNeighboursCount: number;
+    neighbours: MeshcoreNeighbour[];
+  };
+
   export class TCPConnection extends EventEmitter {
     constructor(host: string, port: number);
     connect(): Promise<void>;
@@ -94,6 +106,19 @@ declare module "@liamcottle/meshcore.js" {
     sendZeroHopAdvert(): Promise<void>;
     /** Send a self-advert that is flooded across the mesh. */
     sendFloodAdvert(): Promise<void>;
+
+    /**
+     * Ask a (repeater-class) node which neighbours it currently hears.
+     * Rejects with the bare string "timeout" when the request expires.
+     * ON AIR: implemented via SendBinaryReq to the target node.
+     */
+    getNeighbours(
+      publicKey: Uint8Array,
+      count?: number,
+      offset?: number,
+      orderBy?: number,
+      pubKeyPrefixLength?: number,
+    ): Promise<MeshcoreNeighboursResponse>;
 
     // NOTE: the library emits most response events by numeric code
     // (Constants.ResponseCodes / PushCodes), not by friendly name.

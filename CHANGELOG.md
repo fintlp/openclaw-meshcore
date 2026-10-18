@@ -6,6 +6,12 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## Unreleased
+
+Features
+
+- Neighbours query, issue #35: new DM command !neighbours <node> asks a repeater-class contact which nodes it currently hears and replies with the edge list — pubkey prefix, last-heard age, SNR, and the contact name when the prefix resolves in the contact book. Airtime honesty: the query rides an on-air SendBinaryReq frame to the target node (meshcore.js getNeighbours is not a local query), so each call counts one packet against the sendRateLimit budget, and the command is DM-admission-gated and group-silent like !ping/!status. Targets that ignore the request fail soft with a timeout answer. Live verification against a real repeater is deferred to a maintenance window (blocked on node discovery, issue #24); all coverage here is mock-based.
+
 ## 2026.10.10 — 2026-10-18
 
 Airtime protection and a responsible-disclosure policy.

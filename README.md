@@ -260,6 +260,18 @@ This design came out of issue #10, where the node's tx path waits on the over-th
 | `systemPrompt` | string | Extra system prompt for this group. |
 | `tools` / `toolsBySender` | object | Tool policy for the group. |
 
+## DM commands
+
+A DM correspondent who passes the normal admission gate (pairing / allowlist / open — the same gate as any agent session) can use these commands. They are answered directly by the plugin without starting an agent session, and they stay silent in group channels. Set `commandRepliesEnabled: false` to turn the whole command surface off.
+
+| Command | What it does | Airtime |
+|---------|--------------|---------|
+| `!ping` | Answers "pong" plus the node name, from the local status snapshot. | Only the reply itself. |
+| `!status` | Answers with the local node's status snapshot (connection, battery, position, advert age, reconnects). | Only the reply itself. |
+| `!neighbours <node>` | Asks a repeater-class contact which nodes it currently hears, and answers with the edge list: pubkey prefix, last-heard age, SNR, and the contact name when known. Companion-class firmware may refuse or ignore the query — a timeout answer means "no answer arrived", not "no neighbours". | **On air**: one request frame to the target node, plus the reply. Counts against the `sendRateLimit` budget. |
+
+Commands marked **on air** transmit real LoRa frames into the mesh in addition to their reply. They exist for on-demand diagnostics — never schedule them and never poll them in a loop. Targets are addressed the same way as DMs: a full `!nodeId` or any known contact prefix.
+
 ## Security model
 
 1. **Groups are receive-only.** The plugin will never call `sendCommandSendChannelTxtMsg` or any other group transmit primitive. Attempting to send to `channel:N` or `broadcast` throws `"receive-only"`.
