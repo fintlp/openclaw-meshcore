@@ -6,6 +6,26 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## 2026.10.13 — 2026-10-20
+
+OpenClaw 2026.10.5 compatibility, plus a test-hygiene overhaul: no test
+may touch the operator's real OpenClaw state ever again.
+
+Fixes
+
+- **OpenClaw 2026.10.5 load failure.** Compatible with OpenClaw 2026.10.5: replaced the removed `runStoppablePassiveMonitor` with `runPassiveAccountLifecycle` from `openclaw/plugin-sdk/channel-outbound`, with the same explicit stop-callback semantics as the retired wrapper (verified against the installed 2026.10.5 runtime: the handle is passed through, the stop closure is awaited, the lifecycle resolves after it). Without this change the plugin fails to register at gateway boot on 2026.10.5.
+- **Test suite no longer leaks into operator state.** The gateway exports `TMPDIR=~/.openclaw/tmp` to child processes, so the suite's `mkdtemp` calls and SDK state resolution had accumulated ~24,000 temp dirs (1.1 GB) inside the live state tree and registered 62 test agent databases in the real agent-database registry (both cleaned up by the operator before this release). Every test worker now redirects `OPENCLAW_STATE_DIR` and `TMPDIR` into a per-run root (`tests/setup.ts`, wired via vitest `setupFiles`) that is deleted in `afterAll`, pass or fail; a leak tripwire fails the file if anything lands in the inherited temp dir; a guard test (`src/test-isolation.guard.test.ts`) pins the redirects and the vitest state-dir override.
+
+Compatibility
+
+- **Host floor raised to OpenClaw ≥ 2026.10.1** (`peerDependencies.openclaw`, `openclaw.compat.pluginApi`, `openclaw.install.minHostVersion`): `channel-outbound` and `runPassiveAccountLifecycle` do not exist on 2026.5.26 (verified by packing that release). The build pin (`openclaw.build.openclawVersion`) and devDependency now track 2026.10.5.
+
+Tooling-tests
+
+- **SDK surface guard test** (`src/sdk-surface.test.ts`): self-maintaining; scans the shipped sources at test time and asserts every `openclaw/plugin-sdk/*` import exists as a real export of the installed host package.
+- **Gateway lifecycle test** (`src/gateway.lifecycle.test.ts`): start resolves a handle with `stop()`; aborting the signal calls `stop()` exactly once; the lifecycle promise resolves after the stop.
+- Suite: 432 tests across 29 files, all green on openclaw 2026.10.5. Operator proof after full runs: zero new temp dirs in the host `TMPDIR`, zero new agent-database registrations.
+
 ## 2026.10.12 — 2026-10-19
 
 Guided onboarding: the setup wizard now probes the node before writing

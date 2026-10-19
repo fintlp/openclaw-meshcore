@@ -1,5 +1,33 @@
 # Contributing to openclaw-meshcore
 
+## Testing
+
+```bash
+npm run typecheck && npm run test && npm run build
+```
+
+The suite carries three guards that exist because each of them once burned
+production — keep them green, and extend them instead of deleting:
+
+- **SDK surface guard** (`src/sdk-surface.test.ts`) — scans the shipped
+  sources at test time and asserts every `openclaw/plugin-sdk/*` value
+  import exists as a real export of the installed host package. A host
+  release that removes an export fails this test before release, not at
+  gateway boot. Before upgrading a gateway host, run it against the target
+  release: `npm i -D openclaw@<target> && npx vitest run sdk-surface`.
+- **Gateway lifecycle test** (`src/gateway.lifecycle.test.ts`) — the
+  monitor handle contract: start resolves a handle with `stop()`, abort
+  calls it exactly once, the lifecycle resolves after the stop.
+- **State isolation** (`tests/setup.ts` via vitest `setupFiles`, plus
+  `src/test-isolation.guard.test.ts`) — every test worker redirects
+  `OPENCLAW_STATE_DIR` and `TMPDIR` into a per-run root that is deleted
+  in `afterAll`, pass or fail; a tripwire fails the file if anything
+  lands in the inherited temp dir. Never let a test write into the
+  operator's real `~/.openclaw` state — the gateway exports
+  `TMPDIR=~/.openclaw/tmp` to child processes, so an unredirected
+  `mkdtemp` lands inside live state.
+
+
 ## Adding or changing a channel config field
 
 The MeshCore channel config is defined in **two** places that must stay in sync:

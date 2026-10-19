@@ -1,4 +1,4 @@
-import { runStoppablePassiveMonitor } from "openclaw/plugin-sdk/extension-shared";
+import { runPassiveAccountLifecycle } from "openclaw/plugin-sdk/channel-outbound";
 import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/status-helpers";
 import type { ResolvedMeshcoreAccount } from "./accounts.js";
 import { createAccountStatusSink } from "./channel-api.js";
@@ -53,7 +53,7 @@ export async function startMeshcoreGatewayAccount(ctx: {
     account.accountId,
   );
 
-  await runStoppablePassiveMonitor({
+  await runPassiveAccountLifecycle({
     abortSignal: ctx.abortSignal,
     start: async () =>
       await monitorMeshcoreProvider({
@@ -66,5 +66,8 @@ export async function startMeshcoreGatewayAccount(ctx: {
         lastRestartAt: lastRestartAtMs,
         lastRestartReason,
       }),
+    stop: async (monitor) => {
+      monitor.stop();
+    },
   });
 }

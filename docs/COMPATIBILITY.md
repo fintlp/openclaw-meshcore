@@ -8,8 +8,11 @@ The maintenance policy behind this matrix — tracked SDK surface, deprecation r
 
 | OpenClaw | Plugin | Status |
 |---|---|---|
+| 2026.10.5 | 2026.10.13 | ✅ verified (2026-10-20: 432/432 tests, typecheck, dist build; registered + connected on the production host after the 2026-10-20 restart) |
 | 2026.9.6 | 2026.10.1 | ✅ verified (2026-10-01 → 10-03) |
 | 2026.9.8 | 2026.10.1 | ✅ verified (2026-10-04) |
+
+Floor: OpenClaw ≥ 2026.10.1 (`peerDependencies`, install manifest; moved from ≥ 2026.5.26 in v2026.10.13 — the `runPassiveAccountLifecycle` replacement API does not exist on 2026.5.26). The floor moves only in a minor release with a changelog callout.
 
 ## Node firmware
 
