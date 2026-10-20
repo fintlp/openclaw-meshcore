@@ -34,12 +34,12 @@ vi.mock("openclaw/plugin-sdk/channel-inbound", async (importOriginal) => {
   const actual = await importOriginal<typeof import("openclaw/plugin-sdk/channel-inbound")>();
   return {
     ...actual,
-    resolveInboundSessionEnvelopeContext: vi.fn(() => ({
+    resolveInboundSessionEnvelopeContextAsync: vi.fn(async () => ({
       storePath: "/tmp/sessions.json",
       envelopeOptions: {},
       previousTimestamp: undefined,
     })),
-    createChannelInboundEnvelopeBuilder: vi.fn(() =>
+    createChannelInboundEnvelopeBuilderAsync: vi.fn(async () =>
       vi.fn(({ body }) => body),
     ),
   };

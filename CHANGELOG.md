@@ -6,6 +6,16 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## 2026.10.14 — 2026-10-20
+
+Inbound envelope migrated to the async Plugin SDK surface
+(`resolveInboundSessionEnvelopeContextAsync` /
+`createChannelInboundEnvelopeBuilderAsync`). The sync variants retire
+2026-12-31 and are removed in the first January 2027 stable. No behavior
+change — the #43 golden envelope tests pin byte-identical output. Host
+floor raised to `>=2026.10.5` (the async APIs landed in 2026.10.5).
+Closes #43.
+
 ## 2026.10.13 — 2026-10-20
 
 OpenClaw 2026.10.5 compatibility, plus a test-hygiene overhaul: no test

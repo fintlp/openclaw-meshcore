@@ -1,6 +1,6 @@
 {
   "name": "@fintlp/openclaw-meshcore",
-  "version": "2026.10.13",
+  "version": "2026.10.14",
   "description": "An AI agent on your mesh: OpenClaw channel plugin for MeshCore LoRa nodes (Companion Protocol over TCP).",
   "repository": {
     "type": "git",
@@ -37,7 +37,7 @@
     "vitest": "4.1.7"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.10.1"
+    "openclaw": ">=2026.10.5"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -77,10 +77,10 @@
       "npmSpec": "@fintlp/openclaw-meshcore",
       "clawhubSpec": "@fintlp/openclaw-meshcore",
       "defaultChoice": "clawhub",
-      "minHostVersion": ">=2026.10.1"
+      "minHostVersion": ">=2026.10.5"
     },
     "compat": {
-      "pluginApi": ">=2026.10.1"
+      "pluginApi": ">=2026.10.5"
     },
     "build": {
       "openclawVersion": "2026.10.5"

@@ -3,8 +3,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  createChannelInboundEnvelopeBuilder,
-  resolveInboundSessionEnvelopeContext,
+  createChannelInboundEnvelopeBuilderAsync,
+  resolveInboundSessionEnvelopeContextAsync,
 } from "openclaw/plugin-sdk/channel-inbound";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
@@ -40,7 +40,7 @@ describe("meshcore inbound envelope format (#43 golden)", () => {
     } as OpenClawConfig;
   }
 
-  it("produces deterministic direct-DM envelope without previous timestamp", () => {
+  it("produces deterministic direct-DM envelope without previous timestamp", async () => {
     const cfg = makeConfig();
     const peer = { kind: "direct" as const, id: "!aabbccdd1122" };
     const route = resolveAgentRoute({
@@ -51,13 +51,13 @@ describe("meshcore inbound envelope format (#43 golden)", () => {
       defaultAgentId: "meshcore",
     });
 
-    const envelopeCtx = resolveInboundSessionEnvelopeContext({
+    const envelopeCtx = await resolveInboundSessionEnvelopeContextAsync({
       cfg,
       agentId: route.agentId,
       sessionKey: route.sessionKey,
     });
 
-    const buildEnvelope = createChannelInboundEnvelopeBuilder({
+    const buildEnvelope = await createChannelInboundEnvelopeBuilderAsync({
       cfg,
       route: { agentId: route.agentId, sessionKey: route.sessionKey },
     });
@@ -76,7 +76,7 @@ describe("meshcore inbound envelope format (#43 golden)", () => {
     expect(body).toBe("[MeshCore !aabbccdd1122 Tue 2023-11-14T22:13:20Z] hello");
   });
 
-  it("produces deterministic group envelope without previous timestamp", () => {
+  it("produces deterministic group envelope without previous timestamp", async () => {
     const cfg = makeConfig();
     const peer = { kind: "group" as const, id: "meshcore:channel:0" };
     const route = resolveAgentRoute({
@@ -87,13 +87,13 @@ describe("meshcore inbound envelope format (#43 golden)", () => {
       defaultAgentId: "meshcore",
     });
 
-    const envelopeCtx = resolveInboundSessionEnvelopeContext({
+    const envelopeCtx = await resolveInboundSessionEnvelopeContextAsync({
       cfg,
       agentId: route.agentId,
       sessionKey: route.sessionKey,
     });
 
-    const buildEnvelope = createChannelInboundEnvelopeBuilder({
+    const buildEnvelope = await createChannelInboundEnvelopeBuilderAsync({
       cfg,
       route: { agentId: route.agentId, sessionKey: route.sessionKey },
     });
