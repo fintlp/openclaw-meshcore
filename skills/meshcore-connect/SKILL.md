@@ -19,6 +19,11 @@ Get a user's OpenClaw agent onto their MeshCore mesh — reachable by DM from an
 2. **The companion TCP server enabled** on the node (default port 5000) and the node on the same LAN as the gateway.
 3. **Region/band set for the user's locale** (EU868 in Austria/EU — frequency is law, not preference).
 
+## Compatibility (read before installing)
+
+- **Minimum OpenClaw: 2026.10.1** — the plugin's declared floor (peerDependencies, compat.pluginApi and install.minHostVersion are all >=2026.10.1).
+- **OpenClaw 2026.10.5 or newer requires plugin 2026.10.13 or newer.** 2026.10.5 removed the SDK export runStoppablePassiveMonitor; older plugin versions fail to register at gateway boot with: The requested module 'openclaw/plugin-sdk/extension-shared' does not provide an export named 'runStoppablePassiveMonitor'. Fix: update or reinstall to the current release, then restart the gateway.
+
 ## Fast path
 
 ```bash
