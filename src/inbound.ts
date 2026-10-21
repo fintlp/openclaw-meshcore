@@ -9,6 +9,11 @@ import {
   defineStableChannelIngressIdentity,
 } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { createChannelPairingController } from "openclaw/plugin-sdk/channel-pairing";
+import {
+  DEFAULT_DURABILITY_CONFIG,
+  meshcoreDedupeKey,
+  type DurabilityStore,
+} from "./durability.js";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
   deliverFormattedTextWithAttachments,
@@ -169,14 +174,29 @@ function formatStatusReply(snapshot: ReturnType<typeof readNodeStatusSnapshot>):
   return parts.join(" ");
 }
 
-function buildCommandReply(command: string, accountId: string): string | undefined {
+function buildCommandReply(
+  command: string,
+  accountId: string,
+  durability?: DurabilityStore | null,
+): string | undefined {
   if (command === "!ping") {
     const snapshot = readNodeStatusSnapshot(accountId);
     const name = snapshot?.name;
     return name ? `pong ${name}` : "pong";
   }
   if (command === "!status") {
-    return formatStatusReply(readNodeStatusSnapshot(accountId));
+    const base = formatStatusReply(readNodeStatusSnapshot(accountId));
+    if (!durability) {
+      return base;
+    }
+    const m = durability.metrics(accountId);
+    if (m.degraded) {
+      return `${base} queue:DEGRADED`;
+    }
+    const oldest = m.oldestPendingAt
+      ? ` oldest ${Math.max(0, Math.round((Date.now() - m.oldestPendingAt) / 1000))}s`
+      : "";
+    return `${base} queue:${m.pending} dead:${m.dead} dup:${m.duplicates}${oldest}`;
   }
   return undefined;
 }
@@ -190,6 +210,12 @@ export async function handleMeshcoreInbound(params: {
   statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
   /** If provided for group messages, called after admission succeeds and then normal session dispatch is skipped. */
   onAdmittedGroup?: (message: MeshcoreInboundMessage) => void | Promise<void>;
+  /** Inbound durability store (#48). When present, session-bound frames are logged before dispatch and the cursor advances after the host accepts the turn. */
+  durability?: DurabilityStore | null;
+  /** Set when dispatching from the startup replay path: skips intake logging and binds dispatch marks to the stored event id. */
+  replayOf?: number;
+  /** The stored LOCAL receive time of a replayed event (for the agent-visible replay tag). */
+  replayReceivedAt?: number;
 }): Promise<void> {
   const { message, account, config, runtime } = params;
   const core = getMeshcoreRuntime();
@@ -204,7 +230,9 @@ export async function handleMeshcoreInbound(params: {
     return;
   }
 
-  params.statusSink?.({ lastInboundAt: message.timestamp });
+  params.statusSink?.({
+    lastInboundAt: params.replayOf !== undefined ? Date.now() : message.timestamp,
+  });
 
   const dmPolicy = account.config.dmPolicy ?? "pairing";
   const defaultGroupPolicy = resolveDefaultGroupPolicy(config);
@@ -305,6 +333,44 @@ export async function handleMeshcoreInbound(params: {
   });
   const commandAuthorized = access.commandAccess.authorized;
 
+  // Replay path: admission flipped while we were down (config changed).
+  // The attempt was already counted at claim time; release the claim — the
+  // event goes back to pending and dead-letters at maxDispatchAttempts.
+  if (params.replayOf !== undefined && access.ingress.admission !== "dispatch") {
+    params.durability?.releaseClaim(
+      account.accountId,
+      params.replayOf,
+      `admission flipped on replay (${access.ingress.admission})`,
+    );
+    runtime.log?.(
+      `meshcore: replay event ${params.replayOf} no longer admitted (${access.ingress.admission}) — claim released`,
+    );
+    return;
+  }
+
+  // Durability duplicate probe (#48): persistent dedupe collapses sender
+  // retries and reconnect re-deliveries BEFORE any dispatch work, including
+  // command replies (a re-aired !trace costs real airtime).
+  const store = params.durability ?? null;
+  const dedupeKey = meshcoreDedupeKey({
+    senderNodeId: message.senderNodeId,
+    timestamp: message.timestamp,
+    body: message.text ?? rawBody,
+  });
+  // m7: a duplicate hit on a COMPLETE row is a drop; a hit on a pending /
+  // inflight row is a redelivery we must dispatch (its first attempt failed).
+  const existingDupe =
+    store && params.replayOf === undefined
+      ? store.findDuplicate(account.accountId, dedupeKey)
+      : null;
+  if (existingDupe && (existingDupe.state === "dispatched" || existingDupe.state === "dead")) {
+    runtime.log?.(
+      `meshcore: drop duplicate inbound (sender ${message.senderNodeId} ts ${message.timestamp})`,
+    );
+    return;
+  }
+  const redeliverEventId = existingDupe?.id;
+
   // Plugin-level command replies: answered directly for DMs that pass
   // the same admission gate as a normal dispatch. Unknown/pairing-required
   // senders fall through to the normal pairing flow so we never leak gateway
@@ -316,9 +382,43 @@ export async function handleMeshcoreInbound(params: {
     !message.isGroup &&
     access.ingress.admission === "dispatch"
   ) {
+    // Round-4 minor 1: COMMANDS drop on any duplicate hit — a pending command
+    // row means the command is already running (or ran), never re-air it. But
+    // this must only fire for real commands: a plain DM retry belongs to the
+    // m7 redelivery path below (re-check regression).
+    if (existingDupe && (COMMAND_REPLIES.has(rawBody) || parseRepeaterOpsInvocation(rawBody))) {
+      runtime.log?.(
+        `meshcore: drop duplicate command ${rawBody} (sender ${message.senderNodeId})`,
+      );
+      return;
+    }
+    // m4: the command frame is recorded BEFORE the (possibly slow) run, so a
+    // sender retry during it is dropped by the probe instead of re-airing.
+    const commandIntake = (): number | undefined => {
+      if (!store || params.replayOf !== undefined) {
+        return params.replayOf;
+      }
+      const r = store.intake({
+        accountId: account.accountId,
+        dedupeKey,
+        kind: "direct",
+        peerId: message.senderNodeId,
+        senderLabel: message.senderName ?? message.senderNodeId,
+        senderTs: message.timestamp,
+        body: rawBody,
+        rawJson: "{}",
+      });
+      return !r.duplicate && r.id >= 0 ? r.id : undefined;
+    };
+    const commandMark = (id: number | undefined) => {
+      if (store && id !== undefined) {
+        store.markDispatched(account.accountId, id);
+      }
+    };
     if (COMMAND_REPLIES.has(rawBody)) {
-      const replyText = buildCommandReply(rawBody, account.accountId);
+      const replyText = buildCommandReply(rawBody, account.accountId, params.durability);
       if (replyText !== undefined) {
+        const cid = commandIntake();
         await deliverMeshcoreReply({
           payload: { text: replyText },
           cfg: config,
@@ -327,24 +427,40 @@ export async function handleMeshcoreInbound(params: {
           sendReply: params.sendReply,
           statusSink: params.statusSink,
         });
+        commandMark(cid);
         return;
       }
     }
     const opsInvocation = parseRepeaterOpsInvocation(rawBody);
     if (opsInvocation) {
-      const replyText = await runRepeaterOpsCommand({
-        op: opsInvocation.op,
-        targetArg: opsInvocation.arg,
-        account,
-      });
-      await deliverMeshcoreReply({
-        payload: { text: replyText },
-        cfg: config,
-        target: message.senderNodeId,
-        accountId: account.accountId,
-        sendReply: params.sendReply,
-        statusSink: params.statusSink,
-      });
+      const cid = commandIntake();
+      // nit 4: a throw mid-command releases the recorded row instead of
+      // leaking it pending forever.
+      try {
+        const replyText = await runRepeaterOpsCommand({
+          op: opsInvocation.op,
+          targetArg: opsInvocation.arg,
+          account,
+        });
+        await deliverMeshcoreReply({
+          payload: { text: replyText },
+          cfg: config,
+          target: message.senderNodeId,
+          accountId: account.accountId,
+          sendReply: params.sendReply,
+          statusSink: params.statusSink,
+        });
+        commandMark(cid);
+      } catch (err) {
+        if (store && cid !== undefined) {
+          store.releaseClaim(
+            account.accountId,
+            cid,
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+        throw err;
+      }
       return;
     }
   }
@@ -404,11 +520,65 @@ export async function handleMeshcoreInbound(params: {
   }
 
   // Digest mode hook: admitted group message, but do not wake a session.
+  // Digest traffic is NOT durability-logged — the group-log jsonl is already
+  // its durable record; storing it here too would double the write volume.
   if (message.isGroup && params.onAdmittedGroup) {
     await params.onAdmittedGroup(message);
+    if (store && params.replayOf !== undefined) {
+      store.markDispatched(account.accountId, params.replayOf);
+    }
     return;
   }
 
+  // Durability intake + claim (#48): session-bound frames are logged as
+  // admitted (admission is decided above) and claimed with a lease BEFORE any
+  // dispatch work. Attempts count at claim, so process deaths and crash loops
+  // are bounded by maxDispatchAttempts.
+  let durabilityEventId: number | undefined = params.replayOf ?? redeliverEventId;
+  if (store && durabilityEventId === undefined) {
+    const res = store.intake({
+      accountId: account.accountId,
+      dedupeKey,
+      kind: message.isGroup ? "group" : "direct",
+      peerId: message.isGroup ? message.target : message.senderNodeId,
+      senderLabel: message.senderName ?? message.senderNodeId,
+      senderTs: message.timestamp,
+      body: rawBody,
+      rawJson: JSON.stringify(message),
+    });
+    if (res.duplicate) {
+      runtime.log?.(
+        `meshcore: drop duplicate inbound (sender ${message.senderNodeId} ts ${message.timestamp})`,
+      );
+      return;
+    }
+    if (res.id >= 0) {
+      durabilityEventId = res.id;
+    } else {
+      // Partial store failure (review M-2): dispatch WITHOUT durability rather
+      // than drop — persistence must never be a single point of failure.
+      runtime.log?.("meshcore: durability intake degraded — dispatching without persistence");
+    }
+  }
+  // Live path claims its event (replay arrives pre-claimed by claimNext —
+  // claiming twice would double-count the attempt).
+  const durCfg = { ...DEFAULT_DURABILITY_CONFIG, ...account.config.durability };
+  if (store && durabilityEventId !== undefined && params.replayOf === undefined) {
+    const verdict = store.claim(
+      account.accountId,
+      durabilityEventId,
+      durCfg.maxDispatchAttempts,
+      durCfg.leaseMs,
+    );
+    if (verdict !== "claimed") {
+      runtime.log?.(
+        `meshcore: inbound event ${durabilityEventId} not dispatched (claim: ${verdict})`,
+      );
+      return;
+    }
+  }
+
+  try {
   const peerId = message.isGroup ? message.target : message.senderNodeId;
   const peerKind = message.isGroup ? "group" : "direct";
   const route = resolveAgentRoute({
@@ -475,10 +645,25 @@ export async function handleMeshcoreInbound(params: {
         type: "mesh_security",
         payload: message.meshSecurity,
       },
+      ...(params.replayOf !== undefined
+        ? [
+            {
+              label: "MeshCore Replay",
+              source: "meshcore",
+              type: "mesh_replay",
+              payload: {
+                replayed: true,
+                receivedAt: params.replayReceivedAt ?? message.timestamp,
+                senderTs: message.timestamp,
+                replayedAt: Date.now(),
+              },
+            },
+          ]
+        : []),
     ],
   });
 
-  await core.channel.inbound.run({
+    await core.channel.inbound.run({
     channel: CHANNEL_ID,
     accountId: account.accountId,
     raw: message,
@@ -534,6 +719,45 @@ export async function handleMeshcoreInbound(params: {
           },
         },
       }),
+      onFinalize: (result: {
+        dispatched: boolean;
+        admission?: { kind?: string };
+        dispatchResult?: { deferredToActiveRun?: "steer" | "followup" } | null;
+      }) => {
+        if (!store || durabilityEventId === undefined) {
+          return;
+        }
+        if (result.dispatchResult?.deferredToActiveRun === "followup") {
+          // Queued behind a busy session: the host has ACCEPTED it into its
+          // follow-up queue (review round-3 m6) — mark dispatched. Residual,
+          // documented: the queue is in-memory, so a host crash before the
+          // drain loses that one follow-up; no plugin can close that gap.
+          runtime.log?.(
+            `meshcore: event ${durabilityEventId} accepted into the host follow-up queue`,
+          );
+          store.markDispatched(account.accountId, durabilityEventId);
+          return;
+        }
+        if (result.dispatched && result.admission?.kind === "dispatch") {
+          store.markDispatched(account.accountId, durabilityEventId);
+        } else {
+          store.releaseClaim(
+            account.accountId,
+            durabilityEventId,
+            `turn not dispatched (${result.admission?.kind ?? "unknown"})`,
+          );
+        }
+      },
     },
   });
+  } catch (err) {
+    if (store && durabilityEventId !== undefined) {
+      store.releaseClaim(
+        account.accountId,
+        durabilityEventId,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    throw err;
+  }
 }

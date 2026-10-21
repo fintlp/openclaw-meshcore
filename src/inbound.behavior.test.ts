@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { finalizeInboundContext } from "openclaw/plugin-sdk/reply-runtime";
 import { handleMeshcoreInbound } from "./inbound.js";
+import { meshcoreDedupeKey, openDurabilityStore } from "./durability.js";
 import {
   resetNodeStatusStateForTests,
   setNodeStatusPathForTests,
@@ -1022,5 +1023,81 @@ describe("meshcore inbound behavior", () => {
         expect(inboundRunMock).not.toHaveBeenCalled();
       });
     });
+  });
+});
+
+
+describe("durability redelivery (m7 / minor-1, adversarial re-check)", () => {
+  it("m7: a plain-DM retry after a failed first dispatch is redelivered, not dropped", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meshcore-beh-dur-"));
+    const store = await openDurabilityStore({ dbPath: join(dir, "d.sqlite") });
+    try {
+      const msg = createMessage({ text: "hello", timestamp: 1700000001234 });
+      store!.intake({
+        accountId: "default",
+        dedupeKey: meshcoreDedupeKey({
+          senderNodeId: msg.senderNodeId,
+          timestamp: msg.timestamp,
+          body: msg.text,
+        }),
+        kind: "direct",
+        peerId: msg.senderNodeId,
+        senderTs: msg.timestamp,
+        body: "hello",
+        rawJson: "{}",
+      });
+      const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+      setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+      await handleMeshcoreInbound({
+        message: msg,
+        account: createAccount({
+          config: { dmPolicy: "allowlist", allowFrom: ["!aabbccdd1122"], groupPolicy: "disabled" },
+        }),
+        config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+        runtime: createRuntimeEnv(),
+        sendReply: vi.fn(async () => undefined),
+        durability: store,
+      });
+      expect(inboundRunMock).toHaveBeenCalled();
+    } finally {
+      store?.close();
+    }
+  });
+
+  it("minor-1: a duplicate command is dropped before it can re-air", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meshcore-beh-dur-"));
+    const store = await openDurabilityStore({ dbPath: join(dir, "d.sqlite") });
+    try {
+      runRepeaterOpsCommandMock.mockClear();
+      const msg = createMessage({ text: "!trace !ff00ff00ff00", timestamp: 1700000005678 });
+      store!.intake({
+        accountId: "default",
+        dedupeKey: meshcoreDedupeKey({
+          senderNodeId: msg.senderNodeId,
+          timestamp: msg.timestamp,
+          body: msg.text,
+        }),
+        kind: "direct",
+        peerId: msg.senderNodeId,
+        senderTs: msg.timestamp,
+        body: msg.text,
+        rawJson: "{}",
+      });
+      const sendReply = vi.fn(async () => undefined);
+      await handleMeshcoreInbound({
+        message: msg,
+        account: createAccount({
+          config: { dmPolicy: "allowlist", allowFrom: ["!aabbccdd1122"], groupPolicy: "disabled" },
+        }),
+        config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+        runtime: createRuntimeEnv(),
+        sendReply,
+        durability: store,
+      });
+      expect(runRepeaterOpsCommandMock).not.toHaveBeenCalled();
+      expect(sendReply).not.toHaveBeenCalled();
+    } finally {
+      store?.close();
+    }
   });
 });

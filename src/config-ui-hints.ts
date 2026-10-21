@@ -49,6 +49,10 @@ export const meshcoreChannelConfigUiHints = {
     label: "DM Delivery Retry",
     help: "Auto-retry DMs that the mesh never confirms (default off). Waits for the node's delivery report, then retransmits up to maxAttempts-1 times with backoffMs between attempts. Every attempt consumes Send Rate Limit budget.",
   },
+  durability: {
+    label: "Inbound Durability",
+    help: "At-least-once inbound delivery across gateway restarts (default on, no setup). Admitted frames are logged locally before dispatch and replayed after a restart — updates and crashes no longer eat messages; a restart mid-turn can duplicate a reply. Pending bodies are blanked at terminal states. Disable only if you cannot accept a pending-body copy at rest (delete the .sqlite + sidecars when opting out).",
+  },
   logInboundMessageContent: {
     label: "Log Inbound Message Content",
     help: "When true, Gateway logs include up to 80 characters of inbound mesh text. Default is false (metadata only: sender, target, message id, length).",

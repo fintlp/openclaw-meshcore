@@ -40,6 +40,7 @@ import { appendGroupLogEntry } from "./group-log.js";
 import { isOutboundEcho, rememberOutboundEcho } from "./echo-dedupe.js";
 import { readNodeStatusSnapshot, updateNodeStatusOps } from "./node-status.js";
 import { handleMeshcoreInbound } from "./inbound.js";
+import { DEFAULT_DURABILITY_CONFIG, type DurabilityStore } from "./durability.js";
 import {
   formatMeshcoreChannelTarget,
   formatMeshcoreNodeId,
@@ -107,6 +108,8 @@ export type MeshcoreMonitorOptions = {
   reconnectCount?: number;
   lastRestartReason?: string;
   lastRestartAt?: number;
+  /** Inbound durability store (#48); replay runs once after connect. */
+  durability?: DurabilityStore | null;
 };
 
 function toIso(timestamp: number): string {
@@ -318,26 +321,98 @@ export function monitorMeshcoreProvider(
       contactBookMaxEntries: account.config.contactBookMaxEntries,
     });
 
+    // Shared dispatch path for live intake and durability replay (#48, m4):
+    // one builder, identical params, channel filter applied in both modes.
     const allowedChannels = new Set(account.config.channels ?? [0]);
+
+    const dmSendReply = async (target: string, text: string, replyToId?: string) => {
+      try {
+        const { sendMessageMeshcore } = await import("./send.js");
+        await sendMessageMeshcore(target, text, {
+          cfg,
+          accountId: account.accountId,
+          replyTo: replyToId,
+          deviceHandle: handle,
+        });
+        rememberOutboundEcho(text);
+        opts.statusSink?.({ lastOutboundAt: Date.now() });
+        core.channel.activity.record({
+          channel: CHANNEL_ID,
+          accountId: account.accountId,
+          direction: "outbound",
+        });
+      } catch (err) {
+        // A failed reply (e.g. a pairing challenge to a prefix-only sender whose
+        // full pubkey is not yet known) must not fail the inbound/pairing flow.
+        console.error(
+          `[${account.accountId}] DM reply to ${target} failed (non-fatal): ${String(err)}`,
+        );
+      }
+    };
+
+    const blockedGroupReply = async (target: string) => {
+      runtime.error?.(
+        `[${account.accountId}] blocked outbound reply to group ${target}: groups are receive-only`,
+      );
+    };
+
+    const groupDigestHook =
+      (inbound: MeshcoreInboundMessage) => (admitted: MeshcoreInboundMessage) => {
+        appendGroupLogEntry(
+          {
+            ts: new Date().toISOString(),
+            channel: admitted.target,
+            ...(/^[0-9a-f]{12}$/i.test(inbound.senderNodeId)
+              ? { senderPubkeyPrefix: inbound.senderNodeId.slice(0, 12) }
+              : {}),
+            name: admitted.senderName,
+            text: admitted.text,
+          },
+          account.accountId,
+        );
+      };
+
+    const durCfg = { ...DEFAULT_DURABILITY_CONFIG, ...account.config.durability };
+
+    const dispatchNormalized = async (
+      inbound: MeshcoreInboundMessage,
+      dispatchOpts?: { replayOf?: number; replayReceivedAt?: number },
+    ): Promise<void> => {
+      if (
+        inbound.isGroup &&
+        !allowedChannels.has(parseMeshcoreChannelIndex(inbound.target) ?? -1)
+      ) {
+        if (dispatchOpts?.replayOf !== undefined) {
+          opts.durability?.deadLetter(account.accountId, dispatchOpts.replayOf, "channel-not-monitored");
+        }
+        return;
+      }
+      await handleMeshcoreInbound({
+        message: inbound,
+        account,
+        config: cfg,
+        runtime,
+        sendReply: inbound.isGroup ? blockedGroupReply : dmSendReply,
+        statusSink: opts.statusSink,
+        durability: opts.durability,
+        replayOf: dispatchOpts?.replayOf,
+        replayReceivedAt: dispatchOpts?.replayReceivedAt,
+        onAdmittedGroup:
+          inbound.isGroup && groupMonitorMode === "digest" ? groupDigestHook(inbound) : undefined,
+      });
+    };
+
     const unsubscribers: Array<() => void> = [];
     let settled = false;
     let resolveMonitor: ((value: { stop: () => void }) => void) | null = null;
     let rejectMonitor: ((reason: Error) => void) | null = null;
+    // minor 3: resolved by doCleanup so a replayed turn stops waiting on a
+    // dead socket instead of running to the 5-minute cap.
+    let resolveDisconnected: (() => void) | null = null;
+    const disconnectedPromise = new Promise<void>((resolve) => {
+      resolveDisconnected = resolve;
+    });
     const groupMonitorMode = account.config.groupMonitorMode ?? "digest";
-
-    function extractSenderPubkeyPrefix(message: Record<string, unknown>): string | undefined {
-      const prefix = message.pubKeyPrefix;
-      const bytes =
-        prefix instanceof Uint8Array
-          ? prefix
-          : Array.isArray(prefix)
-            ? new Uint8Array(prefix as number[])
-            : undefined;
-      if (!bytes || bytes.length === 0) {
-        return undefined;
-      }
-      return bytesToHex(bytes.slice(0, 6)).toLowerCase();
-    }
 
     // Keep the identity-binding observation store bounded: evict entries
     // whose contacts are pruned by contactBookMaxEntries.
@@ -361,6 +436,7 @@ export function monitorMeshcoreProvider(
     const doCleanup = () => {
       if (settled) return;
       settled = true;
+      resolveDisconnected?.();
       contactSync.dispose();
       advertScheduler?.dispose();
       // Flush pending throttled discovery-summary writes so the final
@@ -419,37 +495,7 @@ export function monitorMeshcoreProvider(
             await opts.onMessage(inbound, handle);
             return;
           }
-          await handleMeshcoreInbound({
-            message: inbound,
-            account,
-            config: cfg,
-            runtime,
-            sendReply: async (target, text, replyToId) => {
-              try {
-                const { sendMessageMeshcore } = await import("./send.js");
-                await sendMessageMeshcore(target, text, {
-                  cfg,
-                  accountId: account.accountId,
-                  replyTo: replyToId,
-                  deviceHandle: handle,
-                });
-                rememberOutboundEcho(text);
-                opts.statusSink?.({ lastOutboundAt: Date.now() });
-                core.channel.activity.record({
-                  channel: CHANNEL_ID,
-                  accountId: account.accountId,
-                  direction: "outbound",
-                });
-              } catch (err) {
-                // A failed reply (e.g. a pairing challenge to a prefix-only sender whose
-                // full pubkey is not yet known) must not fail the inbound/pairing flow.
-                console.error(
-                  `[${account.accountId}] DM reply to ${target} failed (non-fatal): ${String(err)}`,
-                );
-              }
-            },
-            statusSink: opts.statusSink,
-          });
+          await dispatchNormalized(inbound);
         } catch (err) {
           const line = `[${account.accountId}] DM inbound handler failed: ${String(err)}`;
           logger.error?.(line);
@@ -500,30 +546,7 @@ export function monitorMeshcoreProvider(
           });
 
           if (groupMonitorMode === "digest") {
-            await handleMeshcoreInbound({
-              message: inbound,
-              account,
-              config: cfg,
-              runtime,
-              sendReply: async () => {
-                runtime.error?.(
-                  `[${account.accountId}] blocked outbound reply to group ${inbound.target}: groups are receive-only`,
-                );
-              },
-              statusSink: opts.statusSink,
-              onAdmittedGroup: (admitted) => {
-                appendGroupLogEntry(
-                  {
-                    ts: new Date().toISOString(),
-                    channel: admitted.target,
-                    senderPubkeyPrefix: extractSenderPubkeyPrefix(message),
-                    name: admitted.senderName,
-                    text: admitted.text,
-                  },
-                  account.accountId,
-                );
-              },
-            });
+            await dispatchNormalized(inbound);
             return;
           }
 
@@ -532,18 +555,7 @@ export function monitorMeshcoreProvider(
             return;
           }
 
-          await handleMeshcoreInbound({
-            message: inbound,
-            account,
-            config: cfg,
-            runtime,
-            sendReply: async () => {
-              runtime.error?.(
-                `[${account.accountId}] blocked outbound reply to group ${inbound.target}: groups are receive-only`,
-              );
-            },
-            statusSink: opts.statusSink,
-          });
+          await dispatchNormalized(inbound);
         } catch (err) {
           const line = `[${account.accountId}] channel inbound handler failed: ${String(err)}`;
           logger.error?.(line);
@@ -776,6 +788,116 @@ export function monitorMeshcoreProvider(
       })();
     }
 
+    // Durability replay (#48): runs AFTER all listeners, polling, and the
+    // disconnect handler are registered (review M-3), so an abort or socket
+    // loss during replay is seen immediately and the stale-socket watchdog is
+    // fed throughout. claimNext counts each attempt at claim; afterId skips
+    // rows already tried this pass (review M-1); each event races the
+    // remaining deadline so one slow turn cannot stall startup.
+    if (opts.durability) {
+      const store = opts.durability;
+      opts.statusSink?.({
+        connected: true,
+        lastConnectedAt: Date.now(),
+        lastTransportActivityAt: Date.now(),
+      });
+      const stale = store.sweepStale(account.accountId, durCfg.maxReplayAgeMs);
+      if (stale.length > 0) {
+        runtime.log?.(
+          `[${account.accountId}] durability: ${stale.length} stale pending event(s) dead-lettered (older than maxReplayAgeMs)`,
+        );
+      }
+      const deadline = Date.now() + 5 * 60_000;
+      let claimed = 0;
+      let lastClaimId = 0;
+      let nullStreak = 0;
+      for (;;) {
+        // M1: stop on abort AND on a dropped socket (settled) — replaying over
+        // a dead connection loses replies while marking rows dispatched.
+        if (opts.abortSignal?.aborted || settled) {
+          break;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          runtime.log?.(
+            `[${account.accountId}] durability replay time-capped after ${claimed} event(s); remainder replays next start`,
+          );
+          break;
+        }
+        const ev = store.claimNext(
+          account.accountId,
+          durCfg.maxDispatchAttempts,
+          durCfg.leaseMs,
+          lastClaimId,
+        );
+        if (!ev) {
+          // nit 2: a guard-truncated pass resumes once before declaring empty.
+          nullStreak += 1;
+          if (nullStreak >= 2) {
+            break;
+          }
+          continue;
+        }
+        nullStreak = 0;
+        lastClaimId = ev.id;
+        claimed += 1;
+        let raw: MeshcoreInboundMessage | null = null;
+        try {
+          const rawJson = store.rawJsonOf(ev.id);
+          raw = rawJson ? (JSON.parse(rawJson) as MeshcoreInboundMessage) : null;
+        } catch {
+          raw = null;
+        }
+        // minor 4: unparseable rows AND non-text payloads (e.g. recorded
+        // command frames) dead-letter immediately instead of looping boots.
+        if (!raw || typeof raw.text !== "string") {
+          store.deadLetter(account.accountId, ev.id, raw ? "not-replayable" : "corrupt-raw");
+          continue;
+        }
+        let onAbortOnce: (() => void) | null = null;
+        const abortPromise = new Promise((resolve) => {
+          if (opts.abortSignal?.aborted || settled) {
+            resolve(undefined);
+            return;
+          }
+          onAbortOnce = () => resolve(undefined);
+          opts.abortSignal?.addEventListener("abort", onAbortOnce, { once: true });
+        });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            dispatchNormalized(raw, { replayOf: ev.id, replayReceivedAt: ev.receivedAt }),
+            abortPromise,
+            disconnectedPromise,
+            new Promise((resolve) => {
+              timer = setTimeout(resolve, remaining);
+            }),
+          ]);
+        } catch (err) {
+          store.releaseClaim(
+            account.accountId,
+            ev.id,
+            err instanceof Error ? err.message : String(err),
+          );
+        } finally {
+          if (timer !== undefined) {
+            clearTimeout(timer);
+          }
+          if (onAbortOnce) {
+            opts.abortSignal?.removeEventListener("abort", onAbortOnce);
+          }
+        }
+      }
+      if (claimed > 0) {
+        runtime.log?.(`[${account.accountId}] durability replay: ${claimed} event(s) claimed`);
+      }
+      if (opts.abortSignal?.aborted) {
+        runtime.log?.(`[${account.accountId}] durability replay aborted after ${claimed} event(s)`);
+        doCleanup();
+        return { stop: () => {} };
+      }
+    }
+
     return new Promise<{ stop: () => void }>((resolve, reject) => {
       resolveMonitor = resolve;
       rejectMonitor = reject;
@@ -786,6 +908,13 @@ export function monitorMeshcoreProvider(
         resolve({ stop: () => {} });
       };
       opts.abortSignal?.addEventListener("abort", onAbort, { once: true });
+
+      // M1: an abort that fired before this point (incl. while durability is
+      // off) must still settle the monitor.
+      if (opts.abortSignal?.aborted && !settled) {
+        onAbort();
+        return;
+      }
 
       if (settled) {
         opts.abortSignal?.removeEventListener("abort", onAbort);

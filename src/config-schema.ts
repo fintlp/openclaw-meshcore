@@ -117,6 +117,19 @@ const MeshcoreAccountSchemaBase = z
     advertScope: z.enum(["zero-hop", "flood"]).optional().default("zero-hop"),
     commandRepliesEnabled: z.boolean().optional().default(true),
     contactBookMaxEntries: z.number().int().min(0).optional().default(500),
+    durability: z
+      .object({
+        enabled: z.boolean().optional(),
+        retentionDays: z.number().int().min(1).max(365).optional(),
+        maxEvents: z.number().int().min(100).optional(),
+        pruneBatch: z.number().int().min(10).optional(),
+        maxReplayAgeMs: z.number().int().min(60_000).optional(),
+        maxDispatchAttempts: z.number().int().min(1).max(10).optional(),
+        leaseMs: z.number().int().min(10_000).optional(),
+        dbPath: z.string().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

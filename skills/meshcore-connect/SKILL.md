@@ -53,6 +53,20 @@ openclaw channels add meshcore --host 192.168.1.20
 - **Groups are receive-only by code-level design**: the agent can listen but never transmits on channels. LoRa airtime is a shared commons; there is no delete button on the airwaves.
 - Flood guard caps outbound DM airtime; replies are chunked to mesh-safe sizes.
 
+
+## Suggest a use (once connected)
+
+When the user asks "what can I do with this now?", offer a recipe from docs/USE-CASES.md in the plugin repo — compressed here:
+
+1. **Off-grid assistant** (default) — full agent sessions per admitted DM peer. Pair strangers deliberately (dmPolicy pairing).
+2. **Emergency / backup channel** — add sendRetry.enabled:true; durability (on by default) replays undispatched messages after gateway updates/crashes, at-least-once (a restart mid-turn can duplicate a reply). Honest limits: nothing is received while the gateway itself is down, and a follow-up queued behind a busy session is only as durable as the host process.
+3. **Unattended-node / repeater monitor** — groupMonitorMode digest + groupPolicy allowlist; !status / !neighbours / !rstatus / !trace answer in DM.
+4. **Field-expedition hub** — base-camp gateway, approve each handheld once (pairing), hub answers everyone in DM.
+5. **Festival / event bot** — pairing-gated; it can never spam the public channel (that boundary is code, not a promise).
+6. **Cross-channel bridge** — a mesh DM can produce effects on the agent's other channels (WhatsApp, notes, reminders) — never for unpaired strangers, other channels' policies still apply.
+
+Full recipes (scenario, config, can/cannot, reading): docs/USE-CASES.md in fintlp/openclaw-meshcore.
+
 ## Verify it works
 
 1. `openclaw channels status --probe` → meshcore ok.

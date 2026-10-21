@@ -985,6 +985,49 @@
               "digest",
               "session"
             ]
+          },
+          "durability": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "retentionDays": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 365
+              },
+              "maxEvents": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 9007199254740991
+              },
+              "pruneBatch": {
+                "type": "integer",
+                "minimum": 10,
+                "maximum": 9007199254740991
+              },
+              "maxDispatchAttempts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+              },
+              "dbPath": {
+                "type": "string"
+              },
+              "maxReplayAgeMs": {
+                "type": "integer",
+                "minimum": 60000,
+                "maximum": 9007199254740991
+              },
+              "leaseMs": {
+                "type": "integer",
+                "minimum": 10000,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -1000,6 +1043,49 @@
     },
     "defaultAccount": {
       "type": "string"
+    },
+    "durability": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "retentionDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 365
+        },
+        "maxEvents": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 9007199254740991
+        },
+        "pruneBatch": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 9007199254740991
+        },
+        "maxDispatchAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "dbPath": {
+          "type": "string"
+        },
+        "maxReplayAgeMs": {
+          "type": "integer",
+          "minimum": 60000,
+          "maximum": 9007199254740991
+        },
+        "leaseMs": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -1515,6 +1601,49 @@
             "zero-hop",
             "flood"
           ]
+        },
+        "durability": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "retentionDays": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 365
+            },
+            "maxEvents": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 9007199254740991
+            },
+            "pruneBatch": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 9007199254740991
+            },
+            "maxDispatchAttempts": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "dbPath": {
+              "type": "string"
+            },
+            "maxReplayAgeMs": {
+              "type": "integer",
+              "minimum": 60000,
+              "maximum": 9007199254740991
+            },
+            "leaseMs": {
+              "type": "integer",
+              "minimum": 10000,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [],
+          "additionalProperties": false
         }
       },
       "required": [

@@ -69,6 +69,20 @@ tests pin the refusal. See the README's "Safety by default" and "Security
 model" sections, and [docs/AGENT-SCOPING.md](docs/AGENT-SCOPING.md) for the
 operator-level trust model.
 
+### Data at rest
+
+The inbound durability log (issue #48, default on) stores admitted message
+bodies in `state/meshcore-durability-<accountId>.sqlite` **only while work
+is pending**: dispatched and dead-lettered rows are blanked in place
+(SQLite `secure_delete` plus a WAL truncate checkpoint every hour — the
+store lives for the process lifetime, so the checkpoint, not close, is the
+real mechanism), leaving dedupe keys and metadata (sender, timestamps,
+attempts) on a 30-day / 50 000-event pruning budget. Pending bodies share the exposure class of the
+host session store. Wire encryption (SignedPlain, channel PSKs) is unchanged
+— the log never holds keys. Set `durability.enabled: false` to opt out, and
+delete the `.sqlite` file and its `-wal`/`-shm` sidecars to remove any kept
+copy.
+
 Hardening pointers:
 
 - Keep `dmPolicy: "pairing"` (or an explicit `allowFrom` list).

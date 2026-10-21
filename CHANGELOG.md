@@ -6,6 +6,36 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## 2026.10.15 — 2026-10-21
+
+Inbound durability (issue #48): **at-least-once** delivery across gateway
+restarts. Admitted session-bound frames are appended to a per-account SQLite
+event log (`node:sqlite`, no native dependency) and claimed with a lease
+before dispatch; attempts count at claim, so a dead process is a counted
+attempt and crash loops dead-letter at `maxDispatchAttempts` (3, logged).
+Startup maintenance reclaims every in-flight row owned by another
+process (owner-tagged leases — a normal restart replays mid-turn work,
+regardless of lease age), dead-letters stale rows (`maxReplayAgeMs`, default
+1 h), then replays the pending backlog in id order after all listeners are
+registered (abort-aware, 5-minute cap, one replay attempt per event per
+pass). Dispatch marks land via the host `onFinalize` hook; a follow-up
+accepted into the host follow-up queue (`deferredToActiveRun`) is marked
+dispatched — a host crash before the drain is the documented residual;
+failures release the claim for the next start. Persistent dedupe (sender
+pubkey prefix + local receive-day + timestamp + payload hash) collapses
+sender retries and reconnect drains; answered commands are recorded key-only,
+so a re-aired `!trace` never costs airtime twice. Terminal states blank
+message bodies at rest (secure-delete + WAL truncate checkpoint). Pruning
+runs at startup and hourly, complete rows only, looping until under the
+30-day / 50 000-event budget. The store lives per db path for the process
+lifetime and fails open (sticky `degraded` flag) — a store error never
+blocks the live path. Digest-mode group traffic stays out of the store. Default ON — `durability.enabled: false` to opt out (delete
+the .sqlite + sidecars for a full wipe). Degrades cleanly when `node:sqlite`
+is unavailable (Node < 22.13). Honest limits in the README: a restart
+mid-turn can duplicate a reply; a follow-up queued behind a busy session is
+only as durable as the host process. Spec + adversarial review: issue #48
+comments.
+
 ## 2026.10.14 — 2026-10-20
 
 Inbound envelope migrated to the async Plugin SDK surface

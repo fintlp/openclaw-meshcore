@@ -1034,6 +1034,49 @@
                     "zero-hop",
                     "flood"
                   ]
+                },
+                "durability": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "retentionDays": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 365
+                    },
+                    "maxEvents": {
+                      "type": "integer",
+                      "minimum": 100,
+                      "maximum": 9007199254740991
+                    },
+                    "pruneBatch": {
+                      "type": "integer",
+                      "minimum": 10,
+                      "maximum": 9007199254740991
+                    },
+                    "maxDispatchAttempts": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 10
+                    },
+                    "dbPath": {
+                      "type": "string"
+                    },
+                    "maxReplayAgeMs": {
+                      "type": "integer",
+                      "minimum": 60000,
+                      "maximum": 9007199254740991
+                    },
+                    "leaseMs": {
+                      "type": "integer",
+                      "minimum": 10000,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [],
+                  "additionalProperties": false
                 }
               },
               "required": [
@@ -1049,6 +1092,49 @@
           },
           "defaultAccount": {
             "type": "string"
+          },
+          "durability": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "retentionDays": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 365
+              },
+              "maxEvents": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 9007199254740991
+              },
+              "pruneBatch": {
+                "type": "integer",
+                "minimum": 10,
+                "maximum": 9007199254740991
+              },
+              "maxDispatchAttempts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+              },
+              "dbPath": {
+                "type": "string"
+              },
+              "maxReplayAgeMs": {
+                "type": "integer",
+                "minimum": 60000,
+                "maximum": 9007199254740991
+              },
+              "leaseMs": {
+                "type": "integer",
+                "minimum": 10000,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -1109,6 +1195,10 @@
         "sendRetry": {
           "label": "DM Delivery Retry",
           "help": "Auto-retry DMs that the mesh never confirms (default off). Waits for the node's delivery report, then retransmits up to maxAttempts-1 times with backoffMs between attempts. Every attempt consumes Send Rate Limit budget."
+        },
+        "durability": {
+          "label": "Inbound Durability",
+          "help": "At-least-once inbound delivery across gateway restarts (default on, no setup). Admitted frames are logged locally before dispatch and replayed after a restart — updates and crashes no longer eat messages; a restart mid-turn can duplicate a reply. Pending bodies are blanked at terminal states. Disable only if you cannot accept a pending-body copy at rest (delete the .sqlite + sidecars when opting out)."
         },
         "logInboundMessageContent": {
           "label": "Log Inbound Message Content",

@@ -15,6 +15,14 @@ This document is the operational guidance; finer-grained DM tool policies are tr
 
 Verified incident (own deployment, 2026-10-03): a mesh DM session, left with default capabilities, autonomously spawned a configuration sub-agent and wrote files while "helping" during a maintenance window — benign intent, real effect. Nothing broke. It was a governance lesson, not an accident report: **scope the surface before you need to.**
 
+---
+
+## What the agent can promise about reliability
+
+If a peer asks "did my message get through?", the honest answer since v2026.10.15 is: **once the gateway admitted it for an agent turn, it is retried until delivered or explicitly dead-lettered — it is not silently dropped.** The inbound durability log (README `durability`, issue #48) records admitted frames before dispatch and replays whatever was left undispatched after a restart, at-least-once. `!status` shows the live queue (`queue:<pending> dead:<n> dup:<d>`).
+
+The boundaries of that promise, all three worth stating when it matters: a message sent while the gateway was *disconnected from the node* was never received (suggest a resend); a restart while your turn was running can produce a *duplicate* reply (at-least-once cuts both ways); and a follow-up queued behind a busy session is only as durable as the host process. Never promise exactly-once. If `dead:` in `!status` is non-zero, tell the operator: those events failed three dispatch attempts (or went stale past maxReplayAgeMs) and were set aside; inspect them with sqlite3 on the durability db (`SELECT id, received_at, peer_id, dead_reason, last_error FROM events WHERE dispatch_state='dead'`).
+
 ## Layer 1 — who gets in at all (`dmPolicy`)
 
 | Policy | Behavior | Use when |

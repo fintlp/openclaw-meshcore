@@ -81,6 +81,7 @@ For the operator-level detail (trust model, per-group tool policies, hardened ex
 ## Documentation
 
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — zero to first mesh DM in ~15 minutes.
+- [docs/USE-CASES.md](docs/USE-CASES.md) — the recipe catalog: six ways to use a mesh-reachable agent, with the config for each.
 - [docs/USAGE.md](docs/USAGE.md) — day-2 operation from within OpenClaw: pairing lifecycle, agent-visible node data, group digest monitoring, position admin.
 - [docs/NODE-SETUP.md](docs/NODE-SETUP.md) — node preparation and operational behavior (the one-client rule, contact management, GPS adverts).
 - [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — verified firmware/software matrix and interop quirks.
@@ -223,6 +224,7 @@ You can also set the environment variable `MESHCORE_HOST` for the default accoun
 | `outboundSignedPlain` | boolean | `false` | When `true`, outbound DMs are sent as SignedPlain (`txtType 2`) instead of Plain. Reserves 4 bytes from the chunk limit for the SignedPlain `sender_prefix`. Group sends always stay Plain. |
 | `sendPacing` | object | see below | Outbound airtime pacing for multi-chunk sends. |
 | `sendRetry` | object | see below | DM delivery-report auto-retry (default **off**). |
+| `durability` | object | see below | Inbound at-least-once delivery across gateway restarts (default **on**). |
 | `logInboundMessageContent` | boolean | `false` | When `true`, inbound log lines include up to 80 chars of text. |
 | `advertLat` | number (-90..90) | — | Override the node's advertised latitude. Requires `advertLon` and a difference >1e-5° from current position. |
 | `advertLon` | number (-180..180) | — | Override the node's advertised longitude. Requires `advertLat` and a difference >1e-5° from current position. |
@@ -264,6 +266,30 @@ By default the send path is **fire-and-forget**: a message is considered sent on
 **How it works.** After the final frame is transmitted, the plugin awaits the node's delivery report — the `SendConfirmed` (0x82) push carrying that frame's ack tag — for the firmware's own estimated ACK window (`estTimeout`, clamped to 0.5–30 s; the same window the MeshOS app uses before flagging non-delivery). A report in time means delivered. No report in time is the protocol's definitive non-delivery signal, and only then is the message retransmitted — never on success, and never when the node returned no ack tag to correlate (that case stays fire-and-forget, because retrying blind would be timeout-ambiguous). The backoff window doubles as a **late-ACK guard**: a tardy confirm arriving during the backoff cancels the retry, so a late report never causes a duplicate send. Retries retransmit the whole message (the protocol confirms per frame; there is no way to know which frames of a multi-chunk message arrived).
 
 **Airtime accounting.** Every attempt passes through the `sendRateLimit` flood guard again — retries burn the same rolling airtime budget as first sends, and a retry refused by the budget stops the loop whole, before any frame goes on air. If no attempt is confirmed after `maxAttempts`, the send fails with a `MeshcoreDeliveryFailedError` so the caller (and your agent) learns the DM was not delivered, instead of silently assuming success.
+
+#### `durability`
+
+**Why this exists.** A mesh message that reaches your gateway but dies in a restart is gone — the sender's radio got no NAK, they think you read it, you never see it. That used to happen on every OpenClaw update, every config reload, every crash at the wrong second. Durability (issue #48) closes that gap: **frames admitted for an agent turn are logged before dispatch and replayed after a restart, at-least-once between the radio and the agent.**
+
+**Use cases it covers:**
+
+- **Updates and restarts mid-conversation.** A DM arrives, the gateway restarts for an update seconds later — after boot, undispatched messages are replayed to the agent in log order.
+- **Crash recovery.** Frames received but not yet dispatched are re-delivered on the next start instead of vanishing. A turn that was running when the process died counts as an attempt and is retried (bounded — see below), so a crash loop cannot replay forever.
+- **Sender retries.** Nodes retransmit when an acknowledgement is lost, and a reconnecting node drains its receive queue. Persistent dedupe collapses those re-deliveries into one turn, so a flaky link does not produce duplicate answers.
+
+**The honest limits (read these before relying on it):**
+
+- **At-least-once, not exactly-once.** A restart while the agent is mid-turn can produce a *duplicate* reply when the event replays. On a shared medium, that is the right trade — a duplicated answer beats a lost question.
+- **A queued follow-up is only as durable as the host process.** When the peer's session is busy, the host accepts the message into its in-memory follow-up queue (`deferredToActiveRun`) and the plugin marks it delivered — the queue belongs to the host from that point. A host crash before the drain loses that one follow-up; no plugin can close that gap.
+- **Replays are not fresh turns.** Anything older than `maxReplayAgeMs` (default **1 hour**) is dead-lettered as stale instead of replayed — a day-old "open the garage" must not fire on Tuesday's reboot. Replayed turns are tagged for the agent with their original receive time.
+
+**What it does not cover** (honest scope): while the gateway is fully disconnected from the node, nothing is *received* — short disconnects are bridged by the node's own RX queue and our dedupe cleans up the drain, but a gateway that is down for hours loses messages at the radio layer, before this feature ever sees them.
+
+**Setup: none.** It is on by default and needs no configuration. The event log lives at `state/meshcore-durability-<accountId>.sqlite` (SQLite WAL, no native dependency — requires Node ≥ 22.13; older runtimes fall back to pre-durability behavior with one log line). Opt out with `durability.enabled: false` — and delete the `.sqlite` file and its `-wal`/`-shm` sidecars if you do not want the kept copy. Check it works: `!status` answers with `queue:<pending> dead:<n> dup:<dropped-duplicates>`.
+
+How it works, briefly: admitted frames are appended to the log and claimed with a lease *before* dispatch; the attempt counts at claim, so a dead process is a counted attempt, and a running turn keeps its lease renewed. On startup, every in-flight row owned by another process is reclaimed, stale rows are dead-lettered, and the pending backlog replays in id order (abort- and disconnect-aware, time-capped, after all listeners are registered). Dispatch failures release the claim and retry next start; `maxDispatchAttempts` (3) dead-letters with a log line. Pruning removes only completed rows — never pending work — at startup and hourly, on a 30-day / 50 000-event budget, looping until under budget. Admission drops, pairing challenges, and digest-mode group traffic stay out of the store (the runtime log and the digest jsonl are their records); answered commands are recorded key-only so a re-aired `!trace` is dropped as a duplicate instead of costing airtime twice. Fields: `enabled`, `retentionDays`, `maxEvents`, `pruneBatch`, `maxReplayAgeMs`, `maxDispatchAttempts`, `leaseMs`, `dbPath`.
+
+**Exposure note.** The log keeps message bodies only while work is pending; dispatched and dead rows are blanked, leaving dedupe keys and metadata. Pending bodies share the exposure class of the host session store. Wire encryption is unchanged; the log holds no keys.
 
 ### Group config (`groups["channel:0"]`)
 

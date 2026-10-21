@@ -83,6 +83,8 @@ export type MeshcoreAccountConfig = {
   commandRepliesEnabled?: boolean;
   /** Maximum number of entries in the persisted advert contact book (default 500, 0=unbounded). */
   contactBookMaxEntries?: number;
+  /** Inbound durability: at-least-once delivery across gateway restarts (#48). */
+  durability?: Partial<import("./durability.js").DurabilityConfig>;
 };
 
 type MeshcoreConfig = MeshcoreAccountConfig & {
