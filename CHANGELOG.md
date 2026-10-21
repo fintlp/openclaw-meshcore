@@ -6,6 +6,10 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## Unreleased (docs)
+
+- README compatibility section corrected to the current floor: **OpenClaw ≥ 2026.10.5** (raised in v2026.10.14 with the Async-envelope migration; the manifest has declared it since — the docs lagged).
+
 ## 2026.10.15 — 2026-10-21
 
 Inbound durability (issue #48): **at-least-once** delivery across gateway
