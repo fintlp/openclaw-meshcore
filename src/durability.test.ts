@@ -203,7 +203,12 @@ describe("durability store v2 (#48, post-review)", () => {
       meshcoreDedupeKey({ senderNodeId: prefix, timestamp: ts, body: "ping " }),
     );
     expect(meshcoreDedupeKey({ senderNodeId: prefix, timestamp: ts, body: "ping" })).toMatch(
-      /^msg:aabbccddeeff:\d+:\d+:[0-9a-f]{8}$/,
+      /^msg:aabbccddeeff:\d+:[0-9a-f]{8}$/,
+    );
+    // No clock dependence: the same frame mints ONE key at any wall-clock time
+    // (the old UTC-day bucket changed keys at 00:00 UTC and double-dispatched).
+    expect(meshcoreDedupeKey({ senderNodeId: prefix, timestamp: ts, body: "ping" })).toBe(
+      meshcoreDedupeKey({ senderNodeId: prefix, timestamp: ts, body: "ping" }),
     );
   });
 
@@ -264,27 +269,60 @@ describe("durability store v2 (#48, post-review)", () => {
     migrated!.close();
   });
 
-  it("dedupe window: the same sender frame 25 local-hours later is NOT a duplicate", () => {
-    const p = { senderNodeId: "!aabbccdd", timestamp: 1700000000000, body: "ping" };
-    const dayNow = meshcoreDedupeKey(p);
-    // fake a key minted "yesterday" by overriding Date.now via a manual key shape check:
-    // both keys share sender+ts+hash; the local-day segment must differ across days.
-    const parts = dayNow.split(":");
-    const yesterday = ["msg", parts[1], String(Number(parts[2]) - 1), parts[3], parts[4]].join(":");
-    expect(dayNow).not.toBe(yesterday);
+  it("sliding 24 h window on received_at: a retransmit within the window is a duplicate; an older match is replaced as new", async () => {
     const s = store!;
-    const first = s.intake({
-      accountId: "default", dedupeKey: yesterday, kind: "direct",
-      peerId: "!aa", senderTs: p.timestamp, body: "ping", rawJson: "{}",
-    });
+    const key = meshcoreDedupeKey({ senderNodeId: "!aabbccdd", timestamp: 1700000000000, body: "ping" });
+    const intake = () =>
+      s.intake({
+        accountId: "default", dedupeKey: key, kind: "direct",
+        peerId: "!aa", senderTs: 1700000000000, body: "ping", rawJson: "{}",
+      });
+    const backdate = async (id: number, ageMs: number) => {
+      const sqlite = await import("node:sqlite");
+      const raw = new sqlite.DatabaseSync(dbPath);
+      raw.exec("PRAGMA busy_timeout = 2000;");
+      raw.prepare("UPDATE events SET received_at = ? WHERE id = ?").run(Date.now() - ageMs, id);
+      raw.close();
+    };
+    const first = intake();
     expect(first.duplicate).toBe(false);
-    const second = s.intake({
-      accountId: "default", dedupeKey: dayNow, kind: "direct",
-      peerId: "!aa", senderTs: p.timestamp, body: "ping", rawJson: "{}",
+    // 23 h old: still inside the window — a duplicate, SAME row id
+    await backdate(first.id, 23 * 3_600_000);
+    const dupe = intake();
+    expect(dupe.duplicate).toBe(true);
+    expect(dupe.id).toBe(first.id);
+    expect(s.isDuplicate("default", key)).toBe(true);
+    expect(s.findDuplicate("default", key)?.id).toBe(first.id);
+    // 25 h old: outside the window — replaced as new (new id, old row gone)
+    await backdate(first.id, 25 * 3_600_000);
+    const fresh = intake();
+    expect(fresh.duplicate).toBe(false);
+    expect(fresh.id).not.toBe(first.id);
+    expect(s.findDuplicate("default", key)?.id).toBe(fresh.id);
+    expect(s.pendingCount("default")).toBe(1); // the stale row was replaced, not doubled
+  });
+
+  it("a retransmit straddling the day boundary stays one frame (no key time bucket)", async () => {
+    const s = store!;
+    const key = meshcoreDedupeKey({ senderNodeId: "!aabbccdd", timestamp: 1700000000000, body: "x" });
+    const first = s.intake({
+      accountId: "default", dedupeKey: key, kind: "direct",
+      peerId: "!aa", senderTs: 1, body: "x", rawJson: "{}",
     });
-    expect(second.duplicate).toBe(false); // new local day -> treated as a new message
-    expect(s.isDuplicate("default", dayNow)).toBe(true);
-    expect(s.metrics("default").duplicates).toBe(1); // probe hit counts once
+    // Received 23:59 UTC, retransmitted 00:01 UTC — a 2-minute gap across
+    // 00:00 UTC. The old day-bucketed key changed here and the retransmit
+    // double-dispatched.
+    const sqlite = await import("node:sqlite");
+    const raw = new sqlite.DatabaseSync(dbPath);
+    raw.exec("PRAGMA busy_timeout = 2000;");
+    raw.prepare("UPDATE events SET received_at = ? WHERE id = ?").run(Date.now() - 2 * 60_000, first.id);
+    raw.close();
+    const retransmit = s.intake({
+      accountId: "default", dedupeKey: key, kind: "direct",
+      peerId: "!aa", senderTs: 1, body: "x", rawJson: "{}",
+    });
+    expect(retransmit.duplicate).toBe(true);
+    expect(retransmit.id).toBe(first.id);
   });
 
 

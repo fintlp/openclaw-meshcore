@@ -1,4 +1,4 @@
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 /**
@@ -17,5 +17,5 @@ export function pluginStateDir(): string {
   if (process.env.VITEST) {
     return join(tmpdir(), "meshcore-vitest-state");
   }
-  return `${process.env.HOME ?? "~"}/.openclaw/state`;
+  return join(homedir(), ".openclaw", "state");
 }

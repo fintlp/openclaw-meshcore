@@ -158,6 +158,16 @@ const SCHEMA =
 
 const INCOMPLETE = "admission = 'admitted' AND dispatch_state IN ('pending','inflight')";
 
+/**
+ * Sliding dedupe window (post-ship review): a sender/frame match counts as a
+ * duplicate only while the stored row is younger than this. An older match is
+ * REPLACED as new — mesh retransmits never span 24 h, but a stale-clock
+ * sender must not have fresh frames dropped for a whole retention month.
+ * (Replaces the earlier UTC-day key bucket, which double-dispatched
+ * retransmits straddling 00:00 UTC.)
+ */
+const DEDUPE_WINDOW_MS = 86_400_000;
+
 type EventRow = {
   id: number; account_id: string; dedupe_key: string; received_at: number;
   sender_ts: number; kind: string; peer_id: string; sender_label: string | null;
@@ -357,6 +367,7 @@ export async function openDurabilityStore(params: {
     " SELECT id FROM events WHERE NOT (" + INCOMPLETE + ") ORDER BY id LIMIT ?)",
   );
   const qRaw = db.prepare("SELECT raw_json FROM events WHERE id = ?");
+  const qDeleteById = db.prepare("DELETE FROM events WHERE id = ?");
   const advanceCursor = (accountId: string): void => {
     const first = (qFirstIncomplete.get(accountId) as { first: number | null }).first;
     const maxId = (qMaxId.get(accountId) as { maxid: number }).maxid;
@@ -368,8 +379,13 @@ export async function openDurabilityStore(params: {
     intake(p) {
       const existing = qFindDup.get(p.accountId, p.dedupeKey) as { id: number; received_at: number } | undefined;
       if (existing) {
-        qBumpDup.run();
-        return { id: existing.id, duplicate: true };
+        if (Date.now() - existing.received_at <= DEDUPE_WINDOW_MS) {
+          qBumpDup.run();
+          return { id: existing.id, duplicate: true };
+        }
+        // Stale match: replace as new (delete + fresh row, new id at the
+        // tail so replay ordering stays receive-ordered).
+        qDeleteById.run(existing.id);
       }
       const res = qIntake.run(
         p.accountId, p.dedupeKey, Date.now(), p.senderTs, p.kind, p.peerId,
@@ -378,13 +394,24 @@ export async function openDurabilityStore(params: {
       if (Number(res.changes) === 1) {
         return { id: Number(res.lastInsertRowid), duplicate: false };
       }
-      const row = qFindDup.get(p.accountId, p.dedupeKey) as { id: number } | undefined;
+      const row = qFindDup.get(p.accountId, p.dedupeKey) as { id: number; received_at: number } | undefined;
+      if (row && Date.now() - row.received_at > DEDUPE_WINDOW_MS) {
+        qDeleteById.run(row.id);
+        const retry = qIntake.run(
+          p.accountId, p.dedupeKey, Date.now(), p.senderTs, p.kind, p.peerId,
+          p.senderLabel ?? null, p.body, p.rawJson,
+        );
+        if (Number(retry.changes) === 1) {
+          return { id: Number(retry.lastInsertRowid), duplicate: false };
+        }
+      }
       qBumpDup.run();
       return { id: row?.id ?? -1, duplicate: true };
     },
 
     isDuplicate(accountId, dedupeKey) {
-      const found = qFindDup.get(accountId, dedupeKey) !== undefined;
+      const row = qFindDup.get(accountId, dedupeKey) as { received_at: number } | undefined;
+      const found = row !== undefined && Date.now() - row.received_at <= DEDUPE_WINDOW_MS;
       if (found) {
         qBumpDup.run();
       }
@@ -393,9 +420,11 @@ export async function openDurabilityStore(params: {
 
     findDuplicate(accountId, dedupeKey) {
       const row = qFindDup.get(accountId, dedupeKey) as
-        | { id: number; dispatch_state: string }
+        | { id: number; received_at: number; dispatch_state: string }
         | undefined;
-      if (!row) {
+      if (!row || Date.now() - row.received_at > DEDUPE_WINDOW_MS) {
+        // Outside the sliding window this is not a duplicate at all: intake
+        // will replace the stale row as new.
         return null;
       }
       qBumpDup.run();
@@ -641,14 +670,14 @@ export function meshcoreDedupeKey(params: {
   // prefix-to-full-key upgrades); non-hex senders stay verbatim (no collapse).
   const hex = params.senderNodeId.toLowerCase().replace(/[^0-9a-f]/g, "");
   const sender = hex.length >= 12 ? hex.slice(0, 12) : params.senderNodeId;
-  // The local receive-day bounds how long a clock-less sender's identical
-  // frame can be dropped as a duplicate (~24h, review nit).
-  const localDay = Math.floor(Date.now() / 86_400_000);
+  // Staleness is bounded by the store's sliding 24 h window on received_at
+  // (DEDUPE_WINDOW_MS), NOT by the key — a time bucket in the key
+  // double-dispatches retransmits that straddle the boundary (post-ship review).
   let hash = 0x811c9dc5;
   const s = params.body;
   for (let i = 0; i < s.length; i++) {
     hash ^= s.charCodeAt(i);
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
-  return "msg:" + sender + ":" + localDay + ":" + params.timestamp + ":" + hash.toString(16).padStart(8, "0");
+  return "msg:" + sender + ":" + params.timestamp + ":" + hash.toString(16).padStart(8, "0");
 }

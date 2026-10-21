@@ -6,9 +6,35 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
-## Unreleased (docs)
+## 2026.10.16 — 2026-10-21
 
-- README compatibility section corrected to the current floor: **OpenClaw ≥ 2026.10.5** (raised in v2026.10.14 with the Async-envelope migration; the manifest has declared it since — the docs lagged).
+Dedupe correctness fix in the durability store + review follow-ups from the
+meshtastic #8 port review.
+
+Fixes
+
+- **Sliding 24 h dedupe window on receive time** (replaces the UTC-day key
+  bucket). The v2026.10.15 dedupe key embedded `floor(now / 86 400 000)` — a
+  UTC-day bucket computed at receive time — so a sender retransmit or
+  reconnect re-delivery straddling 00:00 UTC minted a *new* key and
+  double-dispatched. The key is now time-free (`msg:<senderPrefix>:<senderTs>:<bodyHash>`);
+  staleness is enforced by a sliding 24 h window on the stored row's
+  `received_at`: inside the window a match is a duplicate (same row id), an
+  older match is **replaced as new** — a stale-clock sender is shadowed for
+  24 h, not a whole retention month. Pinned by new tests: in-window
+  duplicate, replace-as-new past the window, and a retransmit across the
+  day boundary.
+- State-dir resolution uses `os.homedir()` instead of the `HOME ?? "~"`
+  fallback (meshtastic sibling already shipped the same change).
+- README compatibility section corrected to the current floor (OpenClaw ≥
+  2026.10.5 — the manifest has declared it since v2026.10.14; the docs lagged).
+
+**Upgrading?** Frames logged before this release carry the old day-bucketed
+key shape. A frame received pre-upgrade and re-aired post-upgrade will not
+match its old row and can be delivered **one extra time** (per frame, once).
+To avoid even that, stop the gateway and delete
+`state/meshcore-durability-*.sqlite*` — the store self-recreates on next
+start. No other action needed.
 
 ## 2026.10.15 — 2026-10-21
 
