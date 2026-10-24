@@ -10,8 +10,9 @@
  *    rows; stale pending rows are dead-lettered by local age, never skipped.
  *  - Terminal states blank body/raw_json: at rest we keep dedupe keys, not
  *    conversations.
- *  - Any store failure degrades to continue-without-durability (fail-open,
- *    sticky degraded flag) — durability never makes delivery worse.
+ *  - Store failures degrade explicitly: intake failures dispatch without
+ *    durability; a failed claim on a persisted row returns busy so the live
+ *    path skips dispatch and replay can retry (sticky degraded flag).
  *
  * What it cannot guarantee (documented, not hidden): a turn accepted into the
  * host in-memory follow-up queue is only as durable as the host process;
@@ -599,10 +600,10 @@ export async function openDurabilityStore(params: {
 }
 
 /**
- * Fail-open wrapper: a store error must never make delivery WORSE than no
- * durability. First failure flips a sticky degraded flag (visible via
- * metrics) and logs rate-limited; every call answers the
- * continue-without-durability default.
+ * Fail-open wrapper: intake/read failures continue without durability; a
+ * failed claim on a persisted row returns busy so it remains retryable rather
+ * than duplicating dispatch. First failure flips a sticky degraded flag
+ * (visible via metrics) and logs rate-limited.
  */
 function makeFailOpen(store: DurabilityStore, log: (msg: string) => void): DurabilityStore {
   let degraded = false;
@@ -622,7 +623,9 @@ function makeFailOpen(store: DurabilityStore, log: (msg: string) => void): Durab
     isDuplicate: () => false,
     findDuplicate: () => null,
     checkpoint: () => undefined,
-    claim: () => "claimed",
+    // A failed claim on a persisted row must not authorize a live dispatch:
+    // the row remains replayable, so "claimed" here can duplicate the turn.
+    claim: () => "busy",
     claimNext: () => null,
     markDispatched: () => undefined,
     releaseClaim: () => undefined,

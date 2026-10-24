@@ -216,6 +216,8 @@ export async function handleMeshcoreInbound(params: {
   replayOf?: number;
   /** The stored LOCAL receive time of a replayed event (for the agent-visible replay tag). */
   replayReceivedAt?: number;
+  /** Abort replay finalization when the monitor disconnects, aborts, or times out. */
+  abortSignal?: AbortSignal;
 }): Promise<void> {
   const { message, account, config, runtime } = params;
   const core = getMeshcoreRuntime();
@@ -578,6 +580,20 @@ export async function handleMeshcoreInbound(params: {
     }
   }
 
+  const releaseIfAborted = (reason: string): boolean => {
+    if (!params.abortSignal?.aborted) {
+      return false;
+    }
+    if (store && durabilityEventId !== undefined) {
+      store.releaseClaim(account.accountId, durabilityEventId, reason);
+    }
+    return true;
+  };
+
+  if (releaseIfAborted("replay aborted before dispatch")) {
+    return;
+  }
+
   try {
   const peerId = message.isGroup ? message.target : message.senderNodeId;
   const peerKind = message.isGroup ? "group" : "direct";
@@ -663,6 +679,12 @@ export async function handleMeshcoreInbound(params: {
     ],
   });
 
+  // Envelope setup awaits above can outlive the monitor. Re-check at the
+  // last possible point so an aborted replay never starts a new host turn.
+  if (releaseIfAborted("replay aborted before host dispatch")) {
+    return;
+  }
+
     await core.channel.inbound.run({
     channel: CHANNEL_ID,
     accountId: account.accountId,
@@ -725,6 +747,11 @@ export async function handleMeshcoreInbound(params: {
         dispatchResult?: { deferredToActiveRun?: "steer" | "followup" } | null;
       }) => {
         if (!store || durabilityEventId === undefined) {
+          return;
+        }
+        if (releaseIfAborted("replay aborted before finalize")) {
+          // The monitor stopped waiting for this replay. Do not record a
+          // successful dispatch after disconnect/timeout; leave it retryable.
           return;
         }
         if (result.dispatchResult?.deferredToActiveRun === "followup") {

@@ -376,7 +376,7 @@ export function monitorMeshcoreProvider(
 
     const dispatchNormalized = async (
       inbound: MeshcoreInboundMessage,
-      dispatchOpts?: { replayOf?: number; replayReceivedAt?: number },
+      dispatchOpts?: { replayOf?: number; replayReceivedAt?: number; abortSignal?: AbortSignal },
     ): Promise<void> => {
       if (
         inbound.isGroup &&
@@ -397,6 +397,7 @@ export function monitorMeshcoreProvider(
         durability: opts.durability,
         replayOf: dispatchOpts?.replayOf,
         replayReceivedAt: dispatchOpts?.replayReceivedAt,
+        abortSignal: dispatchOpts?.abortSignal,
         onAdmittedGroup:
           inbound.isGroup && groupMonitorMode === "digest" ? groupDigestHook(inbound) : undefined,
       });
@@ -409,6 +410,9 @@ export function monitorMeshcoreProvider(
     // minor 3: resolved by doCleanup so a replayed turn stops waiting on a
     // dead socket instead of running to the 5-minute cap.
     let resolveDisconnected: (() => void) | null = null;
+    // Shared lifetime signal for replay work; doCleanup covers both a real
+    // socket disconnect and the external abort path.
+    const replayLifetimeAbort = new AbortController();
     const disconnectedPromise = new Promise<void>((resolve) => {
       resolveDisconnected = resolve;
     });
@@ -436,6 +440,7 @@ export function monitorMeshcoreProvider(
     const doCleanup = () => {
       if (settled) return;
       settled = true;
+      replayLifetimeAbort.abort();
       resolveDisconnected?.();
       contactSync.dispose();
       advertScheduler?.dispose();
@@ -854,19 +859,33 @@ export function monitorMeshcoreProvider(
           store.deadLetter(account.accountId, ev.id, raw ? "not-replayable" : "corrupt-raw");
           continue;
         }
+        const replayAbort = new AbortController();
+        const abortReplay = () => replayAbort.abort();
+        if (replayLifetimeAbort.signal.aborted) {
+          replayAbort.abort();
+        }
+        replayLifetimeAbort.signal.addEventListener("abort", abortReplay, { once: true });
         let onAbortOnce: (() => void) | null = null;
-        const abortPromise = new Promise((resolve) => {
+        const abortPromise = new Promise<void>((resolve) => {
           if (opts.abortSignal?.aborted || settled) {
-            resolve(undefined);
+            replayAbort.abort();
+            resolve();
             return;
           }
-          onAbortOnce = () => resolve(undefined);
+          onAbortOnce = () => {
+            replayAbort.abort();
+            resolve();
+          };
           opts.abortSignal?.addEventListener("abort", onAbortOnce, { once: true });
         });
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([
-            dispatchNormalized(raw, { replayOf: ev.id, replayReceivedAt: ev.receivedAt }),
+            dispatchNormalized(raw, {
+              replayOf: ev.id,
+              replayReceivedAt: ev.receivedAt,
+              abortSignal: replayAbort.signal,
+            }),
             abortPromise,
             disconnectedPromise,
             new Promise((resolve) => {
@@ -880,6 +899,11 @@ export function monitorMeshcoreProvider(
             err instanceof Error ? err.message : String(err),
           );
         } finally {
+          // If timeout/disconnect/abort won the race, cancel the still-pending
+          // dispatch. If dispatch already completed, finalization already ran
+          // and this is a harmless no-op.
+          replayAbort.abort();
+          replayLifetimeAbort.signal.removeEventListener("abort", abortReplay);
           if (timer !== undefined) {
             clearTimeout(timer);
           }

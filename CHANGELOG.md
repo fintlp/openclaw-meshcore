@@ -6,6 +6,40 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## 2026.10.17 — 2026-10-24
+
+Durability and replay correctness fixes, with targeted crash/disconnect
+regression coverage.
+
+Fixes
+
+- **Fail-open claim no longer authorizes duplicate dispatch.** If SQLite
+  fails after an event has been persisted, the fail-open `claim()` now
+  returns `busy` instead of `claimed`. The live path skips dispatch and
+  leaves the row pending for a later replay; an intake failure (`id: -1`)
+  still dispatches without durability. The regression closes the store after
+  intake, asserts `busy`, then reopens it and proves the same event remains
+  claimable.
+- **Replay finalization is cancellation-aware.** Each replay dispatch gets an
+  abort signal tied to monitor cleanup (disconnect and external abort) and
+  the remaining share of the overall five-minute replay deadline.
+  `handleMeshcoreInbound` releases the claim if the replay is aborted before
+  dispatch or during `onFinalize`, instead of
+  recording a successful dispatch after the monitor stopped waiting. A host
+  turn that already started may still finish; its durability finalization is
+  suppressed. A normally completed replay still marks `dispatched`.
+- **Command replay policy is unchanged.** Command rows recorded with the
+  key-only `{}` payload still dead-letter as `not-replayable`; this release
+  does not introduce automatic re-execution of commands.
+
+Tooling-tests
+
+- Added focused repro coverage for fail-open claims, command crash payloads,
+  replay disconnect/abort, direct `onFinalize` abort, envelope-setup abort
+  races, external abort, the overall replay deadline, and normal replay
+  success. Full suite: **471 tests across 33 files**, plus clean typecheck
+  and build.
+
 ## 2026.10.16 — 2026-10-21
 
 Dedupe correctness fix in the durability store + review follow-ups from the

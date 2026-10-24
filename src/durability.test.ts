@@ -173,7 +173,9 @@ describe("durability store v2 (#48, post-review)", () => {
       });
       expect(r).toEqual({ id: -1, duplicate: false });
       expect(s.isDuplicate("default", "k")).toBe(false);
-      expect(s.claim("default", 1, 3, 1000)).toBe("claimed");
+      // A failed claim on a persisted row must stay retryable, not authorize
+      // a live dispatch that replay could duplicate.
+      expect(s.claim("default", 1, 3, 1000)).toBe("busy");
       expect(s.claimNext("default", 3, 1000)).toBeNull();
       s.markDispatched("default", 1);
       s.releaseClaim("default", 1, "x");
