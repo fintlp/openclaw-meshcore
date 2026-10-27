@@ -12,6 +12,7 @@
 - **Emergency / backup channel.** When the internet dies, the mesh doesn't. A node in the attic keeps your agent reachable when everything else is dark.
 - **Repeater-site and unattended-node monitor.** Put a node somewhere remote and ask it how it's doing — battery and radio state where the node answers, plus the mesh traffic it has heard.
 - **Field-expedition comms hub.** A gateway at base camp, handhelds in the field. Everyone DMs the hub; the hub answers in DM — weather, schedules, "where is everybody."
+- **Node map on demand.** Ask "show me the mesh" on WhatsApp or Telegram and get a link that opens a map of every station your gateway has heard, coloured by type. Zero airtime: the agent reads its state files and geojson.io draws the map in your browser.
 - **Festival / mesh-community bot.** A pairing-gated assistant on your event's mesh. New contacts get a pairing challenge, you approve the ones you know, and the bot never spams the public channel — it can't, see below.
 
 One thing shapes all of these: **the agent listens on group channels but never speaks on them.** Receive-only is enforced in the code, not in the AI's instructions, and everything two-way happens in DMs. That is deliberate, and it is what makes this plugin a good mesh citizen — the full story is in the safety section below, and honestly, it is worth the read.
@@ -81,7 +82,7 @@ For the operator-level detail (trust model, per-group tool policies, hardened ex
 ## Documentation
 
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — zero to first mesh DM in ~15 minutes.
-- [docs/USE-CASES.md](docs/USE-CASES.md) — the recipe catalog: six ways to use a mesh-reachable agent, with the config for each.
+- [docs/USE-CASES.md](docs/USE-CASES.md) — the recipe catalog: seven ways to use a mesh-reachable agent, with the config for each.
 - [docs/USAGE.md](docs/USAGE.md) — day-2 operation from within OpenClaw: pairing lifecycle, agent-visible node data, group digest monitoring, position admin.
 - [docs/NODE-SETUP.md](docs/NODE-SETUP.md) — node preparation and operational behavior (the one-client rule, contact management, GPS adverts).
 - [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — verified firmware/software matrix and interop quirks.
