@@ -516,14 +516,19 @@ export function parseTraceDataPushFrame(frame: Uint8Array): TraceDataPush | unde
 
 /**
  * Send the trace request and wait for its 0x89 push, correlated by a random
- * tag. Stage 1 waits for RESP_CODE_SENT; its est_timeout + margin becomes the
- * stage-2 budget (the outer timeout in tracePathToNode stays the cap). Stage
- * 2 ignores 0x89 frames with other tags — a late push from an earlier,
- * timed-out trace must not resolve this one.
+ * tag. Two timers live inside this promise: the outer cap (armed before the
+ * send — it is the await-Sent budget for stage 1 and bounds the whole
+ * exchange) and the data-stage budget (est_timeout + margin, armed when Sent
+ * arrives). Every settle path runs cleanup(), including the outer cap firing
+ * before Sent — a raced-but-not-cancelled timeout must never leave the "rx"
+ * listener attached (PR #59 review). Stage 2 ignores 0x89 frames with other
+ * tags — a late push from an earlier, timed-out trace must not resolve this
+ * one.
  */
 async function runTraceRequest(params: {
   handle: MeshcoreDeviceHandle;
   plan: TraceRoutePlan;
+  timeoutMs: number;
   estMarginMs: number;
 }): Promise<TraceDataPush> {
   const { handle, plan } = params;
@@ -533,17 +538,23 @@ async function runTraceRequest(params: {
 
   return await new Promise<TraceDataPush>((resolve, reject) => {
     let awaitingSent = true;
-    let innerTimer: ReturnType<typeof setTimeout> | null = null;
+    let dataTimer: ReturnType<typeof setTimeout> | null = null;
     const cleanup = () => {
       connection.off("rx", onRx);
-      if (innerTimer) {
-        clearTimeout(innerTimer);
+      if (dataTimer) {
+        clearTimeout(dataTimer);
       }
+      clearTimeout(outerTimer);
     };
     const fail = (error: Error) => {
       cleanup();
       reject(error);
     };
+    // Armed before the send, so a node that never answers still tears the
+    // listener down; doubles as the outer cap for the whole exchange.
+    const outerTimer = setTimeout(() => {
+      fail(new RepeaterOpsTimeoutError(`path trace timed out (${params.timeoutMs}ms)`));
+    }, params.timeoutMs);
     const onRx = (raw: Uint8Array) => {
       const frame = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
       if (frame.length === 0) {
@@ -556,12 +567,17 @@ async function runTraceRequest(params: {
         }
         const estTimeout = view.getUint32(6, true);
         awaitingSent = false;
-        innerTimer = setTimeout(() => {
+        dataTimer = setTimeout(() => {
           fail(new RepeaterOpsTimeoutError(`trace data timed out (est ${estTimeout}ms + margin)`));
         }, estTimeout + params.estMarginMs);
         return;
       }
       if (awaitingSent && frame[0] === RESP_CODE_ERR) {
+        // NOTE: Err frames carry no tag, so any error the node raises while
+        // we await Sent is attributed to this trace — if another command
+        // fails at the same moment, this rejects with the wrong culprit.
+        // Accepted: ops are rare, DM-triggered and never concurrent by
+        // policy, and the failure mode is a soft reply, not a stuck state.
         const code = frame.length > 1 ? frame[1] : -1;
         fail(new Error(`trace request rejected by the node (err ${code})`));
         return;
@@ -639,15 +655,15 @@ export async function tracePathToNode(params: {
   }
   assertOpsRateLimit(params.account, "path trace");
 
-  const raw = await withOpsTimeout(
-    runTraceRequest({
-      handle,
-      plan,
-      estMarginMs: params.estMarginMs ?? TRACE_EST_TIMEOUT_MARGIN_MS,
-    }),
-    params.timeoutMs ?? TRACE_PATH_TIMEOUT_MS,
-    "path trace",
-  );
+  // Not withOpsTimeout: runTraceRequest owns the full timeout lifecycle
+  // (outer cap + data-stage budget) so every timeout path runs its cleanup —
+  // a raced race would abandon the promise with its rx listener attached.
+  const raw = await runTraceRequest({
+    handle,
+    plan,
+    timeoutMs: params.timeoutMs ?? TRACE_PATH_TIMEOUT_MS,
+    estMarginMs: params.estMarginMs ?? TRACE_EST_TIMEOUT_MARGIN_MS,
+  });
 
   return {
     targetLabel,

@@ -66,6 +66,7 @@ function createDeviceHandle(connectionOverrides: Record<string, unknown>): Meshc
       off: emitter.off.bind(emitter),
       once: emitter.once.bind(emitter),
       emit: emitter.emit.bind(emitter),
+      listenerCount: emitter.listenerCount.bind(emitter),
       ...connectionOverrides,
     },
     contacts: [],
@@ -836,6 +837,46 @@ describe("trace path op (issues #33, #52)", () => {
     });
     expect(reply).toContain("no answer from aabbccdd1122 (timeout)");
     expect(sendToRadioFrame).toHaveBeenCalledTimes(1);
+  });
+
+  it("removes its rx listener when Sent never arrives (no leak, PR #59 review)", async () => {
+    const { handle } = createTraceHandle(() => {});
+    const conn = handle.connection as unknown as { listenerCount: (event: string) => number };
+    const before = conn.listenerCount("rx");
+
+    const pending = runRepeaterOpsCommand({
+      op: "trace",
+      targetArg: "aabbccdd1122",
+      account: createAccount(),
+      deviceHandle: handle,
+      timeoutMs: 60,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(conn.listenerCount("rx")).toBe(before + 1); // attached while in flight
+
+    const reply = await pending;
+    expect(reply).toContain("(timeout)");
+    expect(conn.listenerCount("rx")).toBe(before); // torn down after the timeout
+  });
+
+  it("removes its rx listener after a successful trace as well", async () => {
+    const { handle } = createTraceHandle((frame, emit) => {
+      const tag = tagOf(frame);
+      setTimeout(() => {
+        emit(sentFrameFor(tag));
+        emit(traceDataFrame(tag, 0, "aa", "16", 0x18));
+      }, 0);
+    });
+    const conn = handle.connection as unknown as { listenerCount: (event: string) => number };
+    const before = conn.listenerCount("rx");
+
+    await tracePathToNode({
+      account: createAccount(),
+      targetArg: "aabbccdd1122",
+      deviceHandle: handle,
+    });
+
+    expect(conn.listenerCount("rx")).toBe(before);
   });
 
   it("stops waiting at est_timeout + margin once the node accepted the request", async () => {

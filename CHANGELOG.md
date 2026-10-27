@@ -25,8 +25,10 @@ Fixed
   <name> yet; wait for an advert or a DM") without going on air or spending
   airtime budget, and routes beyond the firmware's 64-element bound refuse
   cleanly. Direct answers report both link directions ("direct (out …dB,
-  final-link …dB)"). Live on-air verification is pending — no repeater in
-  range yet.
+  final-link …dB)"). The request lifecycle owns its own timeout timers, so
+  every settle path — including a node that never acknowledges the request —
+  tears down its frame listener instead of leaking it onto the connection.
+  Live on-air verification is pending — no repeater in range yet.
 
 ## 2026.10.17 — 2026-10-24
 
