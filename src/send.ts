@@ -156,7 +156,50 @@ function utf8ByteLength(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 
-function chunkText(text: string, limit: number): string[] {
+let cachedGraphemeSegmenter: Intl.Segmenter | undefined;
+let segmenterFallbackWarned = false;
+
+/**
+ * Grapheme cluster segmenter, or undefined when the runtime has no
+ * Intl.Segmenter — then hard splits fall back to code points (logged once)
+ * instead of crashing. Availability is re-checked per call so tests can stub
+ * it.
+ */
+function getGraphemeSegmenter(): Intl.Segmenter | undefined {
+  if (typeof Intl === "undefined" || typeof Intl.Segmenter !== "function") {
+    if (!segmenterFallbackWarned) {
+      segmenterFallbackWarned = true;
+      console.warn(
+        "[meshcore] Intl.Segmenter unavailable — chunk hard splits fall back to code points",
+      );
+    }
+    return undefined;
+  }
+  cachedGraphemeSegmenter ??= new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  return cachedGraphemeSegmenter;
+}
+
+/**
+ * Hard-split units of a no-whitespace piece: grapheme clusters, or code
+ * points when Intl.Segmenter is unavailable (issue #58).
+ */
+function hardSplitUnits(piece: string): Array<{ text: string; bytes: number }> {
+  const segmenter = getGraphemeSegmenter();
+  const units: Array<{ text: string; bytes: number }> = [];
+  if (segmenter) {
+    for (const { segment } of segmenter.segment(piece)) {
+      units.push({ text: segment, bytes: utf8ByteLength(segment) });
+    }
+  } else {
+    for (const ch of piece) {
+      units.push({ text: ch, bytes: utf8ByteLength(ch) });
+    }
+  }
+  return units;
+}
+
+/** Exported for tests; production callers go through chunkTextWithNumbering. */
+export function chunkText(text: string, limit: number): string[] {
   const trimmed = text.trim();
   if (!trimmed) {
     return [];
@@ -186,13 +229,28 @@ function chunkText(text: string, limit: number): string[] {
     }
     if (pieceBytes > limit) {
       // Single word longer than the limit: hard-split at a byte-safe boundary.
-      for (const ch of piece) {
-        const chBytes = utf8ByteLength(ch);
-        if (currentBytes > 0 && currentBytes + chBytes > limit) {
+      // Grapheme clusters, not code points: a combined character (emoji ZWJ
+      // sequence, flag, skin tone, niqqud, tashkeel, decomposed accent) must
+      // never be cut across two messages (issue #58). A single grapheme
+      // larger than the limit falls back to code points rather than looping
+      // or dropping text.
+      for (const unit of hardSplitUnits(piece)) {
+        if (unit.bytes > limit) {
+          for (const ch of unit.text) {
+            const chBytes = utf8ByteLength(ch);
+            if (currentBytes > 0 && currentBytes + chBytes > limit) {
+              pushCurrent();
+            }
+            current += ch;
+            currentBytes += chBytes;
+          }
+          continue;
+        }
+        if (currentBytes > 0 && currentBytes + unit.bytes > limit) {
           pushCurrent();
         }
-        current += ch;
-        currentBytes += chBytes;
+        current += unit.text;
+        currentBytes += unit.bytes;
       }
     } else {
       current += piece;
@@ -214,7 +272,8 @@ function prefixLengthForChunkCount(count: number): number {
  * The prefix is budgeted inside the wire limit, and single-chunk messages
  * are never prefixed.
  */
-function chunkTextWithNumbering(
+/** Exported for tests; production callers go through sendMessageMeshcore. */
+export function chunkTextWithNumbering(
   text: string,
   limit: number,
   numberingEnabled: boolean,
