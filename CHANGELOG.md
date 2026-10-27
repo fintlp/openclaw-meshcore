@@ -6,6 +6,30 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## Unreleased
+
+Fixed
+
+- **`!trace` never completed: the target's 32-byte public key was sent as the
+  trace route** (#52). `tracePathToNode` passed the pubkey straight into
+  meshcore.js `tracePath`, and `sendCommandSendTracePath` forwarded it
+  unchanged; the firmware read those bytes as 32 one-byte hop hashes, the
+  trace died at hop 2, and every call hit the 45 s timeout. The route is now
+  built from the contact book's out-path, source-routed out and back
+  (`[target]` direct, `[relay, target, relay]` behind one repeater), and sent
+  as a plugin-written frame with the correct `pathSz` flag (hash widths 1/2/4;
+  3-byte contact paths truncate to 2 — a shorter prefix still matches). The
+  `0x89` trace-data push is parsed by the plugin as well, because meshcore.js
+  1.15.0 hardcodes `flags=0` and misreads the push whenever `path_sz > 0`.
+  Targets with no known route are now refused up front ("no known route to
+  <name> yet; wait for an advert or a DM") without going on air or spending
+  airtime budget, and routes beyond the firmware's 64-element bound refuse
+  cleanly. Direct answers report both link directions ("direct (out …dB,
+  final-link …dB)"). The request lifecycle owns its own timeout timers, so
+  every settle path — including a node that never acknowledges the request —
+  tears down its frame listener instead of leaking it onto the connection.
+  Live on-air verification is pending — no repeater in range yet.
+
 ## 2026.10.17 — 2026-10-24
 
 Durability and replay correctness fixes, with targeted crash/disconnect
