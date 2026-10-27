@@ -6,6 +6,25 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## Unreleased
+
+Fixed
+
+- **Hard split could cut a combined character across two messages** (#58).
+  `chunkText` already budgeted UTF-8 bytes and preferred whitespace, but its
+  hard-split loop iterated code points, so emoji ZWJ sequences, flags, skin
+  tones, Thai and Hindi marks, Hebrew niqqud, Arabic tashkeel and decomposed
+  accents (e.g. `u` + U+0308) could be split at the join. The hard split now
+  iterates grapheme clusters (`Intl.Segmenter`, granularity "grapheme"); a
+  single grapheme larger than the limit falls back to code points, and a
+  runtime without `Intl.Segmenter` falls back to code points with a one-time
+  log note instead of crashing. Byte budgeting, whitespace preference and
+  `[n/N]` numbering (prefix budgeted inside the limit, at the logical start
+  of every chunk — pinned for Hebrew and Arabic) are unchanged. Swept against
+  the shared Unicode corpus (byte-identical with openclaw-meshtastic #17) for
+  every limit 40..127 with numbering on and off: no chunk over the limit,
+  no content lost, no broken grapheme. Live mesh verification pending.
+
 ## 2026.10.17 — 2026-10-24
 
 Durability and replay correctness fixes, with targeted crash/disconnect
