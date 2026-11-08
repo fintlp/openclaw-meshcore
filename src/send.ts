@@ -2,7 +2,6 @@ import {
   createMessageReceiptFromOutboundResults,
   type MessageReceipt,
 } from "openclaw/plugin-sdk/channel-outbound";
-import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { resolveMeshcoreAccount } from "./accounts.js";
 import {
   attachSendConfirmedHandler,
@@ -255,7 +254,14 @@ export async function sendMessageMeshcore(
   text: string,
   opts: SendMeshcoreOptions,
 ): Promise<SendMeshcoreResult> {
-  const cfg = requireRuntimeConfig(opts.cfg, "MeshCore send") as CoreConfig;
+  // Same check as the deprecated SDK helper requireRuntimeConfig
+  // (openclaw/plugin-sdk/plugin-config-runtime, removal after 2026-12-01).
+  if (!opts.cfg) {
+    throw new Error(
+      "MeshCore send requires a resolved runtime config. Load and resolve config at the command or gateway boundary, then pass cfg through the runtime path.",
+    );
+  }
+  const cfg: CoreConfig = opts.cfg;
   const account = resolveMeshcoreAccount({
     cfg,
     accountId: opts.accountId,
