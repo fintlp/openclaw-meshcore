@@ -104,6 +104,31 @@ A DM from the mesh can produce effects on any other OpenClaw channel the agent h
 - **Cannot:** bypass the other channels' own policies (WhatsApp allowlists etc. still apply); do any of this for unpaired strangers.
 - **Read next:** docs/AGENT-SCOPING.md — this power is exactly why layer 1 exists.
 
+## 7. Node map on demand ("show me the mesh")
+
+Ask on WhatsApp or Telegram and get back a link that opens a map of every station your gateway knows, coloured by type. Zero airtime: the agent only reads the state files, and the map itself is drawn by [geojson.io](https://geojson.io) in your browser. No new modules, no image rendering.
+
+~~~jsonc
+// no meshcore-specific config; the agent reads ~/.openclaw/state and replies with a link
+~~~
+
+How the agent builds the link (or run `python3 docs/recipes/meshcore-map.py --out '' --link`, which follows the same rules):
+
+1. Read `meshcore-advert-contacts.json` (v2: `{ version, contacts: [...] }`).
+2. Keep only entries whose `accountId` is the account you want (`default` unless you run named accounts). Test or other-account entries must not appear on the map.
+3. Skip entries whose `lat` and `lon` are both 0 (no advertised position), and duplicates of the same `publicKeyHex`.
+4. Place your own node from `meshcore-node-status.json` (`name`, `position`) and drop its own contact-book entry (same pubkey); in the contact book it carries `type 0`.
+5. Map `type`: 1 companion, 2 repeater, 3 room server, 4 sensor.
+6. "Last heard" is `lastAdvert` (epoch seconds). Do not use `lastHeardAt`: it moves on every reconnect. Mark stations older than 7 days as stale.
+7. Build a GeoJSON `FeatureCollection` of `Point` features. Coordinates are `[lon, lat]` (longitude first), rounded to 5 decimals. Properties: `name`, `type`, `last advert`, `marker-color` (repeater `#dc2626`, companion `#16a34a`, gateway `#2563eb`).
+8. Link: `https://geojson.io/#data=data:application/json,` followed by `encodeURIComponent(JSON.stringify(collection))`.
+9. Reply with the link plus a one-line summary ("4 stations, 2 repeaters, 1 stale").
+
+- **Can:** show every positioned station the gateway has heard, with type and age, on any phone or laptop. Optional: known routes from the gateway as `LineString` features (the script draws them only when every hop hash resolves to exactly one contact).
+- **Cannot:** go back over LoRa (the link is far longer than a 127-byte frame); show repeater-to-repeater links (those need `!neighbours`, which costs airtime); verify positions: every station advertises its own, many companions send none, some send a deliberately wrong one.
+- **Privacy:** the map data sits after the `#`, which browsers never send to the geojson.io server; the page decodes it locally. The basemap tiles still come from a tile server, which sees the map area. Anyone holding the link sees the stations, your own node included, so send it to the owner only and never in reply to a mesh DM session.
+- **Read next:** docs/USAGE.md (what each state file holds), docs/AGENT-SCOPING.md (keep mesh senders away from file tools).
+
 ---
 
 *Sync rule: recipe set = README "What you can do with it" + this file + skills/meshcore-connect "Suggest a use". Change one, change all three.*

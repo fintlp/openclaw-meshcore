@@ -64,6 +64,7 @@ When the user asks "what can I do with this now?", offer a recipe from docs/USE-
 4. **Field-expedition hub** — base-camp gateway, approve each handheld once (pairing), hub answers everyone in DM.
 5. **Festival / event bot** — pairing-gated; it can never spam the public channel (that boundary is code, not a promise).
 6. **Cross-channel bridge** — a mesh DM can produce effects on the agent's other channels (WhatsApp, notes, reminders) — never for unpaired strangers, other channels' policies still apply.
+7. **Node map on demand**: read the contact book (own account only, skip 0/0 positions, own node from node status, last heard = lastAdvert), build a GeoJSON FeatureCollection ([lon, lat]), reply with https://geojson.io/#data=data:application/json,<encodeURIComponent(json)>. Zero airtime; owner only, never to a mesh DM session.
 
 Full recipes (scenario, config, can/cannot, reading): docs/USE-CASES.md in fintlp/openclaw-meshcore.
 
