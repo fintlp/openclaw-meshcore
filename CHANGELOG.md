@@ -6,28 +6,7 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
-## 2026.10.18 - 2026-11-08
-
-Compatibility patch ahead of an OpenClaw SDK removal. No behaviour change.
-
-Fixes
-
-- Dropped the import of the deprecated SDK subpath
-  openclaw/plugin-sdk/plugin-config-runtime. OpenClaw lists it as
-  removal-pending with removeAfter 2026-12-01. Once an OpenClaw release
-  removes it, a plugin that still imports it no longer loads. The only
-  helper used from it, requireRuntimeConfig, was a null check on the send
-  config. src/send.ts now does the same check inline, with the same error
-  text.
-- Minimum OpenClaw version is unchanged (>=2026.10.5).
-
-Tooling-tests
-
-- New src/send-config.test.ts: a send without a resolved config still fails
-  fast with the same error, before any device access. Full suite: 472 tests
-  across 34 files, plus clean typecheck and build. Tested against OpenClaw
-  2026.10.5, 2026.11.1 and 2026.11.2.
-## Unreleased
+## 2026.10.19 - 2026-11-09
 
 Fixed
 
@@ -63,7 +42,28 @@ Fixed
   final-link …dB)"). The request lifecycle owns its own timeout timers, so
   every settle path — including a node that never acknowledges the request —
   tears down its frame listener instead of leaking it onto the connection.
-  Live on-air verification is pending — no repeater in range yet.
+
+## 2026.10.18 - 2026-11-08
+
+Compatibility patch ahead of an OpenClaw SDK removal. No behaviour change.
+
+Fixes
+
+- Dropped the import of the deprecated SDK subpath
+  openclaw/plugin-sdk/plugin-config-runtime. OpenClaw lists it as
+  removal-pending with removeAfter 2026-12-01. Once an OpenClaw release
+  removes it, a plugin that still imports it no longer loads. The only
+  helper used from it, requireRuntimeConfig, was a null check on the send
+  config. src/send.ts now does the same check inline, with the same error
+  text.
+- Minimum OpenClaw version is unchanged (>=2026.10.5).
+
+Tooling-tests
+
+- New src/send-config.test.ts: a send without a resolved config still fails
+  fast with the same error, before any device access. Full suite: 472 tests
+  across 34 files, plus clean typecheck and build. Tested against OpenClaw
+  2026.10.5, 2026.11.1 and 2026.11.2.
 
 ## 2026.10.17 — 2026-10-24
 
