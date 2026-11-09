@@ -7,11 +7,6 @@
   "channels": [
     "meshcore"
   ],
-  "channelEnvVars": {
-    "meshcore": [
-      "MESHCORE_HOST"
-    ]
-  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

@@ -1,6 +1,6 @@
 {
   "name": "@fintlp/openclaw-meshcore",
-  "version": "2026.10.19",
+  "version": "2026.10.20",
   "description": "An AI agent on your mesh: OpenClaw channel plugin for MeshCore LoRa nodes (Companion Protocol over TCP).",
   "repository": {
     "type": "git",
@@ -59,6 +59,13 @@
       "selectionLabel": "MeshCore (TCP)",
       "docsPath": "/channels/meshcore",
       "docsLabel": "meshcore",
+    "configuredState": {
+      "env": {
+        "allOf": [
+          "MESHCORE_HOST"
+        ]
+      }
+    },
       "blurb": "LoRa mesh messaging via MeshCore Companion Protocol over TCP.",
       "order": 69,
       "quickstartAllowFrom": true,

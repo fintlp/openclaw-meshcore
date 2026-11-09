@@ -6,6 +6,19 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## 2026.10.20 - 2026-11-09
+
+Packaging
+
+- **Manifest metadata modernization (#32):** added the current declarative
+  env-setup metadata (`package.json#openclaw.channel.configuredState.env`)
+  and dropped the legacy `channelEnvVars` manifest field. OpenClaw
+  >= 2026.10.5 — the supported floor — already resolves env setup via the
+  current form, so the legacy field was redundant across the whole
+  supported range. Clears the registry manifest-unknown-fields and
+  channel-env-vars warnings (local inspector: PASS, 0 warnings). No runtime
+  change.
+
 ## 2026.10.19 - 2026-11-09
 
 Fixed
