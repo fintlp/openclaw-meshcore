@@ -676,8 +676,11 @@ describe("trace path op (issues #33, #52)", () => {
     const dir = mkdtempSync(join(tmpdir(), "meshcore-repeater-ops-"));
     setContactBookPathForTests(join(dir, "contacts.json"));
     resetContactBookForTests();
-    rememberContact({ publicKey: REPEATER_PUBKEY, advName: "HillRepeater" }, accountId);
-    rememberContact({ publicKey: hexToBytes("4f" + "aa".repeat(31)), advName: "RelayA" }, accountId);
+    // Explicit outPathLen: 0 = firmware-confirmed direct neighbour. A bare
+    // rememberContact without path data now stores -1 (unknown) — the state a
+    // contact is in between its first Advert push and the first contact sync.
+    rememberContact({ publicKey: REPEATER_PUBKEY, advName: "HillRepeater", outPathLen: 0 }, accountId);
+    rememberContact({ publicKey: hexToBytes("4f" + "aa".repeat(31)), advName: "RelayA", outPathLen: 0 }, accountId);
   });
 
   afterEach(() => {
@@ -944,6 +947,48 @@ describe("trace path op (issues #33, #52)", () => {
       deviceHandle: handle,
     });
     expect(again).toBe("no known route to Ghost yet; wait for an advert or a DM");
+  });
+
+  it("refuses a freshly-advertised contact with no synced path yet — nothing goes on air", async () => {
+    // Shaped exactly like the monitor's legacy-Advert (0x80) registration:
+    // pubkey + name only, no outPathLen. Before the contact-book default fix
+    // this stored 0 = "confirmed direct" and !trace went on air with a bogus
+    // route (PR #59 review, finding 1).
+    rememberContact(
+      { publicKey: hexToBytes("dd".repeat(32)), advName: "FreshAdvert" },
+      accountId,
+    );
+    const { handle, sendToRadioFrame } = createTraceHandle();
+    const reply = await runRepeaterOpsCommand({
+      op: "trace",
+      targetArg: "dddddddddddd",
+      account: createAccount(),
+      deviceHandle: handle,
+    });
+    expect(reply).toBe("no known route to FreshAdvert yet; wait for an advert or a DM");
+    expect(sendToRadioFrame).not.toHaveBeenCalled();
+  });
+
+  it("route-too-long refusal carries the reply text and never goes on air", async () => {
+    // 32 hops of width 1: elements = 2*32 + 1 = 65 > TRACE_MAX_ROUTE_ELEMENTS.
+    rememberContact(
+      {
+        publicKey: hexToBytes("cc".repeat(32)),
+        advName: "FarNode",
+        outPathLen: 32,
+        outPath: hexToBytes("4f".repeat(32)),
+      },
+      accountId,
+    );
+    const { handle, sendToRadioFrame } = createTraceHandle();
+    const reply = await runRepeaterOpsCommand({
+      op: "trace",
+      targetArg: "cccccccccccc",
+      account: createAccount(),
+      deviceHandle: handle,
+    });
+    expect(reply).toBe("route to FarNode is too long to trace (32 relay hops each way)");
+    expect(sendToRadioFrame).not.toHaveBeenCalled();
   });
 
   it("refuses a target with no contact-book entry at all", async () => {
