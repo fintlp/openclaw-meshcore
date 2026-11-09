@@ -389,7 +389,9 @@ function normalizeContact(raw: Record<string, unknown>): MeshcoreContact {
     publicKey: convertToUint8Array(raw.publicKey),
     type: Number(raw.type ?? 0),
     flags: Number(raw.flags ?? 0),
-    outPathLen: Number(raw.outPathLen ?? 0),
+    // Absent path data = unknown (-1, firmware 0xFF sentinel), never the
+    // unsafe "confirmed direct" default.
+    outPathLen: Number(raw.outPathLen ?? -1),
     outPath: convertToUint8Array(raw.outPath),
     advName: String(raw.advName ?? ""),
     lastAdvert: Number(raw.lastAdvert ?? 0),

@@ -13,6 +13,7 @@
  *
  * Ops are on-demand diagnostics only: never scheduled, never polled.
  */
+import { randomInt } from "node:crypto";
 import { getContactByPubkey, getContactBookEntries, resolveContactByPrefix } from "./contact-book.js";
 import {
   getMeshcoreDevice,
@@ -72,20 +73,22 @@ export type RemoteNodeStatus = {
 };
 
 export type TraceHop = {
-  /** One-byte path hash of the hop as reported in the TraceData frame, hex. */
+  /** Path hash of the hop as reported in the TraceData frame, hex (1-4 bytes). */
   hashHex: string;
   snrDb: number;
   /**
    * Contact-book advert name, only when exactly one known contact carries
-   * this hash byte (single-byte hashes collide easily; ambiguous = unnamed).
+   * this hash prefix (short hashes collide easily; ambiguous = unnamed).
    */
   name?: string;
 };
 
 export type TracePathResult = {
   hops: TraceHop[];
-  /** SNR of the final link back to us, dB (library pre-scales this one). */
+  /** SNR of the final link back to us, dB. */
   lastSnrDb: number;
+  /** True when the route was just [target] — no relay was involved. */
+  direct: boolean;
 };
 
 export const NEIGHBOURS_QUERY_TIMEOUT_MS = 30_000;
@@ -344,32 +347,278 @@ function resolveHopName(hashHex: string, accountId: string): string | undefined 
   return matches[0].advName || undefined;
 }
 
+// --- Trace route building (issue #52) ---------------------------------------
+//
+// A MeshCore trace is source-routed: CMD_SEND_TRACE_PATH takes the route as a
+// list of hop hashes, and a hop hash is the first N bytes of a node's pubkey
+// (firmware Identity.copyHashTo). The route must go out AND back, because the
+// node that receives the packet after the last hop is the one that reports
+// (Mesh.cpp onRecvPacket -> onTraceRecv): [R] for a direct neighbour,
+// [A, R, A] behind one repeater. The route comes from the contact book's
+// out-path (the path adverts/DMs arrive on), never from the bare pubkey —
+// passing the 32-byte key made the firmware try 32 one-byte hops and every
+// trace timed out.
+
+const OUT_PATH_UNKNOWN = 0xff;
+/** Firmware bound: (route bytes >> pathSz) must be <= MAX_PATH_SIZE (64). */
+const TRACE_MAX_ROUTE_ELEMENTS = 64;
+// The command-frame cap (route bytes < MAX_PACKET_PAYLOAD(184) - 15) can never
+// bite first: a valid contact path holds at most 64 bytes, so a route is at
+// most 2*64 + 4 = 132 bytes. Only the element cap is enforced.
+
+export type TraceRoutePlan = {
+  ok: true;
+  /** Route bytes: out-path hops + target hash + hops reversed, each `width` bytes. */
+  route: Uint8Array;
+  /** flags low 2 bits for CMD_SEND_TRACE_PATH: log2(width). */
+  pathSz: number;
+  /** Bytes per hop hash: 1, 2 or 4. */
+  width: number;
+  /** True when the route is just [target]. */
+  direct: boolean;
+  /** Relay hops each way: (route elements - 1) / 2. */
+  hopCount: number;
+};
+
+export type TraceRouteRefusal = {
+  ok: false;
+  code: "unknown-path" | "route-too-long";
+  hopCount?: number;
+};
+
 /**
- * Normalize a TraceData push payload (as parsed by meshcore.js) into a hop
- * list. The library scales lastSnr but leaves pathSnrs as raw bytes, so the
- * quarter-dB int8 conversion happens here.
+ * Build the out-and-back trace route from a contact-book entry.
+ * Contact out_path_len uses the packet path encoding: low 6 bits = hop count,
+ * top 2 bits = hash size - 1, 0xFF = unknown, 0 = direct. The book stores the
+ * library's signed int8, so decode with & 0xFF first.
  */
-export function normalizeTraceData(
-  raw: {
-    pathLen: number;
-    pathHashes: Uint8Array;
-    pathSnrs: Uint8Array;
-    lastSnr: number;
-  },
+export function buildTraceRoute(contact: {
+  publicKey: Uint8Array;
+  outPathLen: number;
+  outPath: Uint8Array;
+}): TraceRoutePlan | TraceRouteRefusal {
+  const stored = contact.outPathLen & 0xff;
+  if (stored === OUT_PATH_UNKNOWN) {
+    return { ok: false, code: "unknown-path" };
+  }
+  const hopCount = stored & 63;
+  const contactWidth = (stored >> 6) + 1;
+  if (hopCount * contactWidth > 64) {
+    // Inconsistent with firmware Packet.isValidPathLen — no usable path.
+    return { ok: false, code: "unknown-path" };
+  }
+  // Trace hash widths are 1/2/4 (1 << pathSz); a 3-byte prefix still matches
+  // when truncated to 2 (firmware isHashMatch compares prefix bytes only).
+  const width = contactWidth === 3 ? 2 : contactWidth;
+  const elements = 2 * hopCount + 1;
+  if (elements > TRACE_MAX_ROUTE_ELEMENTS) {
+    return { ok: false, code: "route-too-long", hopCount };
+  }
+  const route = new Uint8Array(elements * width);
+  for (let i = 0; i < hopCount; i += 1) {
+    route.set(contact.outPath.subarray(i * contactWidth, i * contactWidth + width), i * width);
+  }
+  route.set(contact.publicKey.subarray(0, width), hopCount * width);
+  for (let i = 0; i < hopCount; i += 1) {
+    const hop = hopCount - 1 - i;
+    route.set(
+      contact.outPath.subarray(hop * contactWidth, hop * contactWidth + width),
+      (hopCount + 1 + i) * width,
+    );
+  }
+  const pathSz = width === 1 ? 0 : width === 2 ? 1 : 2;
+  return { ok: true, route, pathSz, width, direct: hopCount === 0, hopCount };
+}
+
+// --- Trace request/response wire I/O (issue #52) ----------------------------
+// meshcore.js 1.15.0 cannot drive this exchange: sendCommandSendTracePath
+// hardcodes flags=0, and its 0x89 parser reads path_len SNR bytes where the
+// firmware sends path_len >> path_sz plus a final SNR. So the request frame
+// is written here and the push is parsed from the raw "rx" stream.
+
+const CMD_SEND_TRACE_PATH = 36;
+const RESP_CODE_ERR = 1;
+const RESP_CODE_SENT = 6;
+const PUSH_CODE_TRACE_DATA = 0x89;
+
+/** Margin on top of the firmware's est_timeout while waiting for trace data. */
+export const TRACE_EST_TIMEOUT_MARGIN_MS = 1_000;
+
+/** Build the request frame: [36][tag u32 LE][auth 0 u32 LE][flags = pathSz][route]. */
+export function buildTraceRequestFrame(
+  tag: number,
+  pathSz: number,
+  route: Uint8Array,
+): Uint8Array {
+  const frame = new Uint8Array(10 + route.length);
+  const view = new DataView(frame.buffer);
+  frame[0] = CMD_SEND_TRACE_PATH;
+  view.setUint32(1, tag, true);
+  // auth: 0 — the firmware echoes it in the push; no use today.
+  view.setUint32(5, 0, true);
+  frame[9] = pathSz & 0x03;
+  frame.set(route, 10);
+  return frame;
+}
+
+export type TraceDataPush = {
+  tag: number;
+  authCode: number;
+  flags: number;
+  pathSz: number;
+  /** Bytes per hop hash in this frame: 1 << pathSz. */
+  width: number;
+  /** Route elements traversed (= hashes.length / width = SNR byte count). */
+  hopCount: number;
+  /** Route hashes, hopCount * width bytes, in traversed order. */
+  hashes: Uint8Array;
+  /** One raw quarter-dB byte per hop (unsigned on the wire, signed value). */
+  snrBytes: Uint8Array;
+  /** Final-link SNR, signed quarter-dB (firmware writes SNR * 4 as int8). */
+  finalSnrByte: number;
+};
+
+/**
+ * Parse a PUSH_CODE_TRACE_DATA (0x89) frame:
+ * [0x89][reserved][path_len][flags][tag u32 LE][auth u32 LE]
+ * [path_hashes: path_len][path_snrs: path_len >> path_sz][final SNR int8].
+ * Returns undefined for anything that is not a well-formed 0x89 frame — wire
+ * input is untrusted.
+ */
+export function parseTraceDataPushFrame(frame: Uint8Array): TraceDataPush | undefined {
+  if (frame.length < 13 || frame[0] !== PUSH_CODE_TRACE_DATA) {
+    return undefined;
+  }
+  const pathLen = frame[2];
+  const flags = frame[3];
+  const pathSz = flags & 0x03;
+  const width = 1 << pathSz;
+  if (pathLen === 0 || pathLen % width !== 0) {
+    return undefined;
+  }
+  const hopCount = pathLen >> pathSz;
+  if (frame.length !== 12 + pathLen + hopCount + 1) {
+    return undefined;
+  }
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  return {
+    tag: view.getUint32(4, true),
+    authCode: view.getUint32(8, true),
+    flags,
+    pathSz,
+    width,
+    hopCount,
+    hashes: frame.slice(12, 12 + pathLen),
+    snrBytes: frame.slice(12 + pathLen, 12 + pathLen + hopCount),
+    finalSnrByte: view.getInt8(12 + pathLen + hopCount),
+  };
+}
+
+/**
+ * Send the trace request and wait for its 0x89 push, correlated by a random
+ * tag. Two timers live inside this promise: the outer cap (armed before the
+ * send — it is the await-Sent budget for stage 1 and bounds the whole
+ * exchange) and the data-stage budget (est_timeout + margin, armed when Sent
+ * arrives). Every settle path runs cleanup(), including the outer cap firing
+ * before Sent — a raced-but-not-cancelled timeout must never leave the "rx"
+ * listener attached (PR #59 review). Stage 2 ignores 0x89 frames with other
+ * tags — a late push from an earlier, timed-out trace must not resolve this
+ * one.
+ */
+async function runTraceRequest(params: {
+  handle: MeshcoreDeviceHandle;
+  plan: TraceRoutePlan;
+  timeoutMs: number;
+  estMarginMs: number;
+}): Promise<TraceDataPush> {
+  const { handle, plan } = params;
+  const connection = handle.connection;
+  const tag = randomInt(0, 0x1_0000_0000);
+  const requestFrame = buildTraceRequestFrame(tag, plan.pathSz, plan.route);
+
+  return await new Promise<TraceDataPush>((resolve, reject) => {
+    let awaitingSent = true;
+    let dataTimer: ReturnType<typeof setTimeout> | null = null;
+    const cleanup = () => {
+      connection.off("rx", onRx);
+      if (dataTimer) {
+        clearTimeout(dataTimer);
+      }
+      clearTimeout(outerTimer);
+    };
+    const fail = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    // Armed before the send, so a node that never answers still tears the
+    // listener down; doubles as the outer cap for the whole exchange.
+    const outerTimer = setTimeout(() => {
+      fail(new RepeaterOpsTimeoutError(`path trace timed out (${params.timeoutMs}ms)`));
+    }, params.timeoutMs);
+    const onRx = (raw: Uint8Array) => {
+      const frame = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      if (frame.length === 0) {
+        return;
+      }
+      if (awaitingSent && frame[0] === RESP_CODE_SENT && frame.length >= 10) {
+        const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+        if (view.getUint32(2, true) !== tag) {
+          return; // Sent for another in-flight request
+        }
+        const estTimeout = view.getUint32(6, true);
+        awaitingSent = false;
+        dataTimer = setTimeout(() => {
+          fail(new RepeaterOpsTimeoutError(`trace data timed out (est ${estTimeout}ms + margin)`));
+        }, estTimeout + params.estMarginMs);
+        return;
+      }
+      if (awaitingSent && frame[0] === RESP_CODE_ERR) {
+        // NOTE: Err frames carry no tag, so any error the node raises while
+        // we await Sent is attributed to this trace — if another command
+        // fails at the same moment, this rejects with the wrong culprit.
+        // Accepted: ops are rare, DM-triggered and never concurrent by
+        // policy, and the failure mode is a soft reply, not a stuck state.
+        const code = frame.length > 1 ? frame[1] : -1;
+        fail(new Error(`trace request rejected by the node (err ${code})`));
+        return;
+      }
+      if (frame[0] === PUSH_CODE_TRACE_DATA) {
+        const push = parseTraceDataPushFrame(frame);
+        if (!push || push.tag !== tag) {
+          return;
+        }
+        cleanup();
+        resolve(push);
+      }
+    };
+    connection.on("rx", onRx);
+    Promise.resolve(connection.sendToRadioFrame(requestFrame)).catch((error: unknown) => {
+      fail(error instanceof Error ? error : new Error(String(error)));
+    });
+  });
+}
+
+/**
+ * Map a parsed trace push to the reply's hop list: the route's hashes in
+ * order with their SNRs, names only on a unique contact-prefix match, and the
+ * final-link SNR from the trailing byte.
+ */
+export function normalizeTraceRouteResult(
+  raw: TraceDataPush,
+  opts: { direct: boolean },
   accountId: string,
 ): TracePathResult {
-  const hopCount = Math.min(raw.pathLen, raw.pathHashes.length);
   const hops: TraceHop[] = [];
-  for (let i = 0; i < hopCount; i += 1) {
-    const hashHex = raw.pathHashes[i].toString(16).padStart(2, "0");
-    const snrRaw = i < raw.pathSnrs.length ? int8(raw.pathSnrs[i]) : 0;
+  for (let i = 0; i < raw.hopCount; i += 1) {
+    const hashHex = bytesToHex(raw.hashes.subarray(i * raw.width, (i + 1) * raw.width));
+    const snrRaw = i < raw.snrBytes.length ? int8(raw.snrBytes[i]) : 0;
     hops.push({
       hashHex,
       snrDb: snrRaw / 4,
       name: resolveHopName(hashHex, accountId),
     });
   }
-  return { hops, lastSnrDb: raw.lastSnr };
+  return { hops, lastSnrDb: raw.finalSnrByte / 4, direct: opts.direct };
 }
 
 /**
@@ -383,27 +632,52 @@ export async function tracePathToNode(params: {
   deviceHandle?: MeshcoreDeviceHandle;
   /** Test hook: override the outer timeout budget. */
   timeoutMs?: number;
+  /** Test hook: override the est-timeout margin for the data stage. */
+  estMarginMs?: number;
 }): Promise<{ targetLabel: string; result: TracePathResult }> {
   const accountId = params.account.accountId;
   const pubkey = resolveTargetPubkey(params.targetArg, accountId);
   const handle = requireConnectedHandle(accountId, params.deviceHandle);
+  const targetLabel = targetLabelFor(pubkey, accountId);
+
+  // Route before rate limit: a refusal never goes on air, so it must not
+  // spend airtime budget either.
+  const contact = getContactByPubkey(pubkey, accountId);
+  const plan: TraceRoutePlan | TraceRouteRefusal = contact
+    ? buildTraceRoute(contact)
+    : { ok: false, code: "unknown-path" };
+  if (!plan.ok) {
+    throw new RepeaterOpsTargetError(
+      plan.code === "route-too-long"
+        ? `route to ${targetLabel} is too long to trace (${plan.hopCount} relay hops each way)`
+        : `no known route to ${targetLabel} yet; wait for an advert or a DM`,
+    );
+  }
   assertOpsRateLimit(params.account, "path trace");
 
-  const raw = await withOpsTimeout(
-    handle.connection.tracePath(pubkey),
-    params.timeoutMs ?? TRACE_PATH_TIMEOUT_MS,
-    "path trace",
-  );
+  // Not withOpsTimeout: runTraceRequest owns the full timeout lifecycle
+  // (outer cap + data-stage budget) so every timeout path runs its cleanup —
+  // a raced race would abandon the promise with its rx listener attached.
+  const raw = await runTraceRequest({
+    handle,
+    plan,
+    timeoutMs: params.timeoutMs ?? TRACE_PATH_TIMEOUT_MS,
+    estMarginMs: params.estMarginMs ?? TRACE_EST_TIMEOUT_MARGIN_MS,
+  });
 
   return {
-    targetLabel: targetLabelFor(pubkey, accountId),
-    result: normalizeTraceData(raw, accountId),
+    targetLabel,
+    result: normalizeTraceRouteResult(raw, { direct: plan.direct }, accountId),
   };
 }
 
 export function formatTraceReply(targetLabel: string, result: TracePathResult): string {
-  if (result.hops.length === 0) {
-    return `path to ${targetLabel}: direct (final-link ${formatSnrDb(result.lastSnrDb)}dB)`;
+  if (result.direct) {
+    // The single hop is the target itself: its SNR is the out leg measured at
+    // the target, the final-link byte is the return leg measured at us.
+    const out = result.hops[0];
+    const outPart = out ? `out ${formatSnrDb(out.snrDb)}dB, ` : "";
+    return `path to ${targetLabel}: direct (${outPart}final-link ${formatSnrDb(result.lastSnrDb)}dB)`;
   }
   const hops = result.hops
     .map((hop) => `${hop.hashHex}${hop.name ? `(${hop.name})` : ""} ${formatSnrDb(hop.snrDb)}dB`)
@@ -437,6 +711,7 @@ export async function runRepeaterOpsCommand(params: {
   account: ResolvedMeshcoreAccount;
   deviceHandle?: MeshcoreDeviceHandle;
   timeoutMs?: number;
+  estMarginMs?: number;
 }): Promise<string> {
   const { op, account } = params;
   const targetArg = params.targetArg.trim();
@@ -470,6 +745,7 @@ export async function runRepeaterOpsCommand(params: {
           targetArg,
           deviceHandle: params.deviceHandle,
           timeoutMs: params.timeoutMs,
+          estMarginMs: params.estMarginMs,
         });
         return formatTraceReply(targetLabel, result);
       }

@@ -288,7 +288,8 @@ describe("contact book", () => {
     expect(entry.advName).toBe("LegacyNode");
     expect(entry.type).toBe(0);
     expect(entry.flags).toBe(0);
-    expect(entry.outPathLen).toBe(0);
+    // Legacy rows predate path tracking: unknown (-1), not direct (0).
+    expect(entry.outPathLen).toBe(-1);
     expect(entry.advLat).toBe(0);
     expect(entry.advLon).toBe(0);
     expect(entry.lastAdvert).toBe(0);

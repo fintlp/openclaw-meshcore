@@ -184,7 +184,9 @@ function migrateV1Row(row: { publicKeyHex?: string; name?: string }): ContactBoo
     publicKey: hexToBytes(hex),
     type: 0,
     flags: 0,
-    outPathLen: 0,
+    // Legacy rows predate path tracking: the path is unknown (-1), not
+    // direct, until a contact sync confirms it.
+    outPathLen: -1,
     outPath: new Uint8Array(64),
     advName: typeof row.name === "string" ? row.name : "",
     lastAdvert: 0,
@@ -229,7 +231,9 @@ function rowToEntry(row: PersistedContactV2): ContactBookEntry | undefined {
       publicKey: hexToBytes(hex),
       type: Number(row.type ?? 0),
       flags: Number(row.flags ?? 0),
-      outPathLen: Number(row.outPathLen ?? 0),
+      // Rows old enough to lack the column never had a confirmed path:
+      // unknown (-1), not direct (0).
+      outPathLen: Number(row.outPathLen ?? -1),
       outPath: parseOutPathHex(row.outPathHex),
       advName: String(row.advName ?? ""),
       lastAdvert,
@@ -478,9 +482,14 @@ export function rememberContact(
     publicKey: entry.publicKey,
     type: entry.type ?? existing?.type ?? 0,
     flags: entry.flags ?? existing?.flags ?? 0,
+    // No path data anywhere (fresh entry from a bare Advert push, which
+    // carries only the pubkey): store unknown (-1, the firmware 0xFF
+    // sentinel), never 0 — 0 decodes as "confirmed direct neighbour" and
+    // would let !trace go on air with a bogus route before any contact
+    // sync has confirmed a path (PR #59 review, finding 1).
     outPathLen: stale
       ? existing!.outPathLen
-      : (entry.outPathLen ?? existing?.outPathLen ?? 0),
+      : (entry.outPathLen ?? existing?.outPathLen ?? -1),
     outPath: stale
       ? existing!.outPath
       : entry.outPath
@@ -539,6 +548,8 @@ export function rememberSelfInfo(
       advName: selfInfo.name,
       advLat: selfInfo.advLat,
       advLon: selfInfo.advLon,
+      // The local node is by definition zero hops away: confirmed direct.
+      outPathLen: 0,
       source: "contact-sync",
       discoveredAt: Math.floor(Date.now() / 1000),
       identityBasis: "unknown",

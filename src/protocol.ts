@@ -75,7 +75,9 @@ export function toLibContact(raw: Record<string, unknown>): MeshcoreContact {
     publicKey: new Uint8Array((raw.publicKey as ArrayBufferView)?.byteLength ?? 0),
     type: Number(raw.type ?? 0),
     flags: Number(raw.flags ?? 0),
-    outPathLen: Number(raw.outPathLen ?? 0),
+    // Absent path data = unknown (-1, firmware 0xFF sentinel), never the
+    // unsafe "confirmed direct" default.
+    outPathLen: Number(raw.outPathLen ?? -1),
     outPath: new Uint8Array((raw.outPath as ArrayBufferView)?.byteLength ?? 0),
     advName: String(raw.advName ?? ""),
     lastAdvert: Number(raw.lastAdvert ?? 0),

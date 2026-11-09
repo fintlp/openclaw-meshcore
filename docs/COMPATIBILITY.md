@@ -37,6 +37,31 @@ Floor: OpenClaw ≥ 2026.10.1 (`peerDependencies`, install manifest; moved from 
 
 ## Wire format notes
 
+### Traceroute (`!trace`, `CMD_SEND_TRACE_PATH` / `0x89`)
+
+Verified against the MeshCore companion-v1.18.0 firmware source and
+`@liamcottle/meshcore.js` 1.15.0:
+
+- A trace is source-routed out **and** back: the route is
+  `[target]` for a direct neighbour, `[relay, target, relay]` behind one
+  repeater, built from the contact book's out-path. The node that receives
+  the packet after the last hop is the one that reports the `0x89` push.
+- Supported path-hash widths are 1, 2 and 4 bytes (trace `flags` low 2 bits =
+  `pathSz`, hash size = `1 << pathSz`). A 3-byte contact path is truncated to
+  2-byte hashes for the trace — a shorter prefix still matches the node's
+  `isHashMatch`. Routes needing more than 64 elements are refused.
+- The contact `out_path_len` byte uses the packet path encoding (low 6 bits =
+  hops, top 2 bits = hash size − 1, `0xFF` = unknown); the library hands it
+  over as a **signed** int8, so it is decoded with `& 0xFF`.
+- The plugin writes the request frame itself and parses the `0x89` push
+  itself: meshcore.js 1.15.0 hardcodes `flags=0` in `sendCommandSendTracePath`
+  and misreads the push whenever `path_sz > 0` (it reads `path_len` SNR
+  bytes; the firmware sends `path_len >> path_sz` plus a final SNR).
+- 🟡 **expected, live verification pending** — unit- and integration-tested
+  against firmware-source semantics; no repeater in range yet for an on-air
+  `!trace`. Expected: a trace to a direct repeater answers "direct" plus
+  both link SNRs.
+
 ### Text frame cap (firmware 1.16)
 
 - **127-byte text frame cap** — longer text is chunked by the plugin (`textChunkLimit` default 127). A limit configured above 127 is clamped back to 127 bytes; an oversized frame causes the node to **kick the TCP companion session** rather than truncating silently (observed live 2026-10-09 with MeshCore companion 1.16-class firmware).
