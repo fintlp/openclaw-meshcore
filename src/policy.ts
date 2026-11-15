@@ -118,19 +118,18 @@ export function resolveMeshcoreGroupToolPolicyResolution(
     : hostGroups;
   const match = resolveMeshcoreGroupMatch({ groups, target: params.target });
   const authoredPolicy = match.groupConfig?.tools ?? match.wildcardConfig?.tools;
-  const emptyAccountMapInheritedRoot =
-    Object.keys(channelConfig?.accounts ?? {}).length <= 1 &&
-    Object.keys(account.config.groups ?? {}).length === 0;
 
   return {
     match,
     // A single named account's explicit groups:{} inherits root groups in the
-    // host. Defer when that inheritance supplies tools so the host fallback
-    // applies them; a neutral truthy value here would suppress the root deny.
-    policy:
-      authoredPolicy && emptyAccountMapInheritedRoot
-        ? undefined
-        : (authoredPolicy ?? { deny: [] }),
+    // host. Return that inherited policy directly: it is this same account's
+    // map (no cross-account risk — the host fallback resolves the same
+    // accountId, group-policy-*.mjs:255-269), and deferring would lose it
+    // when the authored key's case differs from the wire target: this
+    // resolver matches case-insensitively while the host fallback is
+    // case-sensitive (group-policy-*.mjs:187-196, reached from
+    // agent-tools.policy-*.mjs:420-428).
+    policy: authoredPolicy ?? { deny: [] },
   };
 }
 

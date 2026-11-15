@@ -991,7 +991,7 @@ describe("group-wide tool policy hardening", () => {
     expect(resolveGroupTools(config, "default")).toBeUndefined();
   });
 
-  it("defers to host fallback when one named account's empty group map inherits root tools", () => {
+  it("returns the inherited root policy directly for one named account's empty group map", () => {
     const config = {
       channels: {
         meshcore: {
@@ -1004,7 +1004,28 @@ describe("group-wide tool policy hardening", () => {
       },
     } as CoreConfig;
 
-    expect(resolveGroupTools(config, "ops", "channel:0")).toBeUndefined();
+    // Same-account inheritance: returned directly (the host fallback would
+    // resolve the same accountId). Deferral added nothing.
+    expect(resolveGroupTools(config, "ops", "channel:0")).toEqual({ deny: ["root-policy"] });
+  });
+
+  it("applies the inherited root policy even when the configured key's case differs from the target", () => {
+    const config = {
+      channels: {
+        meshcore: {
+          host: "192.0.2.10",
+          groups: { "Channel:0": { tools: { deny: ["root-policy"] } } },
+          accounts: {
+            ops: { host: "192.0.2.11", groups: {} },
+          },
+        },
+      },
+    } as CoreConfig;
+
+    // The plugin matches group keys case-insensitively; the host fallback is
+    // case-sensitive and would find nothing. Returning the inherited policy
+    // directly closes that policy-drop gap (PR #76 review follow-up N1).
+    expect(resolveGroupTools(config, "ops", "channel:0")).toEqual({ deny: ["root-policy"] });
   });
 
   it("returns a neutral policy when multiple accounts disable empty-group inheritance", () => {
