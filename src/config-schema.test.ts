@@ -991,7 +991,7 @@ describe("group-wide tool policy hardening", () => {
     expect(resolveGroupTools(config, "default")).toBeUndefined();
   });
 
-  it("returns a neutral account-owned policy for an explicit empty account group map", () => {
+  it("defers to host fallback when one named account's empty group map inherits root tools", () => {
     const config = {
       channels: {
         meshcore: {
@@ -999,6 +999,26 @@ describe("group-wide tool policy hardening", () => {
           groups: { "channel:0": { tools: { deny: ["root-policy"] } } },
           accounts: {
             ops: { host: "192.0.2.11", groups: {} },
+          },
+        },
+      },
+    } as CoreConfig;
+
+    expect(resolveGroupTools(config, "ops", "channel:0")).toBeUndefined();
+  });
+
+  it("returns a neutral policy when multiple accounts disable empty-group inheritance", () => {
+    const config = {
+      channels: {
+        meshcore: {
+          host: "192.0.2.10",
+          groups: { "channel:0": { tools: { deny: ["root-policy"] } } },
+          accounts: {
+            ops: { host: "192.0.2.11", groups: {} },
+            other: {
+              host: "192.0.2.12",
+              groups: { "channel:0": { tools: { deny: ["other-account"] } } },
+            },
           },
         },
       },

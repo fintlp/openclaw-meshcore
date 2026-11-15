@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { finalizeInboundContext } from "openclaw/plugin-sdk/reply-runtime";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
+import { resolveMeshcoreAccount } from "./accounts.js";
 import { handleMeshcoreInbound } from "./inbound.js";
 import { meshcoreDedupeKey, openDurabilityStore } from "./durability.js";
 import {
@@ -1221,6 +1222,43 @@ describe("group tool-policy route and command activation hardening", () => {
     expect(r.runtime.log).toHaveBeenCalledWith(expect.stringContaining("effective binding"));
   });
 
+  it("refuses a main-scoped group protected only by wildcard tools", async () => {
+    const account = createAccount({
+      config: {
+        ...groupAccount().config,
+        groups: { "*": { requireMention: false, tools: { deny: ["write"] } } },
+      },
+    });
+
+    const r = await runGroup({ account });
+
+    expect(r.inboundRun).not.toHaveBeenCalled();
+    expect(r.durability.intake).not.toHaveBeenCalled();
+  });
+
+  it("refuses a main-scoped group whose single named account inherits root tools", async () => {
+    const config = {
+      ...routeConfig("main"),
+      channels: {
+        meshcore: {
+          host: "192.0.2.10",
+          groupPolicy: "open",
+          groups: { "channel:0": { requireMention: false, tools: { deny: ["root-policy"] } } },
+          accounts: {
+            ops: { host: "192.0.2.11", groupPolicy: "open", groups: {} },
+          },
+        },
+      },
+    } as CoreConfig;
+    const account = resolveMeshcoreAccount({ cfg: config, accountId: "ops" });
+
+    const r = await runGroup({ account, config });
+
+    expect(r.inboundRun).not.toHaveBeenCalled();
+    expect(r.durability.intake).not.toHaveBeenCalled();
+    expect(r.runtime.log).toHaveBeenCalledWith(expect.stringContaining("account=ops"));
+  });
+
   it("allows a protected group on a per-group route and resolves the route exactly once", async () => {
     const r = await runGroup({ config: routeConfig("per-group") });
 
@@ -1316,6 +1354,49 @@ describe("group tool-policy route and command activation hardening", () => {
 
     expect(r.inboundRun).not.toHaveBeenCalled();
     expect(r.onAdmittedGroup).not.toHaveBeenCalled();
+  });
+
+  it("suppresses command authority for a mentionless group slash command when mentions are optional", async () => {
+    const r = await runGroupCommand({ text: "/status", requireMention: false });
+
+    expect(r.inboundRun).toHaveBeenCalledTimes(1);
+    const inbound = r.inboundRun.mock.calls[0][0];
+    const turn = inbound.adapter.resolveTurn();
+    expect(turn.ctxPayload).toEqual(
+      expect.objectContaining({
+        CommandAuthorized: false,
+        CommandInterpretationSuppressed: true,
+      }),
+    );
+  });
+
+  it("keeps an authorized DM /status command authorized and unsuppressed", async () => {
+    const inboundRun = vi.fn(async () => ({ dispatched: true }));
+    setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRun) as never);
+    shouldHandleTextCommandsMock.mockReturnValue(true);
+    hasControlCommandMock.mockImplementation((body) => body.startsWith("/status"));
+    const account = createAccount({
+      config: {
+        dmPolicy: "allowlist",
+        allowFrom: ["!aabbccdd1122"],
+        groupPolicy: "disabled",
+        groupAllowFrom: [],
+        channels: [0],
+      },
+    });
+
+    await handleMeshcoreInbound({
+      message: createMessage({ text: "/status" }),
+      account,
+      config: routeConfig("per-group"),
+      runtime: createRuntimeEnv(),
+    });
+
+    expect(inboundRun).toHaveBeenCalledTimes(1);
+    const inbound = inboundRun.mock.calls[0][0];
+    const turn = inbound.adapter.resolveTurn();
+    expect(turn.ctxPayload.CommandAuthorized).toBe(true);
+    expect(turn.ctxPayload.CommandInterpretationSuppressed).toBeUndefined();
   });
 
   it("dispatches a genuinely mentioned slash command as plain text with command authority suppressed", async () => {

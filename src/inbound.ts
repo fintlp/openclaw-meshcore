@@ -37,7 +37,7 @@ import {
 import {
   hasMeshcoreGroupToolPolicy,
   resolveMeshcoreGroupMatch,
-  resolveMeshcoreGroupToolPolicy,
+  resolveMeshcoreGroupToolPolicyResolution,
   resolveMeshcoreRequireMention,
 } from "./policy.js";
 import { readNodeStatusSnapshot } from "./node-status.js";
@@ -559,26 +559,23 @@ export async function handleMeshcoreInbound(params: {
   // Main-scoped group sessions drop the group id before OpenClaw calls the
   // channel policy adapter, silently shedding group-wide tools. Check the
   // effective route (including binding overrides), before durability intake.
-  const effectiveGroupToolPolicy = message.isGroup
-    ? resolveMeshcoreGroupToolPolicy({
-        cfg: config,
-        accountId: account.accountId,
-        target: message.target,
-      })
-    : undefined;
-  if (
-    message.isGroup &&
-    route.groupScope === "main" &&
-    effectiveGroupToolPolicy !== undefined &&
-    hasMeshcoreGroupToolPolicy(groupMatch)
-  ) {
-    runtime.log?.(
-      `meshcore: refuse group ${message.target} (account=${account.accountId}; groupScope="main" would shed its tool policy; set session.groupScope="per-group" or the effective binding's session.groupScope="per-group")`,
-    );
-    if (params.replayOf !== undefined) {
-      params.durability?.deadLetter(account.accountId, params.replayOf, "group-scope-main");
+  if (message.isGroup && route.groupScope === "main") {
+    // Use the captured account plus this dispatch's config for both the match
+    // and policy decision; do not re-resolve a newer account from live config.
+    const toolPolicy = resolveMeshcoreGroupToolPolicyResolution({
+      cfg: config,
+      account,
+      target: message.target,
+    });
+    if (hasMeshcoreGroupToolPolicy(toolPolicy.match)) {
+      runtime.log?.(
+        `meshcore: refuse group ${message.target} (account=${account.accountId}; groupScope="main" would shed its tool policy; set session.groupScope="per-group" or the effective binding's session.groupScope="per-group")`,
+      );
+      if (params.replayOf !== undefined) {
+        params.durability?.deadLetter(account.accountId, params.replayOf, "group-scope-main");
+      }
+      return;
     }
-    return;
   }
 
   // Durability intake + claim (#48): session-bound frames are logged as
