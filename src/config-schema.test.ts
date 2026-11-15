@@ -818,6 +818,23 @@ describe("meshcore config schema", () => {
     expect(issues.some((issue) => issue.path.join(".") === "textChunkLimit")).toBe(true);
   });
 
+  it("accepts an explicit native ping full-key allowlist at root and account scope", () => {
+    const nodeId = "!" + "ab".repeat(32);
+    const root = MeshcoreConfigSchema.safeParse({
+      host: "192.168.1.10",
+      commandPingAllowFrom: [nodeId],
+    });
+    expect(root.success).toBe(true);
+    expect(root.success && root.data.commandPingAllowFrom).toEqual([nodeId]);
+
+    const account = MeshcoreConfigSchema.safeParse({
+      host: "192.168.1.10",
+      accounts: { ops: { host: "192.168.1.11", commandPingAllowFrom: [nodeId] } },
+    });
+    expect(account.success).toBe(true);
+    expect(account.success && account.data.accounts?.ops?.commandPingAllowFrom).toEqual([nodeId]);
+  });
+
   // Drift-guard: the committed openclaw.plugin.json must be exactly what
   // `npm run sync-manifest` would write. This catches any hand-edits or
   // stale generated schema copies.

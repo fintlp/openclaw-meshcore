@@ -87,7 +87,11 @@ export const meshcoreChannelConfigUiHints = {
   },
   commandRepliesEnabled: {
     label: "Command Replies",
-    help: "When true (default), exact !ping and !status DMs are answered directly by the plugin without waking an agent session. Only senders that pass the DM gate receive replies; groups are always ignored.",
+    help: "Feature toggle for native replies. Stock prefix-addressed peers are denied by default; only an explicitly full-key-allowlisted !ping compatibility exception remains.",
+  },
+  commandPingAllowFrom: {
+    label: "Native Ping Full-Key Allowlist",
+    help: "Optional compatibility exception. Canonical !+64-hex entries only; a uniquely mapped, normally admitted sender may receive a separately budgeted !ping reply. Other native commands stay denied.",
   },
   contactBookMaxEntries: {
     label: "Contact Book Max Entries",

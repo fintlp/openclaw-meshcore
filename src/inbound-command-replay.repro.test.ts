@@ -9,6 +9,10 @@ import { resetNodeStatusStateForTests, setNodeStatusPathForTests } from "./node-
 import type { CoreConfig, MeshcoreInboundMessage, ResolvedMeshcoreAccount } from "./types.js";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import { resolveInboundSessionEnvelopeContextAsync } from "openclaw/plugin-sdk/channel-inbound";
+import { createDmIdentityEvidence } from "./dm-identity.js";
+import { hexToBytes } from "./protocol.js";
+import { clearSendRateLimitState } from "./rate-limit.js";
+import { resetPairingRequestBudgetForTests } from "./pairing-budget.js";
 
 vi.mock("openclaw/plugin-sdk/routing", () => ({
   resolveAgentRoute: vi.fn(({ peer }) => ({
@@ -56,7 +60,7 @@ function createRuntime() {
       routing: {
         resolveAgentRoute: vi.fn(() => ({
           agentId: "meshcore",
-          sessionKey: "meshcore:!aabbccdd1122",
+          sessionKey: "meshcore:!aabbccdd11220000000000000000000000000000000000000000000000000000",
           accountId: "default",
         })),
       },
@@ -92,24 +96,35 @@ function createAccount(): ResolvedMeshcoreAccount {
     port: 5000,
     config: {
       dmPolicy: "allowlist",
-      allowFrom: ["!aabbccdd1122"],
+      allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
       groupPolicy: "disabled",
       groupAllowFrom: [],
       channels: [0],
+      commandPingAllowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
     },
   } satisfies ResolvedMeshcoreAccount;
 }
 
 function createMessage(text = "!ping"): MeshcoreInboundMessage {
   return {
-    messageId: "mc-dm-!aabbccdd1122-1700000000-ping",
-    target: "!aabbccdd1122",
-    senderNodeId: "!aabbccdd1122",
+    messageId: "mc-dm-!aabbccdd11220000000000000000000000000000000000000000000000000000-1700000000-ping",
+    target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+    senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
     senderName: "TestNode",
     text,
     timestamp: 1700000000000,
     isGroup: false,
     meshChannel: 0,
+    dmIdentity: {
+      status: "unique",
+      fullKey: "aabbccdd11220000000000000000000000000000000000000000000000000000",
+      nodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+      name: "TestNode",
+    },
+    dmIdentityEvidence: createDmIdentityEvidence({
+      wirePrefix: hexToBytes("aabbccdd1122"),
+      fullKey: "aabbccdd11220000000000000000000000000000000000000000000000000000",
+    }),
     meshSecurity: { txtType: 0, signedPlain: false, identityBinding: "prefix-only" },
   };
 }
@@ -126,12 +141,16 @@ beforeEach(() => {
     envelopeOptions: {},
     previousTimestamp: undefined,
   });
+  resetPairingRequestBudgetForTests();
+  clearSendRateLimitState();
   setMeshcoreRuntime(createRuntime() as never);
 });
 
 afterEach(() => {
   clearMeshcoreRuntime();
   resetNodeStatusStateForTests();
+  resetPairingRequestBudgetForTests();
+  clearSendRateLimitState();
   rmSync(dir, { recursive: true, force: true });
 });
 

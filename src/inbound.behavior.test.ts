@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { finalizeInboundContext } from "openclaw/plugin-sdk/reply-runtime";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
 import { resolveMeshcoreAccount } from "./accounts.js";
+import { resolveCommandAuthorization } from "openclaw/plugin-sdk/command-auth-native";
+import { createOpenClawCodingTools } from "openclaw/plugin-sdk/agent-harness";
 import { handleMeshcoreInbound } from "./inbound.js";
 import { meshcoreDedupeKey, openDurabilityStore } from "./durability.js";
 import {
@@ -16,6 +18,10 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hexToBytes } from "./protocol.js";
+import { createDmIdentityEvidence } from "./dm-identity.js";
+import { resetPairingRequestBudgetForTests } from "./pairing-budget.js";
+import { clearSendRateLimitState } from "./rate-limit.js";
+import { chunkTextWithNumbering } from "./send.js";
 
 vi.mock("openclaw/plugin-sdk/routing", () => ({
   resolveAgentRoute: vi.fn(({ peer }) => ({
@@ -88,16 +94,34 @@ function createAccount(overrides?: Partial<ResolvedMeshcoreAccount>): ResolvedMe
   } satisfies ResolvedMeshcoreAccount;
 }
 
+const TEST_NODE_ID = '!aabbccdd11220000000000000000000000000000000000000000000000000000';
 function createMessage(overrides?: Partial<MeshcoreInboundMessage>): MeshcoreInboundMessage {
+  const senderNodeId = overrides?.senderNodeId ?? TEST_NODE_ID;
+  const fullKey = senderNodeId.startsWith("!") ? senderNodeId.slice(1) : "";
+  const canonical = /^[0-9a-f]{64}$/.test(fullKey);
   return {
-    messageId: "mc-dm-!aabbccdd1122-1700000000-hello",
-    target: "!aabbccdd1122",
-    senderNodeId: "!aabbccdd1122",
+    messageId: "mc-dm-" + senderNodeId + "-1700000000-hello",
+    target: senderNodeId,
+    senderNodeId,
     senderName: "TestNode",
     text: "hello",
     timestamp: Date.now(),
     isGroup: false,
     meshChannel: 0,
+    ...(canonical
+      ? {
+          dmIdentity: {
+            status: "unique" as const,
+            fullKey,
+            nodeId: senderNodeId,
+            name: "TestNode",
+          },
+          dmIdentityEvidence: createDmIdentityEvidence({
+            wirePrefix: hexToBytes(fullKey.slice(0, 12)),
+            fullKey,
+          }),
+        }
+      : {}),
     meshSecurity: {
       txtType: 0,
       signedPlain: false,
@@ -155,7 +179,7 @@ function makeRuntimeWithDispatch(inboundRunMock = vi.fn(async () => ({ dispatche
       routing: {
         resolveAgentRoute: vi.fn(() => ({
           agentId: "meshcore",
-          sessionKey: "meshcore:!aabbccdd1122",
+          sessionKey: "meshcore:!aabbccdd11220000000000000000000000000000000000000000000000000000",
           accountId: "default",
         })),
       },
@@ -195,12 +219,16 @@ describe("meshcore inbound behavior", () => {
     hasControlCommandMock.mockReset().mockReturnValue(false);
     buildMentionRegexesMock.mockReset().mockReturnValue([]);
     matchesMentionPatternsMock.mockReset().mockReturnValue(false);
+    resetPairingRequestBudgetForTests();
+    clearSendRateLimitState();
     setMeshcoreRuntime(createBaseRuntime() as never);
   });
 
   afterEach(() => {
     clearMeshcoreRuntime();
     resetNodeStatusStateForTests();
+    resetPairingRequestBudgetForTests();
+    clearSendRateLimitState();
   });
 
   it("issues pairing challenge for unknown DM senders when dmPolicy=pairing", async () => {
@@ -225,13 +253,13 @@ describe("meshcore inbound behavior", () => {
 
     await handleMeshcoreInbound({
       message: createMessage({
-        senderNodeId: "!aabbccdd1122",
-        target: "!aabbccdd1122",
+        senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+        target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
       }),
       account: createAccount({
         config: {
           dmPolicy: "allowlist",
-          allowFrom: ["!aabbccdd1122"],
+          allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
           groupPolicy: "disabled",
           groupAllowFrom: [],
           channels: [0],
@@ -248,7 +276,7 @@ describe("meshcore inbound behavior", () => {
         accountId: "default",
         raw: expect.objectContaining({
           text: "hello",
-          senderNodeId: "!aabbccdd1122",
+          senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
         }),
         adapter: expect.objectContaining({
           ingest: expect.any(Function),
@@ -277,14 +305,14 @@ describe("meshcore inbound behavior", () => {
 
     await handleMeshcoreInbound({
       message: createMessage({
-        senderNodeId: "!aabbccdd1122",
-        target: "!aabbccdd1122",
+        senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+        target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
         meshSecurity,
       }),
       account: createAccount({
         config: {
           dmPolicy: "allowlist",
-          allowFrom: ["!aabbccdd1122"],
+          allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
           groupPolicy: "disabled",
           groupAllowFrom: [],
           channels: [0],
@@ -328,13 +356,13 @@ describe("meshcore inbound behavior", () => {
     const runtime = createRuntimeEnv();
     await handleMeshcoreInbound({
       message: createMessage({
-        senderNodeId: "!aabbccdd1123",
-        target: "!aabbccdd1123",
+        senderNodeId: "!aabbccdd11230000000000000000000000000000000000000000000000000000",
+        target: "!aabbccdd11230000000000000000000000000000000000000000000000000000",
       }),
       account: createAccount({
         config: {
           dmPolicy: "allowlist",
-          allowFrom: ["!aabbccdd1122"],
+          allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
           groupPolicy: "disabled",
           groupAllowFrom: [],
           channels: [0],
@@ -346,7 +374,7 @@ describe("meshcore inbound behavior", () => {
     });
 
     expect(runtime.log).toHaveBeenCalledWith(
-      expect.stringContaining("drop DM sender !aabbccdd1123 (dmPolicy=allowlist)"),
+      expect.stringContaining("drop DM account=default fingerprint=!aabbccdd1123"),
     );
   });
 
@@ -549,17 +577,18 @@ describe("meshcore inbound behavior", () => {
 
       await handleMeshcoreInbound({
         message: createMessage({
-          senderNodeId: "!aabbccdd1122",
-          target: "!aabbccdd1122",
+          senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+          target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
           text: "!ping",
         }),
         account: createAccount({
           config: {
             dmPolicy: "allowlist",
-            allowFrom: ["!aabbccdd1122"],
+            allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
             groupPolicy: "disabled",
             groupAllowFrom: [],
             channels: [0],
+            commandPingAllowFrom: [TEST_NODE_ID],
           },
         }),
         config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
@@ -568,11 +597,11 @@ describe("meshcore inbound behavior", () => {
       });
 
       expect(sendReply).toHaveBeenCalledTimes(1);
-      expect(sendReply).toHaveBeenCalledWith("!aabbccdd1122", "pong GatewayNode", undefined);
+      expect(sendReply).toHaveBeenCalledWith("!aabbccdd11220000000000000000000000000000000000000000000000000000", "pong GatewayNode", undefined);
       expect(inboundRunMock).not.toHaveBeenCalled();
     });
 
-    it("answers !status directly for a paired/allowlisted sender", async () => {
+    it("denies !status even for a full-key-allowlisted sender", async () => {
       const sendReply = vi.fn(async () => undefined);
       const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
       setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
@@ -604,14 +633,14 @@ describe("meshcore inbound behavior", () => {
 
       await handleMeshcoreInbound({
         message: createMessage({
-          senderNodeId: "!aabbccdd1122",
-          target: "!aabbccdd1122",
+          senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+          target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
           text: "!status",
         }),
         account: createAccount({
           config: {
             dmPolicy: "allowlist",
-            allowFrom: ["!aabbccdd1122"],
+            allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
             groupPolicy: "disabled",
             groupAllowFrom: [],
             channels: [0],
@@ -622,23 +651,20 @@ describe("meshcore inbound behavior", () => {
         sendReply,
       });
 
-      expect(sendReply).toHaveBeenCalledTimes(1);
-      const reply = sendReply.mock.calls[0][1] as string;
-      expect(reply).toMatch(/^connected /);
-      expect(reply).toContain("name:GatewayNode");
-      expect(reply).toContain("reconnects:2");
+      expect(sendReply).not.toHaveBeenCalled();
       expect(inboundRunMock).not.toHaveBeenCalled();
+      expect(upsertPairingRequestMock).not.toHaveBeenCalled();
     });
 
-    it("does not answer commands from an unknown sender (pairing flow instead)", async () => {
+    it("terminates an unknown sender’s blocked native command without pairing", async () => {
       const sendReply = vi.fn(async () => undefined);
       const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
       setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
 
       await handleMeshcoreInbound({
         message: createMessage({
-          senderNodeId: "!aabbccdd1122",
-          target: "!aabbccdd1122",
+          senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+          target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
           text: "!ping",
         }),
         account: createAccount({
@@ -655,10 +681,8 @@ describe("meshcore inbound behavior", () => {
         sendReply,
       });
 
-      expect(upsertPairingRequestMock).toHaveBeenCalled();
-      expect(sendReply).toHaveBeenCalled();
-      const reply = sendReply.mock.calls[0][1] as string;
-      expect(reply).not.toMatch(/^pong/);
+      expect(upsertPairingRequestMock).not.toHaveBeenCalled();
+      expect(sendReply).not.toHaveBeenCalled();
       expect(inboundRunMock).not.toHaveBeenCalled();
     });
 
@@ -669,14 +693,14 @@ describe("meshcore inbound behavior", () => {
 
       await handleMeshcoreInbound({
         message: createMessage({
-          senderNodeId: "!aabbccdd1122",
-          target: "!aabbccdd1122",
+          senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+          target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
           text: "!ping please",
         }),
         account: createAccount({
           config: {
             dmPolicy: "allowlist",
-            allowFrom: ["!aabbccdd1122"],
+            allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
             groupPolicy: "disabled",
             groupAllowFrom: [],
             channels: [0],
@@ -733,18 +757,19 @@ describe("meshcore inbound behavior", () => {
 
       await handleMeshcoreInbound({
         message: createMessage({
-          senderNodeId: "!aabbccdd1122",
-          target: "!aabbccdd1122",
+          senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+          target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
           text: "!ping",
         }),
         account: createAccount({
           config: {
             dmPolicy: "allowlist",
-            allowFrom: ["!aabbccdd1122"],
+            allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
             groupPolicy: "disabled",
             groupAllowFrom: [],
             channels: [0],
             commandRepliesEnabled: false,
+            commandPingAllowFrom: [TEST_NODE_ID],
           },
         }),
         config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
@@ -753,7 +778,7 @@ describe("meshcore inbound behavior", () => {
       });
 
       expect(sendReply).not.toHaveBeenCalled();
-      expect(inboundRunMock).toHaveBeenCalledTimes(1);
+      expect(inboundRunMock).not.toHaveBeenCalled();
     });
 
     describe("repeater-ops commands (issue #35)", () => {
@@ -761,21 +786,21 @@ describe("meshcore inbound behavior", () => {
         runRepeaterOpsCommandMock.mockReset().mockResolvedValue("ops reply");
       });
 
-      it("answers !neighbours <node> directly for an allowlisted sender, no session", async () => {
+      it("default-denies !neighbours for a full-key-allowlisted sender", async () => {
         const sendReply = vi.fn(async () => undefined);
         const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
         setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
 
         await handleMeshcoreInbound({
           message: createMessage({
-            senderNodeId: "!aabbccdd1122",
-            target: "!aabbccdd1122",
+            senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+            target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
             text: "!neighbours !ff00ff00ff00",
           }),
           account: createAccount({
             config: {
               dmPolicy: "allowlist",
-              allowFrom: ["!aabbccdd1122"],
+              allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
               groupPolicy: "disabled",
               groupAllowFrom: [],
               channels: [0],
@@ -786,32 +811,27 @@ describe("meshcore inbound behavior", () => {
           sendReply,
         });
 
-        expect(runRepeaterOpsCommandMock).toHaveBeenCalledTimes(1);
-        expect(runRepeaterOpsCommandMock).toHaveBeenCalledWith({
-          op: "neighbours",
-          targetArg: "!ff00ff00ff00",
-          account: expect.objectContaining({ accountId: "default" }),
-        });
-        expect(sendReply).toHaveBeenCalledTimes(1);
-        expect(sendReply).toHaveBeenCalledWith("!aabbccdd1122", "ops reply", undefined);
+        expect(runRepeaterOpsCommandMock).not.toHaveBeenCalled();
+        expect(sendReply).not.toHaveBeenCalled();
         expect(inboundRunMock).not.toHaveBeenCalled();
+        expect(upsertPairingRequestMock).not.toHaveBeenCalled();
       });
 
-      it("forwards a missing node argument so the op can answer with usage text", async () => {
+      it("default-denies !neighbours even without a node argument", async () => {
         const sendReply = vi.fn(async () => undefined);
         const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
         setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
 
         await handleMeshcoreInbound({
           message: createMessage({
-            senderNodeId: "!aabbccdd1122",
-            target: "!aabbccdd1122",
+            senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+            target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
             text: "!neighbours",
           }),
           account: createAccount({
             config: {
               dmPolicy: "allowlist",
-              allowFrom: ["!aabbccdd1122"],
+              allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
               groupPolicy: "disabled",
               groupAllowFrom: [],
               channels: [0],
@@ -822,12 +842,10 @@ describe("meshcore inbound behavior", () => {
           sendReply,
         });
 
-        expect(runRepeaterOpsCommandMock).toHaveBeenCalledWith({
-          op: "neighbours",
-          targetArg: "",
-          account: expect.objectContaining({ accountId: "default" }),
-        });
+        expect(runRepeaterOpsCommandMock).not.toHaveBeenCalled();
+        expect(sendReply).not.toHaveBeenCalled();
         expect(inboundRunMock).not.toHaveBeenCalled();
+        expect(upsertPairingRequestMock).not.toHaveBeenCalled();
       });
 
       it("stays silent for ops commands in group channels", async () => {
@@ -866,15 +884,15 @@ describe("meshcore inbound behavior", () => {
         expect(inboundRunMock).toHaveBeenCalledTimes(1);
       });
 
-      it("does not run ops commands for unknown senders (pairing flow instead)", async () => {
+      it("does not pair or run ops commands for unknown senders", async () => {
         const sendReply = vi.fn(async () => undefined);
         const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
         setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
 
         await handleMeshcoreInbound({
           message: createMessage({
-            senderNodeId: "!aabbccdd1122",
-            target: "!aabbccdd1122",
+            senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+            target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
             text: "!neighbours !ff00ff00ff00",
           }),
           account: createAccount({
@@ -892,7 +910,7 @@ describe("meshcore inbound behavior", () => {
         });
 
         expect(runRepeaterOpsCommandMock).not.toHaveBeenCalled();
-        expect(upsertPairingRequestMock).toHaveBeenCalled();
+        expect(upsertPairingRequestMock).not.toHaveBeenCalled();
         expect(inboundRunMock).not.toHaveBeenCalled();
       });
 
@@ -903,14 +921,14 @@ describe("meshcore inbound behavior", () => {
 
         await handleMeshcoreInbound({
           message: createMessage({
-            senderNodeId: "!aabbccdd1122",
-            target: "!aabbccdd1122",
+            senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+            target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
             text: "!neighbours !ff00ff00ff00",
           }),
           account: createAccount({
             config: {
               dmPolicy: "allowlist",
-              allowFrom: ["!aabbccdd1122"],
+              allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
               groupPolicy: "disabled",
               groupAllowFrom: [],
               channels: [0],
@@ -924,7 +942,7 @@ describe("meshcore inbound behavior", () => {
 
         expect(runRepeaterOpsCommandMock).not.toHaveBeenCalled();
         expect(sendReply).not.toHaveBeenCalled();
-        expect(inboundRunMock).toHaveBeenCalledTimes(1);
+        expect(inboundRunMock).not.toHaveBeenCalled();
       });
 
       it("does not mistake a longer word for an ops command", async () => {
@@ -934,14 +952,14 @@ describe("meshcore inbound behavior", () => {
 
         await handleMeshcoreInbound({
           message: createMessage({
-            senderNodeId: "!aabbccdd1122",
-            target: "!aabbccdd1122",
+            senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+            target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
             text: "!neighbourhood watch",
           }),
           account: createAccount({
             config: {
               dmPolicy: "allowlist",
-              allowFrom: ["!aabbccdd1122"],
+              allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
               groupPolicy: "disabled",
               groupAllowFrom: [],
               channels: [0],
@@ -957,21 +975,21 @@ describe("meshcore inbound behavior", () => {
         expect(inboundRunMock).toHaveBeenCalledTimes(1);
       });
 
-      it("answers !rstatus <node> directly for an allowlisted sender (issue #34)", async () => {
+      it("default-denies !rstatus for a full-key-allowlisted sender", async () => {
         const sendReply = vi.fn(async () => undefined);
         const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
         setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
 
         await handleMeshcoreInbound({
           message: createMessage({
-            senderNodeId: "!aabbccdd1122",
-            target: "!aabbccdd1122",
+            senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+            target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
             text: "!rstatus !ff00ff00ff00",
           }),
           account: createAccount({
             config: {
               dmPolicy: "allowlist",
-              allowFrom: ["!aabbccdd1122"],
+              allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
               groupPolicy: "disabled",
               groupAllowFrom: [],
               channels: [0],
@@ -982,30 +1000,27 @@ describe("meshcore inbound behavior", () => {
           sendReply,
         });
 
-        expect(runRepeaterOpsCommandMock).toHaveBeenCalledWith({
-          op: "rstatus",
-          targetArg: "!ff00ff00ff00",
-          account: expect.objectContaining({ accountId: "default" }),
-        });
-        expect(sendReply).toHaveBeenCalledWith("!aabbccdd1122", "ops reply", undefined);
+        expect(runRepeaterOpsCommandMock).not.toHaveBeenCalled();
+        expect(sendReply).not.toHaveBeenCalled();
         expect(inboundRunMock).not.toHaveBeenCalled();
+        expect(upsertPairingRequestMock).not.toHaveBeenCalled();
       });
 
-      it("answers !trace <node> directly for an allowlisted sender (issue #33)", async () => {
+      it("default-denies !trace for a full-key-allowlisted sender", async () => {
         const sendReply = vi.fn(async () => undefined);
         const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
         setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
 
         await handleMeshcoreInbound({
           message: createMessage({
-            senderNodeId: "!aabbccdd1122",
-            target: "!aabbccdd1122",
+            senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+            target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
             text: "!trace !ff00ff00ff00",
           }),
           account: createAccount({
             config: {
               dmPolicy: "allowlist",
-              allowFrom: ["!aabbccdd1122"],
+              allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
               groupPolicy: "disabled",
               groupAllowFrom: [],
               channels: [0],
@@ -1016,16 +1031,228 @@ describe("meshcore inbound behavior", () => {
           sendReply,
         });
 
-        expect(runRepeaterOpsCommandMock).toHaveBeenCalledWith({
-          op: "trace",
-          targetArg: "!ff00ff00ff00",
-          account: expect.objectContaining({ accountId: "default" }),
-        });
-        expect(sendReply).toHaveBeenCalledWith("!aabbccdd1122", "ops reply", undefined);
+        expect(runRepeaterOpsCommandMock).not.toHaveBeenCalled();
+        expect(sendReply).not.toHaveBeenCalled();
         expect(inboundRunMock).not.toHaveBeenCalled();
+        expect(upsertPairingRequestMock).not.toHaveBeenCalled();
       });
     });
   });
+
+  describe("PR2 identity, owner, and pairing hardening", () => {
+    const OTHER_NODE = "!" + "22".repeat(32);
+
+    it("refuses configured mesh owner aliases before any host or tool dispatch", async () => {
+      const aliases = [
+        TEST_NODE_ID,
+        TEST_NODE_ID.slice(1),
+        "meshcore:" + TEST_NODE_ID,
+        "meshcore:!" + TEST_NODE_ID.slice(1, 13),
+      ];
+      for (const ownerAllowFrom of aliases) {
+        const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+        const sendReply = vi.fn(async () => undefined);
+        setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+        shouldHandleTextCommandsMock.mockReturnValue(true);
+        hasControlCommandMock.mockReturnValue(true);
+        await handleMeshcoreInbound({
+          message: createMessage({ text: "/status" }),
+          account: createAccount({
+            config: {
+              dmPolicy: "allowlist",
+              allowFrom: [TEST_NODE_ID],
+              groupPolicy: "disabled",
+              commandPingAllowFrom: [TEST_NODE_ID],
+            },
+          }),
+          config: {
+            channels: { meshcore: { host: "192.0.2.10" } },
+            commands: { ownerAllowFrom: [ownerAllowFrom] },
+          } as unknown as CoreConfig,
+          runtime: createRuntimeEnv(),
+          sendReply,
+        });
+        expect(inboundRunMock).not.toHaveBeenCalled();
+        expect(sendReply).not.toHaveBeenCalled();
+        expect(upsertPairingRequestMock).not.toHaveBeenCalled();
+      }
+    });
+
+    it("suppresses host commands and the real owner-only tool surface for ordinary chat", async () => {
+      const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+      setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+      shouldHandleTextCommandsMock.mockReturnValue(true);
+      hasControlCommandMock.mockReturnValue(true);
+      const config = {
+        channels: { meshcore: { host: "192.0.2.10" } },
+        commands: { ownerAllowFrom: [OTHER_NODE] },
+      } as unknown as CoreConfig;
+      await handleMeshcoreInbound({
+        message: createMessage({ text: "/status" }),
+        account: createAccount({
+          config: { dmPolicy: "allowlist", allowFrom: [TEST_NODE_ID], groupPolicy: "disabled" },
+        }),
+        config,
+        runtime: createRuntimeEnv(),
+        sendReply: vi.fn(async () => undefined),
+      });
+      expect(inboundRunMock).toHaveBeenCalledTimes(1);
+      const turn = inboundRunMock.mock.calls[0][0].adapter.resolveTurn();
+      const finalized = finalizeInboundContext(turn.ctxPayload);
+      expect(finalized.CommandAuthorized).toBe(false);
+      expect(finalized.CommandInterpretationSuppressed).toBe(true);
+      expect(finalized.RawBody).toBe("/status");
+
+      const authorization = resolveCommandAuthorization({
+        ctx: finalized,
+        cfg: config,
+        commandAuthorized: finalized.CommandAuthorized === true,
+      });
+      expect(authorization.senderIsOwner).toBe(false);
+      expect(authorization.isAuthorizedSender).toBe(false);
+      const tools = createOpenClawCodingTools({
+        config,
+        workspaceDir: "/tmp",
+        sessionKey: String(finalized.SessionKey),
+        agentId: "meshcore",
+        messageChannel: "meshcore",
+        senderIsOwner: authorization.senderIsOwner,
+      });
+      const names = tools.map((tool) => tool.name);
+      expect(names).not.toContain("gateway");
+      expect(names).not.toContain("automations");
+    });
+
+    it("does not admit legacy prefix, bare-key, or name approvals", async () => {
+      const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+      const runtime = createRuntimeEnv();
+      setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+      readAllowFromStoreMock.mockResolvedValue(["!aabbccdd1122", "TestNode"]);
+      await handleMeshcoreInbound({
+        message: createMessage(),
+        account: createAccount({
+          config: {
+            dmPolicy: "allowlist",
+            allowFrom: ["!aabbccdd1122", TEST_NODE_ID.slice(1), "TestNode"],
+            groupPolicy: "disabled",
+          },
+        }),
+        config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+        runtime,
+        sendReply: vi.fn(async () => undefined),
+      });
+      expect(inboundRunMock).not.toHaveBeenCalled();
+      expect(upsertPairingRequestMock).not.toHaveBeenCalled();
+      expect(runtime.log).toHaveBeenCalledWith(
+        expect.stringContaining("legacy-dm-approvals-ignored"),
+      );
+    });
+
+    it("reserves only three pairing attempts per account and enforces cooldown", async () => {
+      const sendReply = vi.fn(async () => undefined);
+      const keys = [1, 2, 3, 4].map((n) => "!" + n.toString(16).padStart(64, "0"));
+      for (const nodeId of keys) {
+        await handleMeshcoreInbound({
+          message: createMessage({ senderNodeId: nodeId, target: nodeId }),
+          account: createAccount(),
+          config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+          runtime: createRuntimeEnv(),
+          sendReply,
+        });
+      }
+      expect(upsertPairingRequestMock).toHaveBeenCalledTimes(3);
+      expect(sendReply).toHaveBeenCalledTimes(3);
+      expect(sendReply.mock.calls[0][3]).toBe("pairing");
+
+      await handleMeshcoreInbound({
+        message: createMessage({ senderNodeId: keys[0], target: keys[0] }),
+        account: createAccount(),
+        config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+        runtime: createRuntimeEnv(),
+        sendReply,
+      });
+      expect(upsertPairingRequestMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("coalesces concurrent same-key pairing challenges", async () => {
+      let release!: (value: { code: string; created: boolean }) => void;
+      const gate = new Promise<{ code: string; created: boolean }>((resolve) => {
+        release = resolve;
+      });
+      upsertPairingRequestMock.mockReset().mockImplementation(() => gate);
+      const sendReply = vi.fn(async () => undefined);
+      const call = () => handleMeshcoreInbound({
+        message: createMessage(),
+        account: createAccount(),
+        config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+        runtime: createRuntimeEnv(),
+        sendReply,
+      });
+      const first = call();
+      const second = call();
+      await vi.waitFor(() => expect(upsertPairingRequestMock).toHaveBeenCalledTimes(1));
+      release({ code: "CODE", created: true });
+      await Promise.all([first, second]);
+      expect(upsertPairingRequestMock).toHaveBeenCalledTimes(1);
+      expect(sendReply).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects maxSends:1 pairing before pending state and keeps challenge chunks within the default share", async () => {
+      const sendReply = vi.fn(async () => undefined);
+      await handleMeshcoreInbound({
+        message: createMessage(),
+        account: createAccount({
+          config: {
+            ...createAccount().config,
+            sendRateLimit: { maxSends: 1 },
+          },
+        }),
+        config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+        runtime: createRuntimeEnv(),
+        sendReply,
+      });
+      expect(upsertPairingRequestMock).not.toHaveBeenCalled();
+      expect(sendReply).not.toHaveBeenCalled();
+
+      await handleMeshcoreInbound({
+        message: createMessage(),
+        account: createAccount(),
+        config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+        runtime: createRuntimeEnv(),
+        sendReply,
+      });
+      const challengeText = sendReply.mock.calls[0][1] as string;
+      expect(chunkTextWithNumbering(challengeText, 127, true).length).toBeLessThanOrEqual(3);
+      expect(sendReply.mock.calls[0][3]).toBe("pairing");
+    });
+
+    it("applies the separate native ping budget only to the explicit full-key exception", async () => {
+      const sendReply = vi.fn(async () => undefined);
+      const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
+      setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+      const account = createAccount({
+        config: {
+          dmPolicy: "allowlist",
+          allowFrom: [TEST_NODE_ID],
+          groupPolicy: "disabled",
+          commandPingAllowFrom: [TEST_NODE_ID],
+        },
+      });
+      for (let n = 0; n < 4; n += 1) {
+        await handleMeshcoreInbound({
+          message: createMessage({ text: "!ping" }),
+          account,
+          config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+          runtime: createRuntimeEnv(),
+          sendReply,
+        });
+      }
+      expect(sendReply).toHaveBeenCalledTimes(3);
+      expect(inboundRunMock).not.toHaveBeenCalled();
+      expect(upsertPairingRequestMock).not.toHaveBeenCalled();
+    });
+  });
+
 });
 
 
@@ -1046,14 +1273,14 @@ describe("durability redelivery (m7 / minor-1, adversarial re-check)", () => {
         peerId: msg.senderNodeId,
         senderTs: msg.timestamp,
         body: "hello",
-        rawJson: "{}",
+        rawJson: JSON.stringify(msg),
       });
       const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
       setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
       await handleMeshcoreInbound({
         message: msg,
         account: createAccount({
-          config: { dmPolicy: "allowlist", allowFrom: ["!aabbccdd1122"], groupPolicy: "disabled" },
+          config: { dmPolicy: "allowlist", allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"], groupPolicy: "disabled" },
         }),
         config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
         runtime: createRuntimeEnv(),
@@ -1071,7 +1298,7 @@ describe("durability redelivery (m7 / minor-1, adversarial re-check)", () => {
     const store = await openDurabilityStore({ dbPath: join(dir, "d.sqlite") });
     try {
       runRepeaterOpsCommandMock.mockClear();
-      const msg = createMessage({ text: "!trace !ff00ff00ff00", timestamp: 1700000005678 });
+      const msg = createMessage({ text: "!ping", timestamp: 1700000005678 });
       store!.intake({
         accountId: "default",
         dedupeKey: meshcoreDedupeKey({
@@ -1083,13 +1310,13 @@ describe("durability redelivery (m7 / minor-1, adversarial re-check)", () => {
         peerId: msg.senderNodeId,
         senderTs: msg.timestamp,
         body: msg.text,
-        rawJson: "{}",
+        rawJson: JSON.stringify(msg),
       });
       const sendReply = vi.fn(async () => undefined);
       await handleMeshcoreInbound({
         message: msg,
         account: createAccount({
-          config: { dmPolicy: "allowlist", allowFrom: ["!aabbccdd1122"], groupPolicy: "disabled" },
+          config: { dmPolicy: "allowlist", allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"], groupPolicy: "disabled", commandPingAllowFrom: [TEST_NODE_ID] },
         }),
         config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
         runtime: createRuntimeEnv(),

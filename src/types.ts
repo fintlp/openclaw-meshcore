@@ -9,6 +9,7 @@ import type {
 } from "openclaw/plugin-sdk/config-contracts";
 import type { BaseProbeResult } from "openclaw/plugin-sdk/core";
 import type { IdentityBinding, PrefixConsistency, PrefixMatch } from "./identity-binding.js";
+import type { DmIdentityDecision, DmIdentityEvidence } from "./dm-identity.js";
 
 export type MeshcoreGroupConfig = {
   requireMention?: boolean;
@@ -77,8 +78,10 @@ export type MeshcoreAccountConfig = {
   advertIntervalHours?: number;
   /** Self-advert scope: "zero-hop" (direct-range only, default) or "flood" (mesh-wide). */
   advertScope?: "zero-hop" | "flood";
-  /** When true (default), the plugin answers exact !ping and !status DMs directly without dispatching an agent session. Only for senders that pass the DM gate. */
+  /** Feature toggle for plugin-native command replies. This never confers identity or command authorization. */
   commandRepliesEnabled?: boolean;
+  /** Optional compatibility exception: only these canonical full keys may receive a budgeted native !ping reply. */
+  commandPingAllowFrom?: Array<string | number>;
   /** Maximum number of entries in the persisted advert contact book (default 500, 0=unbounded). */
   contactBookMaxEntries?: number;
   /** Inbound durability: at-least-once delivery across gateway restarts (#48). */
@@ -127,7 +130,11 @@ export type MeshcoreInboundMessage = {
   meshChannel: number;
   replyToId?: string;
   snr?: number;
-  /** Security metadata derived from the wire frame and the contact book. */
+  /** Per-frame account-scoped live radio attribution. Only unique DMs enter ingress. */
+  dmIdentity?: DmIdentityDecision;
+  /** Versioned intake evidence persisted with durable rows; it is not authority by itself. */
+  dmIdentityEvidence?: DmIdentityEvidence;
+  /** Security metadata derived from the wire frame and the selected full key. */
   meshSecurity: MeshcoreMessageSecurity;
 };
 

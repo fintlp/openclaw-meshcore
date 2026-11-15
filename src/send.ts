@@ -98,6 +98,8 @@ type SendMeshcoreOptions = {
   replyTo?: string;
   target?: string;
   deviceHandle?: MeshcoreDeviceHandle;
+  /** Trusted internal purpose; pairing is set only by the inbound pairing controller. */
+  purpose?: "dm" | "pairing";
   /** Internal override for the queue watchdog budget (tests only). */
   sendQueueBudgetMs?: number;
   /** Internal override for the retry backoff clock (tests only). */
@@ -421,6 +423,7 @@ export async function sendMessageMeshcore(
         account.config.sendRateLimit as Record<string, unknown> | undefined,
       ),
       scope: "DM",
+      purpose: opts.purpose ?? "dm",
     });
 
     const sendQueueBudgetMs =

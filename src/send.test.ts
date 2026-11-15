@@ -212,6 +212,36 @@ describe("sendMessageMeshcore", () => {
     expect(sendTextMessage).not.toHaveBeenCalled();
   });
 
+  it("rejects pairing at intake when maxSends:1 leaves no pairing packet", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    await expect(
+      sendMessageMeshcore(TEST_NODE_ID, "challenge", {
+        cfg: createConfig({ sendRateLimit: { maxSends: 1 } }),
+        purpose: "pairing",
+      }),
+    ).rejects.toThrow(/pairing/i);
+    expect(sendTextMessage).not.toHaveBeenCalled();
+  });
+
+  it("charges a multi-chunk pairing reply against its ceiling even with the DM limiter disabled", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+    const cfg = createConfig({
+      textChunkLimit: 1,
+      sendRateLimit: { enabled: false, maxSends: 20 },
+    });
+
+    await expect(
+      sendMessageMeshcore(TEST_NODE_ID, "abcd", { cfg, purpose: "pairing" }),
+    ).rejects.toThrow(/pairing packet budget/i);
+    expect(sendTextMessage).not.toHaveBeenCalled();
+
+    await sendMessageMeshcore(TEST_NODE_ID, "abc", { cfg, purpose: "pairing" });
+    expect(sendTextMessage).toHaveBeenCalledTimes(3);
+  });
+
   it("allows sends within budget, then refuses until the window slides", async () => {
     const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
     getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));

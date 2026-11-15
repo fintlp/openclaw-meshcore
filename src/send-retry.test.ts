@@ -242,6 +242,25 @@ describe("sendMessageMeshcore delivery-report retry (issue #25)", () => {
     expect(sendTextMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("charges every pairing retry against the smaller pairing partition", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1, estTimeout: 100 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    const error = await sendMessageMeshcore(TEST_NODE_ID, "pairing retry", {
+      cfg: createConfig({
+        sendRetry: { enabled: true, maxAttempts: 3, backoffMs: 1_000 },
+        sendRateLimit: { enabled: true, maxSends: 3, windowMs: 600_000 },
+      }),
+      purpose: "pairing",
+      retryBackoffSleep: async () => {},
+    }).catch((e: unknown) => e);
+
+    // maxSends=3 leaves a pairing share of two. Attempt three is refused
+    // before any frame, after exactly two transmissions.
+    expect(error).toBeInstanceOf(SendRateLimitExceededError);
+    expect(sendTextMessage).toHaveBeenCalledTimes(2);
+  });
+
   it("rate-limit budget sized for all attempts lets them through and the failure is a delivery failure", async () => {
     const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1, estTimeout: 100 }));
     getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));

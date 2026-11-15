@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assertNativePingRateLimit,
   assertSendRateLimit,
   clearSendRateLimitState,
   resolveSendRateLimitConfig,
@@ -88,5 +89,76 @@ describe("assertSendRateLimit", () => {
     expect(() =>
       assertSendRateLimit({ accountId: "alpha", packets: 1, config, nowMs: BASE_NOW + 1 }),
     ).toThrow(SendRateLimitExceededError);
+  });
+
+  it("partitions pairing packets from normal DMs and counts every chunk", () => {
+    const config = resolveSendRateLimitConfig({ maxSends: 20 });
+    for (let i = 0; i < 3; i += 1) {
+      assertSendRateLimit({
+        accountId: "default", packets: 1, config, purpose: "pairing", nowMs: BASE_NOW + i,
+      });
+    }
+    expect(() =>
+      assertSendRateLimit({
+        accountId: "default", packets: 1, config, purpose: "pairing", nowMs: BASE_NOW + 4,
+      }),
+    ).toThrow(/pairing packet budget/i);
+
+    // Pairing may never consume the final normal-DM allocation, and all
+    // packets share the account's overall cap.
+    assertSendRateLimit({ accountId: "default", packets: 17, config, nowMs: BASE_NOW + 5 });
+    expect(() =>
+      assertSendRateLimit({ accountId: "default", packets: 1, config, nowMs: BASE_NOW + 6 }),
+    ).toThrow(SendRateLimitExceededError);
+  });
+
+  it("enforces the three-packet pairing ceiling even when the DM limiter is disabled", () => {
+    const config = resolveSendRateLimitConfig({ enabled: false, maxSends: 20 });
+    assertSendRateLimit({ accountId: "default", packets: 50, config, nowMs: BASE_NOW });
+    assertSendRateLimit({
+      accountId: "default", packets: 3, config, purpose: "pairing", nowMs: BASE_NOW + 1,
+    });
+    expect(() =>
+      assertSendRateLimit({
+        accountId: "default", packets: 1, config, purpose: "pairing", nowMs: BASE_NOW + 2,
+      }),
+    ).toThrow(/pairing packet budget/i);
+  });
+
+  it("rejects pairing at maxSends:1 without consuming the sole normal-DM packet", () => {
+    const config = resolveSendRateLimitConfig({ maxSends: 1 });
+    expect(() =>
+      assertSendRateLimit({
+        accountId: "default", packets: 1, config, purpose: "pairing", nowMs: BASE_NOW,
+      }),
+    ).toThrow(/maxSends.*1|pairing.*disabled/i);
+    assertSendRateLimit({ accountId: "default", packets: 1, config, nowMs: BASE_NOW + 1 });
+  });
+
+  it("budgets native ping replies separately at three per account per window", () => {
+    for (const accountId of ["default", "default", "default", "other"]) {
+      assertNativePingRateLimit({ accountId, nowMs: BASE_NOW });
+    }
+    expect(() => assertNativePingRateLimit({ accountId: "default", nowMs: BASE_NOW + 1 }))
+      .toThrow(/native !ping reply budget/i);
+    // Pairing and ordinary packet sends do not spend this independent budget.
+    const config = resolveSendRateLimitConfig({ maxSends: 4 });
+    assertSendRateLimit({
+      accountId: "default", packets: 3, config, purpose: "pairing", nowMs: BASE_NOW + 2,
+    });
+    expect(() => assertNativePingRateLimit({ accountId: "default", nowMs: BASE_NOW + 3 }))
+      .toThrow(SendRateLimitExceededError);
+    assertNativePingRateLimit({ accountId: "default", nowMs: BASE_NOW + 600_001 });
+  });
+
+  it("refuses an over-budget multi-chunk challenge atomically", () => {
+    const config = resolveSendRateLimitConfig({ maxSends: 5 });
+    expect(() =>
+      assertSendRateLimit({
+        accountId: "default", packets: 4, config, purpose: "pairing", nowMs: BASE_NOW,
+      }),
+    ).toThrow(/pairing packet budget/i);
+    // No portion of the refused challenge was charged.
+    assertSendRateLimit({ accountId: "default", packets: 5, config, nowMs: BASE_NOW + 1 });
   });
 });
