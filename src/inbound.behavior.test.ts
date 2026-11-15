@@ -1121,8 +1121,20 @@ describe("meshcore inbound behavior", () => {
         senderIsOwner: authorization.senderIsOwner,
       });
       const names = tools.map((tool) => tool.name);
-      expect(names).not.toContain("gateway");
-      expect(names).not.toContain("automations");
+      for (const name of ["gateway", "automations"]) {
+        if (!names.includes(name)) continue;
+        // 2026.11.3 keeps definitions visible for prompt-prefix stability and
+        // gates execution instead of removing them (2026.10.5 removes them).
+        // Exercise the real wrapper with a read-only input; it must refuse
+        // before any control-plane action can run.
+        const tool = tools.find((candidate) => candidate.name === name)!;
+        const result = await (tool.execute as unknown as (
+          toolCallId: string,
+          input: unknown,
+        ) => Promise<unknown>)("pr2-owner-gate-probe", { action: "list" });
+        expect(JSON.stringify(result)).toContain("owner");
+        expect(JSON.stringify(result)).toContain("gated");
+      }
     });
 
     it("does not admit legacy prefix, bare-key, or name approvals", async () => {
