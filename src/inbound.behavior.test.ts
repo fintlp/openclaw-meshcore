@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { finalizeInboundContext } from "openclaw/plugin-sdk/reply-runtime";
+import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
 import { handleMeshcoreInbound } from "./inbound.js";
 import { meshcoreDedupeKey, openDurabilityStore } from "./durability.js";
 import {
@@ -8,7 +9,7 @@ import {
   writeNodeStatusSnapshot,
 } from "./node-status.js";
 import { clearMeshcoreRuntime, getMeshcoreRuntime, setMeshcoreRuntime } from "./runtime.js";
-import type { CoreConfig, MeshcoreInboundMessage, ResolvedMeshcoreAccount } from "./types.js";
+import type { CoreConfig, MeshcoreGroupConfig, MeshcoreInboundMessage, ResolvedMeshcoreAccount } from "./types.js";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1099,5 +1100,266 @@ describe("durability redelivery (m7 / minor-1, adversarial re-check)", () => {
     } finally {
       store?.close();
     }
+  });
+});
+
+
+describe("group tool-policy route and command activation hardening", () => {
+  beforeEach(async () => {
+    const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/routing")>(
+      "openclaw/plugin-sdk/routing",
+    );
+    vi.mocked(resolveAgentRoute).mockReset().mockImplementation(actual.resolveAgentRoute);
+    readAllowFromStoreMock.mockReset().mockResolvedValue([]);
+    shouldHandleTextCommandsMock.mockReset().mockReturnValue(false);
+    hasControlCommandMock.mockReset().mockReturnValue(false);
+    buildMentionRegexesMock.mockReset().mockReturnValue([]);
+    matchesMentionPatternsMock.mockReset().mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    clearMeshcoreRuntime();
+    vi.mocked(resolveAgentRoute).mockReset().mockImplementation(({ peer }) => ({
+      agentId: "meshcore",
+      sessionKey: `meshcore:${peer?.kind === "group" ? "channel:0" : peer?.id ?? "unknown"}`,
+      accountId: "default",
+    }));
+  });
+
+  function groupAccount(group: MeshcoreGroupConfig = {}) {
+    return createAccount({
+      config: {
+        dmPolicy: "pairing",
+        allowFrom: [],
+        groupPolicy: "allowlist",
+        channels: [0],
+        groupAllowFrom: [],
+        groups: { "channel:0": { requireMention: false, ...group } },
+      },
+    });
+  }
+
+  function routeConfig(
+    groupScope: "main" | "per-group",
+    bindingScope?: "main" | "per-group",
+  ): CoreConfig {
+    return {
+      session: { groupScope },
+      ...(bindingScope
+        ? {
+            bindings: [
+              {
+                agentId: "meshcore",
+                match: {
+                  channel: "meshcore",
+                  accountId: "default",
+                  peer: { kind: "group", id: "channel:0" },
+                },
+                session: { groupScope: bindingScope },
+              },
+            ],
+          }
+        : {}),
+      channels: { meshcore: { host: "192.0.2.10" } },
+    } as CoreConfig;
+  }
+
+  function groupMessage(text = "group turn") {
+    return createMessage({
+      isGroup: true,
+      target: "channel:0",
+      senderNodeId: "channel:0",
+      text,
+      timestamp: 1790000000000,
+    });
+  }
+
+  function durabilityFake() {
+    return {
+      findDuplicate: vi.fn(() => null),
+      intake: vi.fn(() => ({ id: 7, duplicate: false })),
+      claim: vi.fn(() => "claimed"),
+      releaseClaim: vi.fn(),
+      deadLetter: vi.fn(),
+      markDispatched: vi.fn(),
+      markComplete: vi.fn(),
+      metrics: vi.fn(() => ({ pending: 0, dead: 0, duplicates: 0, degraded: false })),
+    };
+  }
+
+  async function runGroup(params: {
+    account?: ResolvedMeshcoreAccount;
+    config?: CoreConfig;
+    replayOf?: number;
+    onAdmittedGroup?: ReturnType<typeof vi.fn>;
+  } = {}) {
+    const inboundRun = vi.fn(async () => ({ dispatched: true }));
+    setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRun) as never);
+    const runtime = createRuntimeEnv();
+    const durability = durabilityFake();
+    await handleMeshcoreInbound({
+      message: groupMessage(),
+      account: params.account ?? groupAccount({ tools: { deny: ["write"] } }),
+      config: params.config ?? routeConfig("main"),
+      runtime,
+      durability: durability as never,
+      ...(params.replayOf !== undefined ? { replayOf: params.replayOf } : {}),
+      ...(params.onAdmittedGroup ? { onAdmittedGroup: params.onAdmittedGroup } : {}),
+    });
+    return { inboundRun, runtime, durability };
+  }
+
+  it("refuses a main-scoped protected group before intake and logs account, channel, and remediation", async () => {
+    const r = await runGroup();
+
+    expect(r.inboundRun).not.toHaveBeenCalled();
+    expect(r.durability.intake).not.toHaveBeenCalled();
+    expect(resolveAgentRoute).toHaveBeenCalledTimes(1);
+    expect(r.runtime.log).toHaveBeenCalledWith(expect.stringContaining("account=default"));
+    expect(r.runtime.log).toHaveBeenCalledWith(expect.stringContaining("channel:0"));
+    expect(r.runtime.log).toHaveBeenCalledWith(expect.stringContaining('groupScope="per-group"'));
+    expect(r.runtime.log).toHaveBeenCalledWith(expect.stringContaining("effective binding"));
+  });
+
+  it("allows a protected group on a per-group route and resolves the route exactly once", async () => {
+    const r = await runGroup({ config: routeConfig("per-group") });
+
+    expect(r.inboundRun).toHaveBeenCalledTimes(1);
+    expect(r.durability.intake).toHaveBeenCalledTimes(1);
+    expect(r.durability.deadLetter).not.toHaveBeenCalled();
+    expect(resolveAgentRoute).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors a binding that overrides a per-group global default to main", async () => {
+    const r = await runGroup({ config: routeConfig("per-group", "main") });
+
+    expect(r.inboundRun).not.toHaveBeenCalled();
+    expect(r.durability.intake).not.toHaveBeenCalled();
+    expect(r.runtime.log).toHaveBeenCalledWith(expect.stringContaining('groupScope="main"'));
+  });
+
+  it("honors a binding that restores per-group under a main global default", async () => {
+    const r = await runGroup({ config: routeConfig("main", "per-group") });
+
+    expect(r.inboundRun).toHaveBeenCalledTimes(1);
+    expect(r.durability.intake).toHaveBeenCalledTimes(1);
+    expect(r.durability.deadLetter).not.toHaveBeenCalled();
+  });
+
+  it("dead-letters a protected replay with the terminal group-scope-main reason", async () => {
+    const r = await runGroup({ replayOf: 7 });
+
+    expect(r.inboundRun).not.toHaveBeenCalled();
+    expect(r.durability.intake).not.toHaveBeenCalled();
+    expect(r.durability.deadLetter).toHaveBeenCalledWith("default", 7, "group-scope-main");
+    expect(r.durability.releaseClaim).not.toHaveBeenCalled();
+  });
+
+  it("allows an unprotected group to use a main route as a positive control", async () => {
+    const r = await runGroup({ account: groupAccount({}) });
+
+    expect(r.inboundRun).toHaveBeenCalledTimes(1);
+    expect(r.durability.intake).toHaveBeenCalledTimes(1);
+    expect(r.durability.deadLetter).not.toHaveBeenCalled();
+  });
+
+  function commandGroupAccount(requireMention = true) {
+    return createAccount({
+      config: {
+        dmPolicy: "pairing",
+        allowFrom: [],
+        groupPolicy: "allowlist",
+        channels: [0],
+        groupAllowFrom: ["*"],
+        groups: { "channel:0": { requireMention } },
+      },
+    });
+  }
+
+  async function runGroupCommand(params: {
+    text: string;
+    mentioned?: boolean;
+    requireMention?: boolean;
+    disabled?: boolean;
+    digest?: boolean;
+  }) {
+    const inboundRun = vi.fn(async () => ({ dispatched: true }));
+    setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRun) as never);
+    shouldHandleTextCommandsMock.mockReturnValue(true);
+    hasControlCommandMock.mockImplementation((body) => body.startsWith("/status"));
+    matchesMentionPatternsMock.mockImplementation((body) => body.includes("@verax"));
+    const onAdmittedGroup = vi.fn();
+    const account = params.disabled
+      ? createAccount({
+          config: {
+            dmPolicy: "pairing",
+            allowFrom: [],
+            groupPolicy: "disabled",
+            channels: [0],
+            groupAllowFrom: ["*"],
+            groups: { "channel:0": { requireMention: params.requireMention ?? true } },
+          },
+        })
+      : commandGroupAccount(params.requireMention);
+    await handleMeshcoreInbound({
+      message: groupMessage(params.text),
+      account,
+      config: routeConfig("per-group"),
+      runtime: createRuntimeEnv(),
+      ...(params.digest ? { onAdmittedGroup } : {}),
+    });
+    return { inboundRun, onAdmittedGroup };
+  }
+
+  it("makes /status without a mention fail requireMention even for an admitted sender", async () => {
+    const r = await runGroupCommand({ text: "/status" });
+
+    expect(r.inboundRun).not.toHaveBeenCalled();
+    expect(r.onAdmittedGroup).not.toHaveBeenCalled();
+  });
+
+  it("dispatches a genuinely mentioned slash command as plain text with command authority suppressed", async () => {
+    const r = await runGroupCommand({ text: "/status @verax", mentioned: true });
+
+    expect(r.inboundRun).toHaveBeenCalledTimes(1);
+    const inbound = r.inboundRun.mock.calls[0][0];
+    const turn = inbound.adapter.resolveTurn();
+    expect(turn.ctxPayload).toEqual(
+      expect.objectContaining({
+        Body: "/status @verax",
+        RawBody: "/status @verax",
+        CommandBody: "/status @verax",
+        CommandAuthorized: false,
+        CommandInterpretationSuppressed: true,
+        GroupSubject: "channel:0",
+        SenderName: "TestNode",
+      }),
+    );
+    expect(turn.ctxPayload.Body).not.toContain("GroupSubject");
+    expect(turn.ctxPayload.Body).not.toContain("SenderName");
+  });
+
+  it("keeps digest mode as one admitted entry with no route or agent turn", async () => {
+    const r = await runGroupCommand({ text: "/status @verax", mentioned: true, digest: true });
+
+    expect(r.onAdmittedGroup).toHaveBeenCalledTimes(1);
+    expect(r.onAdmittedGroup).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "/status @verax", isGroup: true }),
+    );
+    expect(r.inboundRun).not.toHaveBeenCalled();
+    expect(resolveAgentRoute).not.toHaveBeenCalled();
+  });
+
+  it("keeps a disabled group from both digest intake and agent dispatch", async () => {
+    const r = await runGroupCommand({
+      text: "/status @verax",
+      mentioned: true,
+      disabled: true,
+      digest: true,
+    });
+
+    expect(r.onAdmittedGroup).not.toHaveBeenCalled();
+    expect(r.inboundRun).not.toHaveBeenCalled();
+    expect(resolveAgentRoute).not.toHaveBeenCalled();
   });
 });

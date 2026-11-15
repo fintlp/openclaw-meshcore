@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import fs from "node:fs";
+import Ajv from "ajv";
 import { buildManifest } from "../scripts/manifest-builder.js";
+import { meshcorePlugin } from "./channel.js";
 import { MeshcoreAccountSchema, MeshcoreConfigSchema } from "./config-schema.js";
 import { meshcoreChannelConfigUiHints } from "./config-ui-hints.js";
+import type { CoreConfig } from "./types.js";
 
 function expectValidConfig(result: ReturnType<typeof MeshcoreConfigSchema.safeParse>) {
   expect(result.success).toBe(true);
@@ -867,5 +870,140 @@ describe("meshcore config schema", () => {
 
     const issues = checkManifestDrift(manifest);
     expect(issues).toEqual([]);
+  });
+});
+
+
+describe("group-wide tool policy hardening", () => {
+  function compileManifestSchema() {
+    const manifest = JSON.parse(fs.readFileSync("./openclaw.plugin.json", "utf8"));
+    return new Ajv({ strict: false }).compile(manifest.channelConfigs.meshcore.schema);
+  }
+
+  function expectToolsBySenderRejected(config: Record<string, unknown>) {
+    const issues = expectInvalidConfig(
+      MeshcoreConfigSchema.safeParse(config) as ReturnType<typeof MeshcoreConfigSchema.safeParse>,
+    );
+    expect(
+      issues.some((issue) => "keys" in issue && issue.keys.includes("toolsBySender")),
+    ).toBe(true);
+
+    const validate = compileManifestSchema();
+    expect(validate(config)).toBe(false);
+    expect(validate.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          keyword: "additionalProperties",
+          params: { additionalProperty: "toolsBySender" },
+        }),
+      ]),
+    );
+  }
+
+  it("rejects toolsBySender on an exact root group in runtime and manifest validation", () => {
+    const base = MeshcoreConfigSchema.parse({ host: "192.0.2.10" });
+    expectToolsBySenderRejected({
+      ...base,
+      groups: {
+        "channel:0": { toolsBySender: { "!aabbccdd": { deny: ["exec"] } } },
+      },
+    });
+  });
+
+  it("rejects toolsBySender on a wildcard root group in runtime and manifest validation", () => {
+    const base = MeshcoreConfigSchema.parse({ host: "192.0.2.10" });
+    expectToolsBySenderRejected({
+      ...base,
+      groups: {
+        "*": { toolsBySender: { "!aabbccdd": { deny: ["exec"] } } },
+      },
+    });
+  });
+
+  it("rejects toolsBySender in a named account in runtime and manifest validation", () => {
+    const base = MeshcoreConfigSchema.parse({ host: "192.0.2.10" });
+    const account = MeshcoreAccountSchema.parse({ host: "192.0.2.11" });
+    expectToolsBySenderRejected({
+      ...base,
+      accounts: {
+        ops: {
+          ...account,
+          groups: {
+            "channel:0": { toolsBySender: { "!aabbccdd": { deny: ["exec"] } } },
+          },
+        },
+      },
+    });
+  });
+
+  it("removes toolsBySender from every canonical group schema copy", () => {
+    const canonical = JSON.parse(
+      fs.readFileSync("./src/meshcore-channel-config.schema.json", "utf8"),
+    );
+    expect(canonical.properties.groups.additionalProperties.properties.toolsBySender).toBeUndefined();
+    expect(
+      canonical.properties.accounts.additionalProperties.properties.groups.additionalProperties
+        .properties.toolsBySender,
+    ).toBeUndefined();
+    expect(
+      canonical.$defs.account.properties.groups.additionalProperties.properties.toolsBySender,
+    ).toBeUndefined();
+  });
+
+  function resolveGroupTools(config: CoreConfig, accountId: string, groupId?: string) {
+    const resolver = meshcorePlugin.groups?.resolveToolPolicy;
+    expect(resolver).toBeTypeOf("function");
+    return resolver!({ cfg: config, accountId, groupId } as never);
+  }
+
+  it("preserves an exact group's allow, alsoAllow, and deny policy as authored", () => {
+    const exact = { allow: ["read"], alsoAllow: ["write"], deny: ["exec"] };
+    const config = {
+      channels: {
+        meshcore: {
+          host: "192.0.2.10",
+          groups: {
+            "*": { tools: { deny: ["wildcard"] } },
+            "channel:0": { tools: exact },
+          },
+        },
+      },
+    } as CoreConfig;
+
+    expect(resolveGroupTools(config, "default", "channel:0")).toEqual(exact);
+  });
+
+  it("falls back to wildcard tools when an exact group has no tools", () => {
+    const wildcard = { allow: ["read"], alsoAllow: ["write"], deny: ["exec"] };
+    const config = {
+      channels: {
+        meshcore: {
+          host: "192.0.2.10",
+          groups: {
+            "*": { tools: wildcard },
+            "channel:0": { requireMention: true },
+          },
+        },
+      },
+    } as CoreConfig;
+
+    expect(resolveGroupTools(config, "default", "channel:0")).toEqual(wildcard);
+    expect(resolveGroupTools(config, "default")).toBeUndefined();
+  });
+
+  it("returns a neutral account-owned policy for an explicit empty account group map", () => {
+    const config = {
+      channels: {
+        meshcore: {
+          host: "192.0.2.10",
+          groups: { "channel:0": { tools: { deny: ["root-policy"] } } },
+          accounts: {
+            ops: { host: "192.0.2.11", groups: {} },
+          },
+        },
+      },
+    } as CoreConfig;
+
+    expect(resolveGroupTools(config, "ops", "channel:0")).toEqual({ deny: [] });
   });
 });

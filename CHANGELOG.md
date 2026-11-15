@@ -6,6 +6,33 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## Unreleased
+
+Security
+
+- **Removed unenforceable group-local `toolsBySender`.** MeshCore group frames
+  identify the channel, not the radio author, so per-sender group policy could
+  never be applied. Runtime and manifest validation now reject the key in exact
+  groups, wildcard groups, and named accounts. **Migration:** move restrictions
+  to `groups["channel:N"].tools.deny` or the receiving agent's policy; when old
+  sender entries differ, choose one deliberate group-wide policy. Existing
+  `groupAllowFrom` / `groups.*.allowFrom` admission behavior is preserved, but
+  documented as channel-level rather than per-author. Group-wide exact/wildcard
+  `tools` now resolve through a shared account-owned helper, with neutral
+  `{ deny: [] }` preventing cross-account host fallback.
+- **Protected groups cannot silently shed tools through `groupScope: "main"`.**
+  Inbound resolves the effective route once, after access checks and the digest
+  return but before durability intake. A configured group policy on a
+  main-scoped route refuses the turn with account/channel remediation; replay
+  dead-letters as `group-scope-main`. Per-group routes, binding overrides in
+  both directions, and unprotected main-scope positive controls are tested.
+- **Group commands can no longer bypass `requireMention`.** Group activation
+  disables text-command handling and omits command resolution. Mentionless
+  `/status` fails mention gating; a genuinely mentioned slash command reaches
+  the agent as plain text with command authority and interpretation suppressed.
+  Digest intake, disabled groups, DM commands, and receive-only group sends are
+  unchanged.
+
 ## 2026.10.20 - 2026-11-09
 
 Packaging

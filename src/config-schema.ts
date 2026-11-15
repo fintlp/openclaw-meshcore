@@ -14,7 +14,6 @@ const MeshcoreGroupSchema = z
   .object({
     requireMention: z.boolean().optional(),
     tools: ToolPolicySchema,
-    toolsBySender: z.record(z.string(), ToolPolicySchema).optional(),
     skills: z.array(z.string()).optional(),
     enabled: z.boolean().optional(),
     allowFrom: z.array(z.union([z.string(), z.number()])).optional(),

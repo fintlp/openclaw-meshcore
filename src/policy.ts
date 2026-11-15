@@ -1,4 +1,6 @@
-import type { MeshcoreGroupConfig } from "./types.js";
+import type { GroupToolPolicyConfig } from "openclaw/plugin-sdk/config-contracts";
+import { resolveMeshcoreAccount } from "./accounts.js";
+import type { CoreConfig, MeshcoreGroupConfig } from "./types.js";
 
 export type MeshcoreGroupMatch = {
   allowed: boolean;
@@ -63,4 +65,34 @@ export function resolveMeshcoreRequireMention(params: {
     return params.wildcardConfig.requireMention;
   }
   return false;
+}
+
+/** True only when the exact-or-wildcard group has an authored tool policy. */
+export function hasMeshcoreGroupToolPolicy(
+  match: Pick<MeshcoreGroupMatch, "groupConfig" | "wildcardConfig">,
+): boolean {
+  return match.groupConfig?.tools !== undefined || match.wildcardConfig?.tools !== undefined;
+}
+
+/**
+ * Resolve only group-wide tools. MeshCore group frames do not identify their
+ * radio authors, so sender-scoped policy is neither meaningful nor supported.
+ * A supplied group id always gets an account-owned policy: neutral when no
+ * exact/wildcard tools apply, preventing generic host fallback into another
+ * account's group map.
+ */
+export function resolveMeshcoreGroupToolPolicy(params: {
+  cfg: CoreConfig;
+  accountId?: string | null;
+  target?: string | null;
+}): GroupToolPolicyConfig | undefined {
+  if (!params.target?.trim()) {
+    return undefined;
+  }
+  const account = resolveMeshcoreAccount({ cfg: params.cfg, accountId: params.accountId });
+  const match = resolveMeshcoreGroupMatch({
+    groups: account.config.groups,
+    target: params.target,
+  });
+  return match.groupConfig?.tools ?? match.wildcardConfig?.tools ?? { deny: [] };
 }
