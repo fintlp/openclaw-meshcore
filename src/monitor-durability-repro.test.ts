@@ -377,6 +377,37 @@ describe("monitor durability replay repros", () => {
     await rejected;
   });
 
+
+  it("dead-letters when stored evidence digest differs from the currently selected key", async () => {
+    const message = makeMessage("tampered evidence digest");
+    message.dmIdentityEvidence = {
+      ...message.dmIdentityEvidence!,
+      fullKeySha256: "0".repeat(64),
+    };
+    const intake = store!.intake({
+      accountId: "default",
+      dedupeKey: keyFor(message),
+      kind: "direct",
+      peerId: message.senderNodeId,
+      senderTs: message.timestamp,
+      body: message.text,
+      rawJson: JSON.stringify(message),
+    });
+    const deadLetter = vi.spyOn(store!, "deadLetter");
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const monitorPromise = monitorMeshcoreProvider(monitorOptions());
+    const rejected = expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+
+    await vi.waitFor(() => {
+      expect(deadLetter).toHaveBeenCalledWith("default", intake.id, "dm-identity-stale");
+    });
+    expect(store!.findDuplicate("default", keyFor(message))?.state).toBe("dead");
+    expect(handleMeshcoreInboundMock).not.toHaveBeenCalled();
+    handle.connection.emit("disconnected");
+    await rejected;
+  });
+
   it("dead-letters an ambiguous denied replay without an agent turn, pairing, command, or radio reply", async () => {
     const message = makeMessage("!ping");
     const intake = store!.intake({

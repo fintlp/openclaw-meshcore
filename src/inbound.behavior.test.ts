@@ -1098,6 +1098,8 @@ describe("meshcore inbound behavior", () => {
       });
       expect(inboundRunMock).toHaveBeenCalledTimes(1);
       const turn = inboundRunMock.mock.calls[0][0].adapter.resolveTurn();
+      expect(turn.ctxPayload.CommandAuthorized).toBe(false);
+      expect(turn.ctxPayload.CommandInterpretationSuppressed).toBe(true);
       const finalized = finalizeInboundContext(turn.ctxPayload);
       expect(finalized.CommandAuthorized).toBe(false);
       expect(finalized.CommandInterpretationSuppressed).toBe(true);
