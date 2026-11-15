@@ -692,13 +692,15 @@ export function resolveContactByNodeId(
   if (!hex || (hex.length !== 12 && hex.length !== 64)) {
     return undefined;
   }
+  if (hex.length === 64) {
+    return contacts.find((contact) => bytesToHex(contact.publicKey).toLowerCase() === hex);
+  }
   const decision = decideDmIdentity({
     accountId: "outbound-target",
-    wirePrefix: hexToBytes(hex.slice(0, 12)),
+    wirePrefix: hexToBytes(hex),
     radioContacts: contacts,
   });
   if (decision.status !== "unique") return undefined;
-  if (hex.length === 64 && decision.fullKey !== hex) return undefined;
   return contacts.find(
     (contact) => bytesToHex(contact.publicKey).toLowerCase() === decision.fullKey,
   );
