@@ -8,6 +8,9 @@ canonical source for that text.
 
 ## Unreleased
 
+**Security-breaking DM identity, replay, command, owner-route, and pairing
+changes. Read [docs/MIGRATION.md](docs/MIGRATION.md) before upgrading.**
+
 Security
 
 - **Removed unenforceable group-local `toolsBySender`.** MeshCore group frames
@@ -30,8 +33,80 @@ Security
   disables text-command handling and omits command resolution. Mentionless
   `/status` fails mention gating; a genuinely mentioned slash command reaches
   the agent as plain text with command authority and interpretation suppressed.
-  Digest intake, disabled groups, DM commands, and receive-only group sends are
+  Digest intake, disabled groups, and receive-only group sends are unchanged.
+- **Unique account-scoped DM attribution (PR 2 item 4).** Every inbound DM
+  now requires exactly six valid wire-prefix bytes and one unique full
+  32-byte key in the receiving account's live synchronized contacts. Duplicate
+  records for one key are deduplicated; conflicting/ambiguous mappings and
+  cross-account evidence are refused. One bounded, coalesced refresh may
+  resolve a stale snapshot. Cache-only matches never establish inbound
+  identity. The selected full key drives routing, facts, and replies. Exact
+  full-key outbound targets remain usable; abbreviated targets require unique
+  account-scoped resolution. Identity grades remain diagnostics, and mismatch
+  is refused.
+- **Canonical DM approvals.** Config `allowFrom` and pairing-store approvals
+  now require `!` + 64 hex. Legacy prefixes, bare keys, names, and numbers are
+  ignored with a bounded warning until the operator reverifies them. Full-key
+  chat allowlisting remains supported. Wildcard/open policy admits only
+  unique addressable peers and grants chat access, never owner or command
+  proof.
+- **Versioned replay evidence (item 5).** DM durability rows now persist
+  `rawJson.dmIdentityEvidence` v1 containing exact `wirePrefixHex` and
+  `fullKeySha256` (SHA-256 of the raw full key). Replay revalidates the current unique mapping, digest,
+  canonical route, and current access/config/command policy. Missing evidence,
+  ambiguity, and stale mappings dead-letter as `dm-identity-no-evidence`,
+  `dm-identity-ambiguous`, and `dm-identity-stale`; temporary sync failure
+  releases the claim for bounded retry. Group rows are unchanged and native
+  command markers remain non-replayable. Evidence records the intake mapping,
+  not cryptographic sender proof.
+- **Host and native command default-deny (item 6).** Stock prefix-addressed
+  DMs receive no host command authority. Native `!ping`, `!status`,
+  `!neighbours`, `!rstatus`, and `!trace` are denied even for uniquely mapped
+  or full-key-chat-allowlisted peers. `commandRepliesEnabled` is only a
+  feature toggle. The sole exception is explicit canonical
+  `commandPingAllowFrom` + unique mapping + normal DM admission + enabled
+  replies, with a separate 3 native ping replies/10 minutes/account budget.
+  Blocked native commands end before pairing, durable intake, a radio reply,
+  or a model turn; suppressed slash commands can enter admitted chat only as
+  plain text with `CommandAuthorized: false` and
+  `CommandInterpretationSuppressed: true`.
+- **Mesh owner routes fail closed.** Matching `commands.ownerAllowFrom` bare
+  IDs/prefixes, `!`-prefixed IDs/prefixes, or `meshcore:` entries against current validated facts
+  now refuses the whole route before a host turn. Owner-only tools depend on
+  `senderIsOwner`, not merely `CommandAuthorized`; gateway/automation tools
+  therefore cannot be exposed through an unverified mesh owner alias.
+  Non-mesh owner semantics are unchanged. SignedPlain verification remains
+  follow-up #31, not current cryptographic proof.
+- **Pairing load containment (item 7).** Pairing attempts are capped at
+  3/10 minutes/account with a 60-second per-key cooldown and same-key
+  concurrency coalescing, reserved synchronously before host pending state.
+  Refusals create no pending record, reply, or agent turn. Pairing radio use
+  is separately capped at `min(3, maxSends − 1)` chunks plus retries per
+  accounting window, preserving a normal-DM packet even when the general
+  limiter is disabled. `maxSends: 1` rejects pairing at intake;
+  `maxSends: 2` permits one pairing packet; low caps may not fit the
+  multi-chunk challenge. The real default challenge fits in at most three
+  chunks. General pacing/airtime and multi-account radio sharing are
   unchanged.
+
+Deployment guidance
+
+- Bind mesh traffic to a dedicated agent with an isolated workspace, narrow
+  tools, and safety-critical baseline denials. Multi-account installations
+  should use `session.dmScope: "per-account-channel-peer"`. OpenClaw's
+  top-level `tools.toolsBySender` is separate from the removed MeshCore group
+  setting and cannot authenticate a peer; no SDK plugin-native direct per-DM
+  tool-policy callback exists yet (openclaw/openclaw#176348).
+
+Upgrading
+
+- **Warning:** there is no automatic config or pairing-store rewrite.
+  Reverify every legacy DM approval using its current full key, and resend all
+  pre-upgrade queued DMs: their missing replay evidence causes
+  `dm-identity-no-evidence` dead-letters. Review integrations that used native
+  commands or mesh owner aliases, explicitly opt in only the required `!ping`
+  peers, and check pairing behavior under low `maxSends` caps. Follow the
+  exact operator checklist in [docs/MIGRATION.md](docs/MIGRATION.md).
 
 ## 2026.10.20 - 2026-11-09
 
