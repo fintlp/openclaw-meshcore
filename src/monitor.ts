@@ -452,6 +452,12 @@ export function monitorMeshcoreProvider(
         console.error(
           `[${account.accountId}] ${purpose === "pairing" ? "pairing" : "DM"} reply to ${targetLabel} failed (non-fatal)${detail}`,
         );
+        if (purpose === "pairing") {
+          // The host controller owns pending-record expiry and its
+          // onReplyError hook. Normal agent replies retain the old non-fatal
+          // behavior, but pairing delivery failures must reach that path.
+          throw err;
+        }
       }
     };
 
