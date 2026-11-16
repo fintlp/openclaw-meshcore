@@ -1047,6 +1047,8 @@ describe("meshcore inbound behavior", () => {
         TEST_NODE_ID,
         TEST_NODE_ID.slice(1),
         "meshcore:" + TEST_NODE_ID,
+        "meshcore:meshcore:" + TEST_NODE_ID,
+        "meshcore:meshcore:!" + TEST_NODE_ID.slice(1, 13),
         "meshcore:!" + TEST_NODE_ID.slice(1, 13),
       ];
       for (const ownerAllowFrom of aliases) {
@@ -1211,14 +1213,14 @@ describe("meshcore inbound behavior", () => {
       expect(sendReply).toHaveBeenCalledTimes(1);
     });
 
-    it("rejects maxSends:1 pairing before pending state and keeps challenge chunks within the default share", async () => {
+    it.each([1, 2, 3])("rejects the real three-chunk pairing reply at maxSends:%i before pending state", async (maxSends) => {
       const sendReply = vi.fn(async () => undefined);
       await handleMeshcoreInbound({
         message: createMessage(),
         account: createAccount({
           config: {
             ...createAccount().config,
-            sendRateLimit: { maxSends: 1 },
+            sendRateLimit: { maxSends },
           },
         }),
         config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
@@ -1227,17 +1229,79 @@ describe("meshcore inbound behavior", () => {
       });
       expect(upsertPairingRequestMock).not.toHaveBeenCalled();
       expect(sendReply).not.toHaveBeenCalled();
+    });
 
+    it.each([4, 20])("admits the real three-chunk pairing reply at maxSends:%i", async (maxSends) => {
+      const sendReply = vi.fn(async () => undefined);
       await handleMeshcoreInbound({
         message: createMessage(),
-        account: createAccount(),
+        account: createAccount({
+          config: {
+            ...createAccount().config,
+            sendRateLimit: { maxSends },
+          },
+        }),
         config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
         runtime: createRuntimeEnv(),
         sendReply,
       });
+      expect(upsertPairingRequestMock).toHaveBeenCalledTimes(1);
+      expect(sendReply).toHaveBeenCalledTimes(1);
       const challengeText = sendReply.mock.calls[0][1] as string;
-      expect(chunkTextWithNumbering(challengeText, 127, true).length).toBeLessThanOrEqual(3);
+      expect(Buffer.byteLength(challengeText)).toBe(232); // CODE appears twice in the test host reply
+      expect(chunkTextWithNumbering(challengeText, 127, true)).toHaveLength(3);
       expect(sendReply.mock.calls[0][3]).toBe("pairing");
+    });
+
+    it("releases the attempt reservation when the real host returns created:true after onReplyError", async () => {
+      const sendReply = vi.fn(async () => undefined);
+      sendReply.mockRejectedValueOnce(new Error("radio unavailable"));
+      const runtime = createRuntimeEnv();
+      const keys = [1, 2, 3, 4, 5].map((n) => "!" + n.toString(16).padStart(64, "0"));
+      for (const nodeId of keys) {
+        await handleMeshcoreInbound({
+          message: createMessage({ senderNodeId: nodeId, target: nodeId }),
+          account: createAccount(),
+          config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+          runtime,
+          sendReply,
+        });
+      }
+      // Both host dists catch the rejected send, invoke onReplyError, retain
+      // pending state, and return created:true. The failed first reply must
+      // not consume one of the three successful-challenge account slots.
+      expect(upsertPairingRequestMock).toHaveBeenCalledTimes(4);
+      expect(sendReply).toHaveBeenCalledTimes(4);
+      expect(runtime.error).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not charge already-pending host results against later new challenges", async () => {
+      const sendReply = vi.fn(async () => undefined);
+      const keys = [1, 2, 3, 4, 5, 6, 7, 8].map((n) => "!" + n.toString(16).padStart(64, "0"));
+      upsertPairingRequestMock.mockResolvedValue({ code: "CODE", created: false });
+      for (const nodeId of keys.slice(0, 4)) {
+        await handleMeshcoreInbound({
+          message: createMessage({ senderNodeId: nodeId, target: nodeId }),
+          account: createAccount(),
+          config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+          runtime: createRuntimeEnv(),
+          sendReply,
+        });
+      }
+      expect(sendReply).not.toHaveBeenCalled();
+
+      upsertPairingRequestMock.mockResolvedValue({ code: "CODE", created: true });
+      for (const nodeId of keys.slice(4)) {
+        await handleMeshcoreInbound({
+          message: createMessage({ senderNodeId: nodeId, target: nodeId }),
+          account: createAccount(),
+          config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+          runtime: createRuntimeEnv(),
+          sendReply,
+        });
+      }
+      expect(upsertPairingRequestMock).toHaveBeenCalledTimes(7);
+      expect(sendReply).toHaveBeenCalledTimes(3);
     });
 
     it("applies the separate native ping budget only to the explicit full-key exception", async () => {
@@ -1313,7 +1377,7 @@ describe("durability redelivery (m7 / minor-1, adversarial re-check)", () => {
     try {
       runRepeaterOpsCommandMock.mockClear();
       const msg = createMessage({ text: "!ping", timestamp: 1700000005678 });
-      store!.intake({
+      const intake = store!.intake({
         accountId: "default",
         dedupeKey: meshcoreDedupeKey({
           senderNodeId: msg.senderNodeId,
@@ -1324,8 +1388,12 @@ describe("durability redelivery (m7 / minor-1, adversarial re-check)", () => {
         peerId: msg.senderNodeId,
         senderTs: msg.timestamp,
         body: msg.text,
-        rawJson: JSON.stringify(msg),
+        // Native-command markers deliberately have no DM identity evidence.
+        rawJson: "{}",
       });
+      const deadLetter = vi.spyOn(store!, "deadLetter");
+      const markDispatched = vi.spyOn(store!, "markDispatched");
+      setMeshcoreRuntime(makeRuntimeWithDispatch() as never);
       const sendReply = vi.fn(async () => undefined);
       await handleMeshcoreInbound({
         message: msg,
@@ -1339,6 +1407,14 @@ describe("durability redelivery (m7 / minor-1, adversarial re-check)", () => {
       });
       expect(runRepeaterOpsCommandMock).not.toHaveBeenCalled();
       expect(sendReply).not.toHaveBeenCalled();
+      expect(deadLetter).not.toHaveBeenCalled();
+      expect(markDispatched).not.toHaveBeenCalled();
+      expect(store!.findDuplicate("default", meshcoreDedupeKey({
+        senderNodeId: msg.senderNodeId,
+        timestamp: msg.timestamp,
+        body: msg.text,
+      }))?.state).toBe("pending");
+      expect(intake.id).toBeGreaterThanOrEqual(0);
     } finally {
       store?.close();
     }

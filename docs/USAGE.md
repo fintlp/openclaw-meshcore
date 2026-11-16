@@ -14,8 +14,11 @@ approval flow:
    an agent session. The plugin registers a pairing request and replies
    once with a one-time code and the approve command. Repeat DMs from the
    same node get *no further reply* (create-if-missing), and pending
-   requests are hard-capped at 3 per account — a flood cannot grow beyond
-   3 junk entries and 3 reply frames.
+   requests are hard-capped at 3 per account. Replies are multi-chunk radio
+   messages and have their own size-aware packet cap, so this is not a claim
+   of three radio frames. If a reply send fails, the host logs the error and
+   keeps the pending record until its TTL; later DMs coalesce without another
+   reply or account-budget charge.
 2. **You see the request.** `openclaw pairing list` shows pending (and
    already-approved) senders, or watch the gateway log for
    `pairing requested` lines.

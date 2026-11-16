@@ -118,8 +118,10 @@ See [docs/MIGRATION.md](docs/MIGRATION.md) for the required upgrade steps.
 
 ### Host commands, native commands, and owner routes
 
-Stock prefix-addressed MeshCore DMs have no OpenClaw host command authority.
-The native `!ping`, `!status`, `!neighbours`, `!rstatus`, and `!trace`
+OpenClaw host text commands are disabled for **all MeshCore DMs pending #31**.
+This item-6 change is DM-only: group command behavior is unchanged and remains
+governed by `groupAllowFrom` together with the channel target. The native
+`!ping`, `!status`, `!neighbours`, `!rstatus`, and `!trace`
 surface is default-deny even for uniquely mapped or full-key-chat-allowlisted
 peers. `commandRepliesEnabled` is only a feature toggle, never authorization.
 The sole compatibility exception is an explicitly configured canonical
@@ -160,18 +162,29 @@ signature or cryptographic proof of origin.
 
 ### Pairing and reply load containment
 
-Pairing request attempts are limited to 3 per 10 minutes per account, with a
-60-second per-full-key cooldown and concurrent same-key coalescing. The
-attempt is reserved synchronously before host pending state exists. Refusal
-creates no pending record, radio reply, or agent turn.
+Pairing is limited to 3 successfully replied-to new challenges per 10 minutes
+per account, with a 60-second per-full-key cooldown and concurrent same-key
+coalescing. The attempt is reserved synchronously before host pending state
+exists, then released when the host reports already-pending or reply delivery
+fails. Pre-host refusal creates no pending record, radio reply, or agent turn.
 
-The pairing radio share is `min(3, maxSends − 1)` chunks plus retries per
-accounting window, preserving at least one normal-DM packet. This ceiling
-remains with `sendRateLimit.enabled: false`. `maxSends: 1` rejects pairing at
-intake; `maxSends: 2` permits one pairing packet; other low caps may not fit a
-multi-chunk challenge. The real default challenge fits in at most three
-chunks. General send pacing, airtime accounting, and multi-account radio
-sharing are unchanged. Native ping's 3/10-minute reply budget is separate.
+The pairing radio share is `min(3 × challengePackets, maxSends − 1)` chunks
+plus retries per accounting window, preserving at least one normal-DM packet.
+The real stock reply measures three chunks with the production chunker, so the
+default share is 9 packets and three no-retry challenges fit. The ceiling
+remains with `sendRateLimit.enabled: false`; retries draw down the same share.
+The real reply is rejected before pending state for `maxSends` 1–3, while 4
+fits one no-retry challenge. General send pacing, airtime accounting, and
+multi-account radio sharing are unchanged. Native ping's 3/10-minute reply
+budget is separate. Both pairing containment maps are in-memory and reset on
+gateway restart, consistent with the existing limiter design.
+
+On 2026.10.5 and 2026.11.3, the host catches `sendPairingReply` errors, calls
+`onReplyError`, returns `created: true`, and retains the pending record until
+its TTL; no plugin-facing pending-record revoke/expire API exists. The plugin
+logs the failure and releases the reservation. Later attempts receive
+`created: false`, coalesce without another reply, and do not consume the
+account challenge budget.
 
 ### Recommended deployment boundary and residual risk
 
@@ -188,11 +201,20 @@ per-DM tool-policy callback
 ([openclaw/openclaw#176348](https://github.com/openclaw/openclaw/issues/176348)).
 
 A unique prefix mapping is routing evidence, **not cryptographic sender
-authentication**. Identity grades and the replay digest do not supply owner or
-command proof. Full SignedPlain verification remains necessary follow-up work
-in [fintlp/openclaw-meshcore#31](https://github.com/fintlp/openclaw-meshcore/issues/31);
+authentication**. Contact refresh runs only for non-unique decisions, so a
+colliding contact learned only radio-side can leave attribution on the old key
+while firmware decrypts with one of the colliding keys. A malformed live
+contact row invalidates the whole snapshot and refuses DMs until a clean
+resync; this is deliberate fail-closed behavior, not a partial-identity
+fallback. Identity grades and the replay digest do not supply owner or command
+proof. Full SignedPlain verification remains necessary follow-up work in
+[fintlp/openclaw-meshcore#31](https://github.com/fintlp/openclaw-meshcore/issues/31);
 this release does not claim it. Keep owner-only operations on an independently
 authenticated non-mesh channel and verify sensitive contacts out of band.
+
+Hardening follow-up: DM ingress matching still includes `senderName` as a
+compatibility candidate, although names cannot become canonical DM approvals.
+Dropping that candidate is deferred and must not be mistaken for sender proof.
 
 ### Data at rest
 

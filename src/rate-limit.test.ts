@@ -7,6 +7,7 @@ import {
   SEND_RATE_LIMIT_DEFAULTS,
   SendRateLimitExceededError,
 } from "./rate-limit.js";
+import { countMeshcorePairingReplyPackets } from "./pairing-reply.js";
 
 const BASE_NOW = 1_800_000_000_000;
 
@@ -112,15 +113,17 @@ describe("assertSendRateLimit", () => {
     ).toThrow(SendRateLimitExceededError);
   });
 
-  it("enforces the three-packet pairing ceiling even when the DM limiter is disabled", () => {
+  it("enforces the nine-packet default-challenge ceiling even when the DM limiter is disabled", () => {
     const config = resolveSendRateLimitConfig({ enabled: false, maxSends: 20 });
     assertSendRateLimit({ accountId: "default", packets: 50, config, nowMs: BASE_NOW });
-    assertSendRateLimit({
-      accountId: "default", packets: 3, config, purpose: "pairing", nowMs: BASE_NOW + 1,
-    });
+    for (let n = 0; n < 3; n += 1) {
+      assertSendRateLimit({
+        accountId: "default", packets: 3, config, purpose: "pairing", nowMs: BASE_NOW + n,
+      });
+    }
     expect(() =>
       assertSendRateLimit({
-        accountId: "default", packets: 1, config, purpose: "pairing", nowMs: BASE_NOW + 2,
+        accountId: "default", packets: 3, config, purpose: "pairing", nowMs: BASE_NOW + 4,
       }),
     ).toThrow(/pairing packet budget/i);
   });
@@ -133,6 +136,45 @@ describe("assertSendRateLimit", () => {
       }),
     ).toThrow(/maxSends.*1|pairing.*disabled/i);
     assertSendRateLimit({ accountId: "default", packets: 1, config, nowMs: BASE_NOW + 1 });
+  });
+
+  it("fits three real three-chunk challenges into the default partition", () => {
+    const challengePackets = countMeshcorePairingReplyPackets({
+      senderIdLine: "Your MeshCore node id: !" + "ab".repeat(32),
+    });
+    expect(challengePackets).toBe(3);
+    const config = resolveSendRateLimitConfig({ maxSends: 20 });
+    for (let n = 0; n < 3; n += 1) {
+      assertSendRateLimit({
+        accountId: "default", packets: challengePackets, config,
+        purpose: "pairing", nowMs: BASE_NOW + n,
+      });
+    }
+    expect(() => assertSendRateLimit({
+      accountId: "default", packets: challengePackets, config,
+      purpose: "pairing", nowMs: BASE_NOW + 4,
+    })).toThrow(/pairing packet budget/i);
+    // Nine pairing packets leave eleven normal packets under the hard total.
+    assertSendRateLimit({ accountId: "default", packets: 11, config, nowMs: BASE_NOW + 5 });
+    expect(() => assertSendRateLimit({
+      accountId: "default", packets: 1, config, nowMs: BASE_NOW + 6,
+    })).toThrow(SendRateLimitExceededError);
+  });
+
+  it("fits one real challenge at maxSends:4 while retaining a normal packet", () => {
+    const challengePackets = countMeshcorePairingReplyPackets({
+      senderIdLine: "Your MeshCore node id: !" + "ab".repeat(32),
+    });
+    const config = resolveSendRateLimitConfig({ maxSends: 4 });
+    assertSendRateLimit({
+      accountId: "default", packets: challengePackets, config,
+      purpose: "pairing", nowMs: BASE_NOW,
+    });
+    expect(() => assertSendRateLimit({
+      accountId: "default", packets: challengePackets, config,
+      purpose: "pairing", nowMs: BASE_NOW + 1,
+    })).toThrow(/pairing packet budget/i);
+    assertSendRateLimit({ accountId: "default", packets: 1, config, nowMs: BASE_NOW + 2 });
   });
 
   it("budgets native ping replies separately at three per account per window", () => {
@@ -152,13 +194,13 @@ describe("assertSendRateLimit", () => {
   });
 
   it("refuses an over-budget multi-chunk challenge atomically", () => {
-    const config = resolveSendRateLimitConfig({ maxSends: 5 });
+    const config = resolveSendRateLimitConfig({ maxSends: 4 });
     expect(() =>
       assertSendRateLimit({
         accountId: "default", packets: 4, config, purpose: "pairing", nowMs: BASE_NOW,
       }),
     ).toThrow(/pairing packet budget/i);
     // No portion of the refused challenge was charged.
-    assertSendRateLimit({ accountId: "default", packets: 5, config, nowMs: BASE_NOW + 1 });
+    assertSendRateLimit({ accountId: "default", packets: 4, config, nowMs: BASE_NOW + 1 });
   });
 });

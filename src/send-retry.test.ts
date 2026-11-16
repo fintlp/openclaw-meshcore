@@ -13,6 +13,10 @@ import {
   SEND_RETRY_DEFAULTS,
 } from "./send-retry.js";
 import { sendMessageMeshcore } from "./send.js";
+import {
+  buildMeshcorePairingReplyText,
+  countMeshcorePairingReplyPackets,
+} from "./pairing-reply.js";
 import type { CoreConfig } from "./types.js";
 
 const TEST_NODE_ID = "!00000000000000000000000000000000000000000000000000000000aabbccdd";
@@ -259,6 +263,29 @@ describe("sendMessageMeshcore delivery-report retry (issue #25)", () => {
     // before any frame, after exactly two transmissions.
     expect(error).toBeInstanceOf(SendRateLimitExceededError);
     expect(sendTextMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("charges every real three-chunk pairing retry against the measured partition", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1, estTimeout: 100 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+    const senderIdLine = "Your MeshCore node id: " + TEST_NODE_ID;
+    const text = buildMeshcorePairingReplyText({ code: "ABCD2345", senderIdLine });
+    expect(countMeshcorePairingReplyPackets({ senderIdLine })).toBe(3);
+
+    const error = await sendMessageMeshcore(TEST_NODE_ID, text, {
+      cfg: createConfig({
+        chunkNumbering: true,
+        sendRetry: { enabled: true, maxAttempts: 2, backoffMs: 1_000 },
+        sendRateLimit: { enabled: true, maxSends: 4, windowMs: 600_000 },
+      }),
+      purpose: "pairing",
+      retryBackoffSleep: async () => {},
+    }).catch((e: unknown) => e);
+
+    // The first three-chunk attempt fits exactly. Its retransmission is
+    // refused whole before another frame can consume normal-DM allocation.
+    expect(error).toBeInstanceOf(SendRateLimitExceededError);
+    expect(sendTextMessage).toHaveBeenCalledTimes(3);
   });
 
   it("rate-limit budget sized for all attempts lets them through and the failure is a delivery failure", async () => {

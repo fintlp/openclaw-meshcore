@@ -59,8 +59,10 @@ Security
   releases the claim for bounded retry. Group rows are unchanged and native
   command markers remain non-replayable. Evidence records the intake mapping,
   not cryptographic sender proof.
-- **Host and native command default-deny (item 6).** Stock prefix-addressed
-  DMs receive no host command authority. Native `!ping`, `!status`,
+- **Host and native command default-deny (item 6).** OpenClaw host text
+  commands are disabled for ALL MeshCore DMs pending #31. This change is
+  DM-only: group commands remain unchanged and governed by `groupAllowFrom`
+  together with the channel target. Native `!ping`, `!status`,
   `!neighbours`, `!rstatus`, and `!trace` are denied even for uniquely mapped
   or full-key-chat-allowlisted peers. `commandRepliesEnabled` is only a
   feature toggle. The sole exception is explicit canonical
@@ -72,22 +74,42 @@ Security
   `CommandInterpretationSuppressed: true`.
 - **Mesh owner routes fail closed.** Matching `commands.ownerAllowFrom` bare
   IDs/prefixes, `!`-prefixed IDs/prefixes, or `meshcore:` entries against current validated facts
-  now refuses the whole route before a host turn. Owner-only tools depend on
+  now refuses the whole route before a host turn. Entries pass through the
+  host's single provider-prefix strip followed by plugin normalization, so a
+  double-prefixed `meshcore:meshcore:!<key>` cannot bypass the refusal;
+  unmatchable aliases fail closed without becoming owner proof. Owner-only tools depend on
   `senderIsOwner`, not merely `CommandAuthorized`; gateway/automation tools
   therefore cannot be exposed through an unverified mesh owner alias.
   Non-mesh owner semantics are unchanged. SignedPlain verification remains
   follow-up #31, not current cryptographic proof.
-- **Pairing load containment (item 7).** Pairing attempts are capped at
-  3/10 minutes/account with a 60-second per-key cooldown and same-key
-  concurrency coalescing, reserved synchronously before host pending state.
-  Refusals create no pending record, reply, or agent turn. Pairing radio use
-  is separately capped at `min(3, maxSends − 1)` chunks plus retries per
-  accounting window, preserving a normal-DM packet even when the general
-  limiter is disabled. `maxSends: 1` rejects pairing at intake;
-  `maxSends: 2` permits one pairing packet; low caps may not fit the
-  multi-chunk challenge. The real default challenge fits in at most three
-  chunks. General pacing/airtime and multi-account radio sharing are
-  unchanged.
+- **Pairing load containment (item 7).** Successfully replied-to new pairing
+  challenges are capped at 3/10 minutes/account with a 60-second per-key
+  cooldown and same-key concurrency coalescing, reserved synchronously before
+  host pending state and reconciled with the actual host result. Already-
+  pending and failed-delivery outcomes release their reservations; pre-host
+  refusals create no pending record, reply, or agent turn. Intake runs the real
+  chunker on the stock host reply (240 bytes with a full id line and eight-
+  character code, hence 3 packets) and rejects it at `maxSends` 1–3 before any
+  pending write. Pairing radio use is capped at
+  `min(3 × challengePackets, maxSends − 1)` chunks plus retries per accounting
+  window: 9 packets by default, so three no-retry challenges really fit, while
+  `maxSends: 4` fits one and a normal-DM packet is always preserved. General
+  pacing/airtime and multi-account radio sharing are unchanged; both pairing
+  maps reset on gateway restart like the existing limiter.
+- **PR #78 review-round-1 history correction.** Commit `9b5923c`'s claim that
+  reply failure propagated into host expiry was false. On both 2026.10.5 and
+  2026.11.3 the host catches the send error, invokes `onReplyError`, returns
+  `created: true`, and keeps the pending record until its TTL; neither SDK
+  exposes plugin-side revoke/expire. The code and docs now state and test that
+  contract. Failed delivery releases the account reservation, and subsequent
+  `created: false` attempts coalesce without a reply or budget charge.
+- **Command-marker replay reason.** Duplicate native-command marker rows
+  (`rawJson: "{}"`) are dropped before DM evidence validation, preserving
+  their `not-replayable` handling and preventing a later command mark against
+  a wrongly dead-lettered row. The unused `resolveAdvertPubkeyByPrefix` export
+  was removed. Residual-risk docs now cover non-unique-only contact refresh,
+  fail-closed malformed live snapshots, deferred `senderName` candidate
+  removal, and the DM-only scope of item 6.
 
 Deployment guidance
 

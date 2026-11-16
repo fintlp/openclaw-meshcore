@@ -736,7 +736,6 @@ export function rememberAdvertContact(
   rememberContact({ publicKey, advName: name }, accountId);
 }
 
-export { resolveContactPubkeyByPrefix as resolveAdvertPubkeyByPrefix };
 
 export function nodeIdToPubkey(
   nodeId: string,

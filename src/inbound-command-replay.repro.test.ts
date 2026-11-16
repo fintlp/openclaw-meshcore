@@ -193,6 +193,41 @@ describe("repro: command frame durability after a crash", () => {
     store!.close();
   });
 
+  it("classifies a native command marker as not-replayable before missing evidence", async () => {
+    const store = await openDurabilityStore({ dbPath });
+    const message = createMessage();
+    const intake = store!.intake({
+      accountId: "default",
+      dedupeKey: meshcoreDedupeKey({
+        senderNodeId: message.senderNodeId,
+        timestamp: message.timestamp,
+        body: message.text,
+      }),
+      kind: "direct",
+      peerId: message.senderNodeId,
+      senderTs: message.timestamp,
+      body: message.text,
+      rawJson: "{}",
+    });
+    delete message.dmIdentityEvidence;
+    const deadLetter = vi.spyOn(store!, "deadLetter");
+    const sendReply = vi.fn(async () => undefined);
+
+    await handleMeshcoreInbound({
+      message,
+      account: createAccount(),
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: { log: vi.fn(), error: vi.fn() } as unknown as RuntimeEnv,
+      sendReply,
+      durability: store,
+      replayOf: intake.id,
+    });
+
+    expect(deadLetter).toHaveBeenCalledWith("default", intake.id, "not-replayable");
+    expect(sendReply).not.toHaveBeenCalled();
+    store!.close();
+  });
+
   it("releases a replay claim when abort arrives during host finalization", async () => {
     const store = await openDurabilityStore({ dbPath });
     const message = createMessage("hello");

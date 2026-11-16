@@ -89,7 +89,7 @@ A pairing-gated assistant on your event's mesh. Strangers get a challenge; you a
 ~~~
 
 - **Can:** greet (capped pairing auto-replies), answer approved guests fully, prove to the crowd it cannot spam the public channel — that boundary is code, not a promise.
-- **Cannot:** be a public-address bot (see recipe 4); lift the 3-reply pairing cap for strangers (by design).
+- **Cannot:** be a public-address bot (see recipe 4); lift the three-new-challenge pairing budget or its size-aware radio partition for strangers (by design).
 - **Read next:** docs/AGENT-SCOPING.md layers 1-2.
 
 ## 6. Cross-channel bridge (the quiet superpower)

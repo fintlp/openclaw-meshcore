@@ -86,9 +86,11 @@ signature and is not cryptographic proof of who transmitted the frame.
 
 ## 3. Review native commands and suppressed host commands
 
-Stock prefix-addressed MeshCore DMs now have **no OpenClaw host command
-authority**. A unique mapping, an extended/prefix-only diagnostic grade, or a
-full-key chat allowlist entry does not change that.
+**OpenClaw host text commands are disabled for ALL MeshCore DMs pending #31.**
+A unique mapping, an extended/prefix-only diagnostic grade, or a full-key chat
+allowlist entry does not change that. This state-intent item 6 change applies
+only to DMs: group command behavior is unchanged and remains governed by
+`groupAllowFrom` together with the channel target.
 
 The plugin-native commands `!ping`, `!status`, `!neighbours`,
 `!rstatus`, and `!trace` are default-deny, including for uniquely mapped
@@ -152,39 +154,50 @@ Pairing now has two independent forms of containment.
 
 ### Request attempts
 
-Each account permits at most **3 pairing attempts per 10 minutes**, with a
-**60-second cooldown per full key**. Concurrent requests for the same key are
-coalesced. The attempt is reserved synchronously before OpenClaw can create
-pending pairing state. A refused attempt creates no pending record, radio
-reply, or agent turn.
+Each account permits at most **3 successfully replied-to new challenges per 10
+minutes**, with a **60-second cooldown per full key**. Concurrent requests for
+the same key are coalesced. The attempt is reserved synchronously before
+OpenClaw can create pending pairing state, then released if the host reports an
+already-pending record or the reply send fails. A pre-host refusal creates no
+pending record, radio reply, or agent turn.
 
 ### Radio packets
 
 Within each `sendRateLimit` accounting window, pairing may use at most:
 
 ```text
-min(3, maxSends - 1)
+min(3 * challengePackets, maxSends - 1)
 ```
 
-This counts every pairing chunk and retry and preserves at least one packet
-for normal DM traffic. The pairing ceiling still applies when
-`sendRateLimit.enabled` is `false`. General send pacing, airtime
-accounting, and multi-account radio sharing are otherwise unchanged; native
-`!ping` has its own separate 3/10-minute reply budget.
+The intake measures `challengePackets` by running the production chunker on
+the real stock host reply shape, including its full node-id line and approval
+instructions. That reply needs **3 chunks** under default settings, so the
+default pairing partition is **9 packets** and all three no-retry challenges
+fit. Every retry is charged to the same partition and can reduce later
+challenge capacity. The `maxSends - 1` hard ceiling always preserves at least
+one packet for normal DM traffic, and the pairing ceiling still applies when
+`sendRateLimit.enabled` is `false`. General send pacing, airtime accounting,
+and multi-account radio sharing are otherwise unchanged; native `!ping` has
+its own separate 3/10-minute reply budget.
 
 Check low-cap configurations explicitly:
 
-- `maxSends: 1` rejects pairing at intake, before pending state is created.
-  Use explicit full-key allowlisting instead, or raise the cap.
-- `maxSends: 2` permits one pairing packet in the window.
-- Larger low caps can still be too small for a multi-chunk challenge or its
-  retries. The real default challenge fits in at most three chunks, but a cap
-  below three does not guarantee room for it.
+- `maxSends: 1` returns `max-sends-too-low` before pending state is created.
+- `maxSends: 2` and `maxSends: 3` return `pairing-reply-too-large` for the real
+  three-chunk reply, also before pending state.
+- `maxSends: 4` fits one no-retry challenge while retaining one normal packet.
+- The default `maxSends: 20` permits the three-challenge, nine-packet pairing
+  allocation. Use explicit full-key allowlisting where pairing cannot fit.
 
 Choose a cap that leaves the normal-DM allocation you need as well as the
-pairing allocation you intend to use. A failed delivery after a live challenge
-was accepted follows the existing host expiry and reply-error path; it does
-not rewind the attempt budget.
+pairing allocation and retries you intend to use. On both supported hosts a
+failed reply send is logged through `onReplyError`, the host still returns
+`created: true`, and **the pending record persists until the host TTL**. The
+plugin releases the failed-delivery reservation; later attempts coalesce with
+`created: false`, send no reply, and do not burn the account budget. Neither
+host SDK exposes a plugin-facing pending-record revoke/expire method. Pairing
+request and packet-partition state is in-memory and resets on gateway restart,
+consistent with the existing limiter design.
 
 ## 6. Reconfirm the deployment boundary
 
@@ -203,6 +216,12 @@ Before returning the channel to service:
   ([openclaw/openclaw#176348](https://github.com/openclaw/openclaw/issues/176348)).
 - Treat prefix mappings and `prefix-only` / `extended` grades as routing
   diagnostics, never as authentication. A detected `mismatch` is refused.
+  Contact refresh runs only for non-unique decisions, so a radio-side-only
+  prefix collision can leave attribution on the old key while firmware
+  decrypts with either key. A malformed live row deliberately invalidates the
+  whole snapshot until a clean resync (fail closed, with an availability
+  trade-off). DM ingress still includes `senderName` as a compatibility
+  candidate; removing it is a hardening follow-up, not an approval mechanism.
 - Verify trusted peers out of band, resend old queued DMs, test that blocked
   native commands stay silent, and test any explicitly configured ping
   exception and pairing cap before relying on the channel.

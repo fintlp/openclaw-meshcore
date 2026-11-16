@@ -8,6 +8,11 @@
  * message is either sent whole or refused whole — never partially aired.
  */
 
+import {
+  PAIRING_DEFAULT_REPLY_PACKETS,
+  PAIRING_REQUEST_MAX_ATTEMPTS,
+} from "./pairing-constants.js";
+
 export type SendRateLimitConfig = {
   enabled: boolean;
   /** Maximum packets per rolling window. */
@@ -67,8 +72,17 @@ export function clearSendRateLimitState(accountId?: string): void {
   }
 }
 
-export function pairingPacketCap(config: SendRateLimitConfig): number {
-  return Math.min(3, Math.max(0, config.maxSends - 1));
+export function pairingPacketCap(
+  config: SendRateLimitConfig,
+  challengePackets = PAIRING_DEFAULT_REPLY_PACKETS,
+): number {
+  // Size the partition from the REAL chunk count: three default challenges
+  // must be realizable, not merely one three-chunk reply. The maxSends - 1
+  // ceiling always preserves at least one packet for ordinary DM traffic.
+  return Math.min(
+    PAIRING_REQUEST_MAX_ATTEMPTS * challengePackets,
+    Math.max(0, config.maxSends - 1),
+  );
 }
 
 function recentPackets(map: Map<string, number[]>, accountId: string, windowStart: number): number[] {
@@ -108,7 +122,7 @@ export function assertSendRateLimit(params: {
   const configPath = params.configPath ?? "channels.meshcore.sendRateLimit";
 
   if (purpose === "pairing") {
-    const cap = pairingPacketCap(config);
+    const cap = pairingPacketCap(config, params.packets);
     const overPairingShare = pairing.length + params.packets > cap;
     const overTotal = config.enabled && normal.length + pairing.length + params.packets > config.maxSends;
     if (overPairingShare || overTotal) {

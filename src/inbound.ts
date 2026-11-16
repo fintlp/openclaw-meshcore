@@ -54,6 +54,10 @@ import {
 } from "./dm-identity.js";
 import { assertNativePingRateLimit, resolveSendRateLimitConfig } from "./rate-limit.js";
 import { runPairingChallenge } from "./pairing-budget.js";
+import {
+  buildMeshcorePairingReplyText,
+  countMeshcorePairingReplyPackets,
+} from "./pairing-reply.js";
 
 const CHANNEL_ID = "meshcore" as const;
 type MeshcoreGroupPolicy = "open" | "allowlist" | "disabled";
@@ -219,14 +223,21 @@ function matchesConfiguredMeshOwner(params: {
     if (typeof raw !== "string" && typeof raw !== "number") continue;
     let entry = String(raw).trim();
     if (!entry) continue;
-    if (entry.includes(":")) {
-      if (!entry.toLowerCase().startsWith("meshcore:")) continue;
-      entry = entry.slice("meshcore:".length).trim();
+    // Mirror resolveOwnerAllowFromList on 2026.10.5 and 2026.11.3: strip ONE
+    // recognized provider prefix, then run the plugin's formatAllowFrom
+    // normalization. Thus meshcore:meshcore:!<key> normalizes exactly as the
+    // host sees it instead of bypassing this fail-closed owner-route refusal.
+    const separatorIndex = entry.indexOf(":");
+    if (separatorIndex > 0) {
+      if (entry.slice(0, separatorIndex).toLowerCase() !== "meshcore") continue;
+      entry = entry.slice(separatorIndex + 1).trim();
+      if (!entry) continue;
     }
-    const hex = entry.replace(/^!/u, "").toLowerCase();
-    // Bare aliases, ! prefixes and explicit meshcore: entries all match only
-    // against the CURRENT validated full key. A match is refused below:
-    // prefix routing is not independent owner proof (issue #31 follow-up).
+    const normalized = normalizeMeshcoreAllowEntry(entry);
+    const hex = normalized.startsWith("!") ? normalized.slice(1) : "";
+    // Bare IDs, ! prefixes and explicit meshcore: entries all match only
+    // against the CURRENT validated full key. Short prefixes stay conservative
+    // refusals; names and other unmatchable aliases never establish a match.
     if (/^[0-9a-f]{1,64}$/u.test(hex) && params.fullKey.startsWith(hex)) return true;
   }
   return false;
@@ -354,6 +365,14 @@ export async function handleMeshcoreInbound(params: {
     commandRepliesEnabled,
   });
 
+  // Native-command marker rows intentionally have rawJson "{}" and no DM
+  // identity evidence. Classify them as non-replayable BEFORE the evidence
+  // gate so they cannot be mislabeled dm-identity-no-evidence.
+  if (!message.isGroup && params.replayOf !== undefined && nativeCommand) {
+    params.durability?.deadLetter(account.accountId, params.replayOf, "not-replayable");
+    return;
+  }
+
   if (!message.isGroup) {
     const identity = message.dmIdentity;
     const canonical = identity?.status === "unique"
@@ -400,12 +419,6 @@ export async function handleMeshcoreInbound(params: {
         reason: "mesh-owner-unverified",
         detail: "fingerprint=" + fingerprintNodeId(message.senderNodeId),
       });
-      return;
-    }
-
-    // A durable row must never re-execute a plugin-native command.
-    if (params.replayOf !== undefined && nativeCommand) {
-      params.durability?.deadLetter(account.accountId, params.replayOf, "not-replayable");
       return;
     }
   }
@@ -590,7 +603,18 @@ export async function handleMeshcoreInbound(params: {
     );
     return;
   }
-  if (existingDupe && !message.isGroup) {
+  // A native-command marker is already running (or ran) and deliberately has
+  // no evidence payload. Drop its duplicate BEFORE inspecting evidence; the
+  // marker must stay pending for the original commandMark, not become a dead
+  // dm-identity-no-evidence row that a later mark could write to.
+  const duplicateNativeCommand = Boolean(
+    existingDupe &&
+    !message.isGroup &&
+    commandDecision.nativeAuthorized &&
+    access.ingress.admission === "dispatch" &&
+    (COMMAND_REPLIES.has(rawBody) || parseRepeaterOpsInvocation(rawBody)),
+  );
+  if (existingDupe && !message.isGroup && !duplicateNativeCommand) {
     const previousRaw = store?.rawJsonOf(existingDupe.id) ?? null;
     const previousEvidence = parseDmIdentityEvidence(previousRaw);
     let previousMessageId: unknown;
@@ -634,7 +658,7 @@ export async function handleMeshcoreInbound(params: {
     // row means the command is already running (or ran), never re-air it. But
     // this must only fire for real commands: a plain DM retry belongs to the
     // m7 redelivery path below (re-check regression).
-    if (existingDupe && (COMMAND_REPLIES.has(rawBody) || parseRepeaterOpsInvocation(rawBody))) {
+    if (duplicateNativeCommand) {
       runtime.log?.(
         `meshcore: drop duplicate command ${rawBody} (sender ${message.senderNodeId})`,
       );
@@ -730,33 +754,50 @@ export async function handleMeshcoreInbound(params: {
     const sendRateLimit = resolveSendRateLimitConfig(
       account.config.sendRateLimit as Record<string, unknown> | undefined,
     );
+    const senderIdLine = "Your MeshCore node id: " + message.senderNodeId;
+    const requiredPackets = countMeshcorePairingReplyPackets({
+      senderIdLine,
+      textChunkLimit: account.config.textChunkLimit,
+      chunkNumbering: account.config.chunkNumbering,
+      outboundSignedPlain: account.config.outboundSignedPlain,
+    });
     const result = await runPairingChallenge({
       accountId: account.accountId,
       nodeId: message.senderNodeId,
       maxSends: sendRateLimit.maxSends,
+      requiredPackets,
       issue: async () => {
-        await pairing.issueChallenge({
-        senderId: message.senderNodeId,
-        senderIdLine: "Your MeshCore node id: " + message.senderNodeId,
-        meta: { name: message.senderName ?? message.senderNodeId },
-        sendPairingReply: async (text) => {
-          await deliverMeshcoreReply({
-            payload: { text },
-            cfg: config,
-            target: message.senderNodeId,
-            accountId: account.accountId,
-            sendReply: params.sendReply,
-            purpose: "pairing",
-            statusSink: params.statusSink,
-          });
-        },
-        onReplyError: () => {
-          runtime.error?.(
-            "meshcore: pairing reply failed account=" + account.accountId +
-              " fingerprint=" + fingerprintNodeId(message.senderNodeId),
-          );
-        },
+        let replyFailed = false;
+        const challenge = await pairing.issueChallenge({
+          senderId: message.senderNodeId,
+          senderIdLine,
+          meta: { name: message.senderName ?? message.senderNodeId },
+          buildReplyText: buildMeshcorePairingReplyText,
+          sendPairingReply: async (text) => {
+            await deliverMeshcoreReply({
+              payload: { text },
+              cfg: config,
+              target: message.senderNodeId,
+              accountId: account.accountId,
+              sendReply: params.sendReply,
+              purpose: "pairing",
+              statusSink: params.statusSink,
+            });
+          },
+          onReplyError: () => {
+            // The real 2026.10.5/2026.11.3 host logs through this callback,
+            // keeps the pending record until its TTL, then returns created:true.
+            replyFailed = true;
+            runtime.error?.(
+              "meshcore: pairing reply failed account=" + account.accountId +
+                " fingerprint=" + fingerprintNodeId(message.senderNodeId),
+            );
+          },
         });
+        return {
+          created: challenge.created,
+          replyDelivered: challenge.created && !replyFailed,
+        };
       },
     });
     if (!result.issued) {
