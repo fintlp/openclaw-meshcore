@@ -1690,7 +1690,9 @@ describe("group tool-policy route and command activation hardening", () => {
     );
   });
 
-  it("keeps an authorized DM /status command authorized and unsuppressed", async () => {
+  // PR #78 supersedes the old pre-identity-gate DM positive control: unique
+  // full-key admission keeps the text turn, never host command authority.
+  it("keeps an admitted DM /status command as suppressed plain text", async () => {
     const inboundRun = vi.fn(async () => ({ dispatched: true }));
     setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRun) as never);
     shouldHandleTextCommandsMock.mockReturnValue(true);
@@ -1698,7 +1700,7 @@ describe("group tool-policy route and command activation hardening", () => {
     const account = createAccount({
       config: {
         dmPolicy: "allowlist",
-        allowFrom: ["!aabbccdd1122"],
+        allowFrom: [TEST_NODE_ID],
         groupPolicy: "disabled",
         groupAllowFrom: [],
         channels: [0],
@@ -1715,8 +1717,8 @@ describe("group tool-policy route and command activation hardening", () => {
     expect(inboundRun).toHaveBeenCalledTimes(1);
     const inbound = inboundRun.mock.calls[0][0];
     const turn = inbound.adapter.resolveTurn();
-    expect(turn.ctxPayload.CommandAuthorized).toBe(true);
-    expect(turn.ctxPayload.CommandInterpretationSuppressed).toBeUndefined();
+    expect(turn.ctxPayload.CommandAuthorized).toBe(false);
+    expect(turn.ctxPayload.CommandInterpretationSuppressed).toBe(true);
   });
 
   it("dispatches a genuinely mentioned slash command as plain text with command authority suppressed", async () => {
