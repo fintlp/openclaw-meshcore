@@ -78,6 +78,52 @@ export function hasMeshcoreGroupToolPolicy(
   return match.groupConfig?.tools !== undefined || match.wildcardConfig?.tools !== undefined;
 }
 
+/**
+ * The group map an account effectively uses, applying the host's empty-map
+ * inheritance: a single named account with an explicit `groups: {}` inherits
+ * root `channels.meshcore.groups` (host `inheritEmptyKeys`). Introduced for
+ * tool policy in #76 and shared by every group lookup (#77): admission and
+ * mention, requireMention, systemPrompt and skills.
+ *
+ * The captured account is authoritative for this dispatch. The host merge
+ * only fills an empty captured map (notably groups:{} inheriting root); in
+ * normal adapter resolution both come from the same config and agree.
+ */
+export function resolveMeshcoreEffectiveGroups(params: {
+  cfg: CoreConfig;
+  account: ResolvedMeshcoreAccount;
+}): Record<string, MeshcoreGroupConfig> | undefined {
+  const { account } = params;
+  const channelConfig = params.cfg.channels?.meshcore;
+  const hostGroups = channelConfig
+    ? resolveMergedAccountConfig<MeshcoreAccountConfig>({
+        channelConfig,
+        channelId: "meshcore",
+        accounts: channelConfig.accounts as
+          | Record<string, Partial<MeshcoreAccountConfig>>
+          | undefined,
+        accountId: normalizeAccountId(account.accountId),
+        inheritEmptyKeys:
+          Object.keys(channelConfig.accounts ?? {}).length > 1 ? {} : { groups: "object" },
+      }).groups
+    : undefined;
+  return Object.keys(account.config.groups ?? {}).length > 0
+    ? account.config.groups
+    : hostGroups;
+}
+
+/** resolveMeshcoreGroupMatch over the host-aware effective group map. */
+export function resolveMeshcoreEffectiveGroupMatch(params: {
+  cfg: CoreConfig;
+  account: ResolvedMeshcoreAccount;
+  target: string;
+}): MeshcoreGroupMatch {
+  return resolveMeshcoreGroupMatch({
+    groups: resolveMeshcoreEffectiveGroups({ cfg: params.cfg, account: params.account }),
+    target: params.target,
+  });
+}
+
 type ResolveMeshcoreGroupToolPolicyParams = {
   cfg: CoreConfig;
   accountId?: string | null;
@@ -97,26 +143,11 @@ export function resolveMeshcoreGroupToolPolicyResolution(
 ): MeshcoreGroupToolPolicyResolution {
   const account =
     params.account ?? resolveMeshcoreAccount({ cfg: params.cfg, accountId: params.accountId });
-  const channelConfig = params.cfg.channels?.meshcore;
-  const hostGroups = channelConfig
-    ? resolveMergedAccountConfig<MeshcoreAccountConfig>({
-        channelConfig,
-        channelId: "meshcore",
-        accounts: channelConfig.accounts as
-          | Record<string, Partial<MeshcoreAccountConfig>>
-          | undefined,
-        accountId: normalizeAccountId(account.accountId),
-        inheritEmptyKeys:
-          Object.keys(channelConfig.accounts ?? {}).length > 1 ? {} : { groups: "object" },
-      }).groups
-    : undefined;
-  // The captured account is authoritative for this dispatch. The host merge
-  // only fills an empty captured map (notably groups:{} inheriting root); in
-  // normal adapter resolution both come from the same config and agree.
-  const groups = Object.keys(account.config.groups ?? {}).length > 0
-    ? account.config.groups
-    : hostGroups;
-  const match = resolveMeshcoreGroupMatch({ groups, target: params.target });
+  const match = resolveMeshcoreEffectiveGroupMatch({
+    cfg: params.cfg,
+    account,
+    target: params.target,
+  });
   const authoredPolicy = match.groupConfig?.tools ?? match.wildcardConfig?.tools;
 
   return {
