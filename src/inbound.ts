@@ -43,6 +43,10 @@ import {
   resolveMeshcoreHostCommandFacts,
   runMeshcoreNativeCommand,
 } from "./inbound-commands.js";
+import {
+  deadLetterNativeCommandReplay,
+  releaseReplayClaimIfAdmissionFlipped,
+} from "./inbound-durability.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
 import {
@@ -250,8 +254,15 @@ export async function handleMeshcoreInbound(params: {
   // Native-command marker rows intentionally have rawJson "{}" and no DM
   // identity evidence. Classify them as non-replayable BEFORE the evidence
   // gate so they cannot be mislabeled dm-identity-no-evidence.
-  if (!message.isGroup && params.replayOf !== undefined && nativeCommand) {
-    params.durability?.deadLetter(account.accountId, params.replayOf, "not-replayable");
+  if (
+    deadLetterNativeCommandReplay({
+      isGroup: message.isGroup,
+      replayOf: params.replayOf,
+      nativeCommand,
+      durability: params.durability,
+      accountId: account.accountId,
+    })
+  ) {
     return;
   }
 
@@ -393,15 +404,15 @@ export async function handleMeshcoreInbound(params: {
   // Replay path: admission flipped while we were down (config changed).
   // The attempt was already counted at claim time; release the claim — the
   // event goes back to pending and dead-letters at maxDispatchAttempts.
-  if (params.replayOf !== undefined && access.ingress.admission !== "dispatch") {
-    params.durability?.releaseClaim(
-      account.accountId,
-      params.replayOf,
-      `admission flipped on replay (${access.ingress.admission})`,
-    );
-    runtime.log?.(
-      `meshcore: replay event ${params.replayOf} no longer admitted (${access.ingress.admission}) — claim released`,
-    );
+  if (
+    releaseReplayClaimIfAdmissionFlipped({
+      replayOf: params.replayOf,
+      access,
+      durability: params.durability,
+      accountId: account.accountId,
+      runtime,
+    })
+  ) {
     return;
   }
 
