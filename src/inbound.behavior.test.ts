@@ -1766,3 +1766,246 @@ describe("group tool-policy route and command activation hardening", () => {
     expect(resolveAgentRoute).not.toHaveBeenCalled();
   });
 });
+
+
+// Issue #84: handler-level pins for the extracted decision/command/durability
+// modules (drop log lines, replay dead-letter reasons, ordering, blocked
+// native-command boundary, ping-budget security log). Account ids are unique
+// per test because logInboundSecurity rate-limits per account+reason.
+describe("issue #84 pinning: inbound decision side effects", () => {
+  const OTHER_KEY = "22".repeat(32);
+
+  beforeEach(() => {
+    setNodeStatusPathForTests(makeNodeStatusPath());
+    readAllowFromStoreMock.mockReset().mockResolvedValue([]);
+    upsertPairingRequestMock.mockReset().mockResolvedValue({ code: "CODE", created: true });
+    shouldHandleTextCommandsMock.mockReset().mockReturnValue(false);
+    hasControlCommandMock.mockReset().mockReturnValue(false);
+    buildMentionRegexesMock.mockReset().mockReturnValue([]);
+    matchesMentionPatternsMock.mockReset().mockReturnValue(false);
+    resetPairingRequestBudgetForTests();
+    clearSendRateLimitState();
+    setMeshcoreRuntime(createBaseRuntime() as never);
+  });
+
+  afterEach(() => {
+    clearMeshcoreRuntime();
+    resetNodeStatusStateForTests();
+    resetPairingRequestBudgetForTests();
+    clearSendRateLimitState();
+  });
+
+  function durabilityFake() {
+    return {
+      findDuplicate: vi.fn(() => null),
+      intake: vi.fn(() => ({ id: 9, duplicate: false })),
+      claim: vi.fn(() => "claimed"),
+      releaseClaim: vi.fn(),
+      deadLetter: vi.fn(),
+      markDispatched: vi.fn(),
+      metrics: vi.fn(() => ({ pending: 0, dead: 0, duplicates: 0, degraded: false })),
+    };
+  }
+
+  async function runGroupDrop(groups: Record<string, MeshcoreGroupConfig>, groupAllowFrom: string[] = []) {
+    const inboundRun = vi.fn(async () => ({ dispatched: true }));
+    setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRun) as never);
+    const runtime = createRuntimeEnv();
+    await handleMeshcoreInbound({
+      message: createMessage({
+        isGroup: true,
+        target: "channel:0",
+        senderNodeId: "channel:0",
+        text: "group hello",
+      }),
+      account: createAccount({
+        config: {
+          dmPolicy: "pairing",
+          allowFrom: [],
+          groupPolicy: "allowlist",
+          groupAllowFrom,
+          channels: [0],
+          groups,
+        },
+      }),
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime,
+      sendReply: vi.fn(async () => undefined),
+    });
+    expect(inboundRun).not.toHaveBeenCalled();
+    return runtime;
+  }
+
+  it("logs missing-mention for an unmentioned message in a requireMention channel", async () => {
+    const runtime = await runGroupDrop({ "channel:0": { requireMention: true } });
+    expect(runtime.log).toHaveBeenCalledWith("meshcore: drop channel channel:0 (missing-mention)");
+  });
+
+  it("logs not allowlisted for a channel missing from configured groups", async () => {
+    const runtime = await runGroupDrop({ "channel:1": { requireMention: false } });
+    expect(runtime.log).toHaveBeenCalledWith("meshcore: drop channel channel:0 (not allowlisted)");
+  });
+
+  it("logs disabled for a configured channel with enabled=false", async () => {
+    const runtime = await runGroupDrop({ "channel:0": { requireMention: false, enabled: false } });
+    expect(runtime.log).toHaveBeenCalledWith("meshcore: drop channel channel:0 (disabled)");
+  });
+
+  async function runDmReplay(params: {
+    accountId: string;
+    message: MeshcoreInboundMessage;
+    config?: CoreConfig;
+  }) {
+    const inboundRun = vi.fn(async () => ({ dispatched: true }));
+    setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRun) as never);
+    const runtime = createRuntimeEnv();
+    const durability = durabilityFake();
+    const sendReply = vi.fn(async () => undefined);
+    await handleMeshcoreInbound({
+      message: params.message,
+      account: createAccount({
+        accountId: params.accountId,
+        config: { dmPolicy: "allowlist", allowFrom: [TEST_NODE_ID], groupPolicy: "disabled" },
+      }),
+      config: params.config ?? ({ channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig),
+      runtime,
+      sendReply,
+      durability: durability as never,
+      replayOf: 5,
+    });
+    expect(inboundRun).not.toHaveBeenCalled();
+    expect(sendReply).not.toHaveBeenCalled();
+    expect(durability.releaseClaim).not.toHaveBeenCalled();
+    return { runtime, durability };
+  }
+
+  it("dead-letters a replayed DM without evidence as dm-identity-no-evidence", async () => {
+    const { durability } = await runDmReplay({
+      accountId: "pin-no-evidence",
+      message: createMessage({ dmIdentity: { status: "ambiguous" }, dmIdentityEvidence: undefined }),
+    });
+    expect(durability.deadLetter).toHaveBeenCalledTimes(1);
+    expect(durability.deadLetter).toHaveBeenCalledWith("pin-no-evidence", 5, "dm-identity-no-evidence");
+  });
+
+  it("dead-letters a replayed ambiguous DM with evidence as dm-identity-ambiguous", async () => {
+    const { durability } = await runDmReplay({
+      accountId: "pin-ambiguous",
+      message: createMessage({ dmIdentity: { status: "ambiguous" } }),
+    });
+    expect(durability.deadLetter).toHaveBeenCalledWith("pin-ambiguous", 5, "dm-identity-ambiguous");
+  });
+
+  it("dead-letters a replayed DM whose evidence names another key as dm-identity-stale", async () => {
+    const { durability } = await runDmReplay({
+      accountId: "pin-stale",
+      message: createMessage({
+        dmIdentityEvidence: createDmIdentityEvidence({
+          wirePrefix: hexToBytes(OTHER_KEY.slice(0, 12)),
+          fullKey: OTHER_KEY,
+        }),
+      }),
+    });
+    expect(durability.deadLetter).toHaveBeenCalledWith("pin-stale", 5, "dm-identity-stale");
+  });
+
+  it("refuses an identityBinding mismatch with the dm-identity-refused security log", async () => {
+    const { runtime, durability } = await runDmReplay({
+      accountId: "pin-mismatch",
+      message: createMessage({
+        meshSecurity: { txtType: 2, signedPlain: true, identityBinding: "mismatch" },
+      }),
+    });
+    expect(durability.deadLetter).toHaveBeenCalledWith("pin-mismatch", 5, "dm-identity-stale");
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("meshcore: dm-identity-refused account=pin-mismatch"),
+    );
+  });
+
+  it("dead-letters a replayed owner route as dm-identity-stale and logs mesh-owner-unverified", async () => {
+    const { runtime, durability } = await runDmReplay({
+      accountId: "pin-owner",
+      message: createMessage(),
+      config: {
+        channels: { meshcore: { host: "192.0.2.10" } },
+        commands: { ownerAllowFrom: [TEST_NODE_ID] },
+      } as unknown as CoreConfig,
+    });
+    expect(durability.deadLetter).toHaveBeenCalledWith("pin-owner", 5, "dm-identity-stale");
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("meshcore: mesh-owner-unverified account=pin-owner"),
+    );
+    expect(runtime.log).not.toHaveBeenCalledWith(expect.stringContaining("dm-identity-refused"));
+  });
+
+  it("dead-letters BEFORE writing the security log on refusal", async () => {
+    const { runtime, durability } = await runDmReplay({
+      accountId: "pin-order",
+      message: createMessage({ dmIdentityEvidence: undefined }),
+    });
+    const logMock = vi.mocked(runtime.log!);
+    const securityCall = logMock.mock.calls.findIndex((call) =>
+      String(call[0]).includes("dm-identity-refused account=pin-order"),
+    );
+    expect(securityCall).toBeGreaterThanOrEqual(0);
+    expect(durability.deadLetter).toHaveBeenCalledTimes(1);
+    expect(durability.deadLetter.mock.invocationCallOrder[0]).toBeLessThan(
+      logMock.mock.invocationCallOrder[securityCall],
+    );
+  });
+
+  it("stops a ping-allowlisted but unadmitted sender's !ping before pairing", async () => {
+    const inboundRun = vi.fn(async () => ({ dispatched: true }));
+    setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRun) as never);
+    const sendReply = vi.fn(async () => undefined);
+    await handleMeshcoreInbound({
+      message: createMessage({ text: "!ping" }),
+      account: createAccount({
+        accountId: "pin-blocked-ping",
+        config: {
+          dmPolicy: "pairing",
+          allowFrom: [],
+          groupPolicy: "disabled",
+          commandPingAllowFrom: [TEST_NODE_ID],
+        },
+      }),
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      sendReply,
+    });
+    expect(upsertPairingRequestMock).not.toHaveBeenCalled();
+    expect(sendReply).not.toHaveBeenCalled();
+    expect(inboundRun).not.toHaveBeenCalled();
+  });
+
+  it("logs native-ping-budget-refused when the native ping budget is exhausted", async () => {
+    const inboundRun = vi.fn(async () => ({ dispatched: true }));
+    setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRun) as never);
+    const sendReply = vi.fn(async () => undefined);
+    const runtime = createRuntimeEnv();
+    const account = createAccount({
+      accountId: "pin-budget",
+      config: {
+        dmPolicy: "allowlist",
+        allowFrom: [TEST_NODE_ID],
+        groupPolicy: "disabled",
+        commandPingAllowFrom: [TEST_NODE_ID],
+      },
+    });
+    for (let n = 0; n < 4; n += 1) {
+      await handleMeshcoreInbound({
+        message: createMessage({ text: "!ping" }),
+        account,
+        config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+        runtime,
+        sendReply,
+      });
+    }
+    expect(sendReply).toHaveBeenCalledTimes(3);
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "meshcore: native-ping-budget-refused account=pin-budget fingerprint=!aabbccdd1122",
+      ),
+    );
+  });
+});
