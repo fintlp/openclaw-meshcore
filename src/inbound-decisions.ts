@@ -165,3 +165,47 @@ function matchesConfiguredMeshOwner(params: {
   }
   return false;
 }
+
+export type MeshcoreAdmissionDrop =
+  | "missing-mention"
+  | "unauthorized-control-command"
+  | "channel-not-allowlisted"
+  | "channel-disabled"
+  | "group-sender-policy"
+  | "dm-policy";
+
+/**
+ * Why a non-dispatch, non-pairing ingress verdict is dropped. Callers handle
+ * "dispatch" and "pairing-required" first; everything else lands here and
+ * the orchestrator logs the matching drop line.
+ */
+export function classifyMeshcoreAdmissionDrop(params: {
+  isGroup: boolean;
+  access: {
+    ingress: { admission: string; decisiveGateId?: string | null };
+    commandAccess: { shouldBlockControlCommand: boolean };
+    routeAccess: { reason?: string | null };
+  };
+}): MeshcoreAdmissionDrop {
+  const { isGroup, access } = params;
+  if (access.ingress.admission === "skip") {
+    return "missing-mention";
+  }
+  if (
+    isGroup &&
+    access.ingress.decisiveGateId === "command" &&
+    access.commandAccess.shouldBlockControlCommand
+  ) {
+    return "unauthorized-control-command";
+  }
+  if (isGroup) {
+    if (access.routeAccess.reason === "channel_not_allowlisted") {
+      return "channel-not-allowlisted";
+    }
+    if (access.routeAccess.reason === "channel_disabled") {
+      return "channel-disabled";
+    }
+    return "group-sender-policy";
+  }
+  return "dm-policy";
+}

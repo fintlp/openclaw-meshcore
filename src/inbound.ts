@@ -49,6 +49,7 @@ import {
   validateDmApprovalEntries,
 } from "./dm-identity.js";
 import {
+  classifyMeshcoreAdmissionDrop,
   decideMeshcoreDmAdmission,
   hasEntries,
   resolveMeshcoreGroupAccess,
@@ -737,32 +738,23 @@ export async function handleMeshcoreInbound(params: {
     }
     return;
   }
-  if (access.ingress.admission === "skip") {
-    runtime.log?.(`meshcore: drop channel ${message.target} (missing-mention)`);
-    return;
-  }
   if (access.ingress.admission !== "dispatch") {
-    if (
-      message.isGroup &&
-      access.ingress.decisiveGateId === "command" &&
-      access.commandAccess.shouldBlockControlCommand
-    ) {
+    const drop = classifyMeshcoreAdmissionDrop({ isGroup: message.isGroup, access });
+    if (drop === "missing-mention") {
+      runtime.log?.(`meshcore: drop channel ${message.target} (missing-mention)`);
+    } else if (drop === "unauthorized-control-command") {
       logInboundDrop({
         log: (line) => runtime.log?.(line),
         channel: CHANNEL_ID,
         reason: "control command (unauthorized)",
         target: message.senderNodeId,
       });
-      return;
-    }
-    if (message.isGroup) {
-      if (access.routeAccess.reason === "channel_not_allowlisted") {
-        runtime.log?.(`meshcore: drop channel ${message.target} (not allowlisted)`);
-      } else if (access.routeAccess.reason === "channel_disabled") {
-        runtime.log?.(`meshcore: drop channel ${message.target} (disabled)`);
-      } else {
-        runtime.log?.(`meshcore: drop group sender ${message.senderNodeId} (policy=${groupPolicy})`);
-      }
+    } else if (drop === "channel-not-allowlisted") {
+      runtime.log?.(`meshcore: drop channel ${message.target} (not allowlisted)`);
+    } else if (drop === "channel-disabled") {
+      runtime.log?.(`meshcore: drop channel ${message.target} (disabled)`);
+    } else if (drop === "group-sender-policy") {
+      runtime.log?.(`meshcore: drop group sender ${message.senderNodeId} (policy=${groupPolicy})`);
     } else {
       runtime.log?.(
         "meshcore: drop DM account=" + account.accountId +
