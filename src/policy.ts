@@ -158,8 +158,9 @@ export function resolveMeshcoreGroupToolPolicyResolution(
     match,
     // A single named account's explicit groups:{} inherits root groups in the
     // host. Return that inherited policy directly: it is this same account's
-    // map (no cross-account risk — the host fallback resolves the same
-    // accountId, group-policy-*.mjs:255-269), and deferring would lose it
+    // map (no cross-account risk: this resolver matches account keys with
+    // normalizeAccountId, the same lookup accounts.ts uses — the host's own
+    // fallback does NOT, so it is not part of this guarantee), and deferring would lose it
     // when the authored key's case differs from the wire target: this
     // resolver matches case-insensitively while the host fallback is
     // case-sensitive (group-policy-*.mjs:187-196, reached from
