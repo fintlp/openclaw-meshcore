@@ -6,6 +6,23 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## Unreleased
+
+Refactor
+
+- **Split the inbound pipeline into focused modules (#80; PRs #83, #85, #86).**
+  `handleMeshcoreInbound` (~820 lines) mixed admission decisions, native
+  commands, durability, and dispatch. It is now an orchestrator over three new
+  modules: `src/inbound-decisions.ts` (pure policy & routing decisions),
+  `src/inbound-commands.ts` (native command parse/authorize/execute), and
+  `src/inbound-durability.ts` (durable intake, duplicate detection, replay
+  dead-letters, finalize/release — kept thin ahead of a possible host durable
+  ingress queue, #51). Pure moves only: no behavior change, every security-log
+  line unchanged, and the full suite (38 files / 740 tests) stayed green on
+  every step. PRs #83 and #85 each passed an independent blind adversarial
+  review (mutation-tested) before merge; #86 was verified against the
+  durability replay/abort reproduction suites.
+
 ## 2026.11.1 - 2026-11-16
 
 **Security-breaking DM identity, replay, command, owner-route, and pairing

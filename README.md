@@ -125,7 +125,10 @@ Key source files:
 - `src/channel.ts` — plugin registration and surface wiring.
 - `src/device-client.ts` — TCP connection lifecycle, handshake, contact/channel sync.
 - `src/monitor.ts` — passive event loop + status sink. NOTE: meshcore.js emits response events by **numeric code** (`Constants.ResponseCodes`: ContactMsgRecv = 7, ChannelMsgRecv = 8, ChannelInfo = 18; the V3 variants 16/17 are normalised into 7/8 by the library). The plugin registers on the numeric codes — only `connected`/`disconnected`/`error`/`rx`/`tx` are string events. A 5 s `getWaitingMessages()` poll drains queued messages alongside push events.
-- `src/inbound.ts` — OpenClaw ingress resolver: DM pairing, group policy, envelope building.
+- `src/inbound.ts` — inbound orchestrator: wires the pipeline steps together (admission → commands → durability → dispatch) and owns every side effect.
+- `src/inbound-decisions.ts` — pure policy & routing decisions (DM identity admission, group access, drop classification, main-scope refusal). No side effects.
+- `src/inbound-commands.ts` — native command parsing, authorization, and execution (`!ping`, `!status`, repeater ops); reply delivery and durability steps are injected by the orchestrator.
+- `src/inbound-durability.ts` — durable intake/claim, duplicate detection, replay dead-letters, finalize/release. Deliberately thin; see issue #51 for the possible host-queue successor.
 - `src/send.ts` — outbound DM sender; group sends are explicitly rejected.
 - `src/normalize.ts` — node id / channel target parsing and allowlist normalization.
 - `src/policy.ts` — group matching (`channel:0`, wildcard `*`).
