@@ -2009,3 +2009,137 @@ describe("issue #84 pinning: inbound decision side effects", () => {
     );
   });
 });
+
+
+// Issue #77 handler-level regression: the inbound pipeline must admit, gate
+// mentions and apply systemPrompt/skills from inherited root groups when a
+// single named account has an explicit groups:{}; nothing else may inherit.
+describe("issue #77: inbound group lookups use the host-aware group map", () => {
+  beforeEach(() => {
+    readAllowFromStoreMock.mockReset().mockResolvedValue([]);
+    shouldHandleTextCommandsMock.mockReset().mockReturnValue(false);
+    hasControlCommandMock.mockReset().mockReturnValue(false);
+    buildMentionRegexesMock.mockReset().mockReturnValue([]);
+    matchesMentionPatternsMock.mockReset().mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    clearMeshcoreRuntime();
+  });
+
+  function cfgWith(
+    rootGroups: Record<string, MeshcoreGroupConfig>,
+    accounts: Record<string, Record<string, unknown>>,
+  ): CoreConfig {
+    return {
+      channels: {
+        meshcore: { host: "192.0.2.10", groupPolicy: "allowlist", groups: rootGroups, accounts },
+      },
+    } as CoreConfig;
+  }
+
+  async function run(config: CoreConfig, text = "group hello") {
+    const inboundRun = vi.fn(async () => ({ dispatched: true }));
+    setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRun) as never);
+    const runtime = createRuntimeEnv();
+    await handleMeshcoreInbound({
+      message: createMessage({ isGroup: true, target: "channel:0", senderNodeId: "channel:0", text }),
+      account: resolveMeshcoreAccount({ cfg: config, accountId: "ops" }),
+      config,
+      runtime,
+      sendReply: vi.fn(async () => undefined),
+    });
+    return { inboundRun, runtime };
+  }
+
+  const ROOT = {
+    "channel:0": { requireMention: false, systemPrompt: "Root prompt", skills: ["weather"] },
+  };
+
+  it("admits an inherited allowlisted channel and applies its systemPrompt and skills", async () => {
+    const r = await run(cfgWith(ROOT, { ops: { host: "192.0.2.11", groups: {} } }));
+    expect(r.inboundRun).toHaveBeenCalledTimes(1);
+    const turn = r.inboundRun.mock.calls[0][0].adapter.resolveTurn();
+    expect(turn.ctxPayload.GroupSystemPrompt).toBe("Root prompt");
+    expect(turn.replyOptions.skillFilter).toEqual(["weather"]);
+  });
+
+  it("gates an inherited requireMention channel on the mention", async () => {
+    const config = cfgWith(
+      { "channel:0": { requireMention: true } },
+      { ops: { host: "192.0.2.11", groups: {} } },
+    );
+    const unmentioned = await run(config);
+    expect(unmentioned.inboundRun).not.toHaveBeenCalled();
+    expect(unmentioned.runtime.log).toHaveBeenCalledWith(
+      "meshcore: drop channel channel:0 (missing-mention)",
+    );
+    matchesMentionPatternsMock.mockReturnValue(true);
+    const mentioned = await run(config, "@verax hello");
+    expect(mentioned.inboundRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not inherit root groups in a multi-account setup", async () => {
+    const r = await run(
+      cfgWith(ROOT, { ops: { host: "192.0.2.11", groups: {} }, lab: { host: "192.0.2.12" } }),
+    );
+    expect(r.inboundRun).not.toHaveBeenCalled();
+    expect(r.runtime.log).toHaveBeenCalledWith("meshcore: drop channel channel:0 (not allowlisted)");
+  });
+
+  it("keeps explicit non-empty account groups authoritative over root groups", async () => {
+    const r = await run(
+      cfgWith(ROOT, { ops: { host: "192.0.2.11", groups: { "channel:1": { requireMention: false } } } }),
+    );
+    expect(r.inboundRun).not.toHaveBeenCalled();
+    expect(r.runtime.log).toHaveBeenCalledWith("meshcore: drop channel channel:0 (not allowlisted)");
+  });
+});
+
+
+// #77 review (PR #89) finding 1, admission level: a multi-account setup with a
+// non-canonical account key and groups:{} must not be admitted through root
+// groups.
+describe("issue #77 review: non-canonical account keys do not inherit at admission", () => {
+  beforeEach(() => {
+    readAllowFromStoreMock.mockReset().mockResolvedValue([]);
+    shouldHandleTextCommandsMock.mockReset().mockReturnValue(false);
+    hasControlCommandMock.mockReset().mockReturnValue(false);
+    buildMentionRegexesMock.mockReset().mockReturnValue([]);
+    matchesMentionPatternsMock.mockReset().mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    clearMeshcoreRuntime();
+  });
+
+  it.each(["ops.team", "Ops Team"])("drops a group message for multi-account key %j", async (key) => {
+    const config = {
+      channels: {
+        meshcore: {
+          host: "192.0.2.10",
+          groupPolicy: "allowlist",
+          groups: { "channel:0": { requireMention: false, systemPrompt: "Root prompt" } },
+          accounts: { [key]: { host: "192.0.2.11", groups: {} }, lab: { host: "192.0.2.12" } },
+        },
+      },
+    } as CoreConfig;
+    const inboundRun = vi.fn(async () => ({ dispatched: true }));
+    setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRun) as never);
+    const runtime = createRuntimeEnv();
+    await handleMeshcoreInbound({
+      message: createMessage({
+        isGroup: true,
+        target: "channel:0",
+        senderNodeId: "channel:0",
+        text: "group hello",
+      }),
+      account: resolveMeshcoreAccount({ cfg: config, accountId: key }),
+      config,
+      runtime,
+      sendReply: vi.fn(async () => undefined),
+    });
+    expect(inboundRun).not.toHaveBeenCalled();
+    expect(runtime.log).toHaveBeenCalledWith("meshcore: drop channel channel:0 (not allowlisted)");
+  });
+});

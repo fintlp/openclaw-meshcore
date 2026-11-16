@@ -39,7 +39,7 @@ import {
 } from "./normalize.js";
 import { meshcoreOutboundBaseAdapter } from "./outbound-base.js";
 import {
-  resolveMeshcoreGroupMatch,
+  resolveMeshcoreEffectiveGroupMatch,
   resolveMeshcoreGroupToolPolicy,
   resolveMeshcoreRequireMention,
 } from "./policy.js";
@@ -170,8 +170,9 @@ export const meshcorePlugin: ChannelPlugin<ResolvedMeshcoreAccount, MeshcoreProb
           if (!groupId) {
             return false;
           }
-          const match = resolveMeshcoreGroupMatch({
-            groups: account.config.groups,
+          const match = resolveMeshcoreEffectiveGroupMatch({
+            cfg: cfg as CoreConfig,
+            account,
             target: groupId,
           });
           return resolveMeshcoreRequireMention({

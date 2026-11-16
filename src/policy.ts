@@ -78,6 +78,56 @@ export function hasMeshcoreGroupToolPolicy(
   return match.groupConfig?.tools !== undefined || match.wildcardConfig?.tools !== undefined;
 }
 
+/**
+ * The group map an account effectively uses, applying the host's empty-map
+ * inheritance: a single named account with an explicit `groups: {}` inherits
+ * root `channels.meshcore.groups` (host `inheritEmptyKeys`). Introduced for
+ * tool policy in #76 and shared by every group lookup (#77): admission and
+ * mention, requireMention, systemPrompt and skills.
+ *
+ * The captured account is authoritative for this dispatch. The host merge
+ * only fills an empty captured map (notably groups:{} inheriting root); in
+ * normal adapter resolution both come from the same config and agree.
+ */
+export function resolveMeshcoreEffectiveGroups(params: {
+  cfg: CoreConfig;
+  account: ResolvedMeshcoreAccount;
+}): Record<string, MeshcoreGroupConfig> | undefined {
+  const { account } = params;
+  const channelConfig = params.cfg.channels?.meshcore;
+  const hostGroups = channelConfig
+    ? resolveMergedAccountConfig<MeshcoreAccountConfig>({
+        channelConfig,
+        channelId: "meshcore",
+        accounts: channelConfig.accounts as
+          | Record<string, Partial<MeshcoreAccountConfig>>
+          | undefined,
+        accountId: normalizeAccountId(account.accountId),
+        // Same key matching as accounts.ts: without it the SDK falls back to
+        // lowercase-only key lookup, misses non-canonical keys ("ops.team",
+        // "Ops Team") and returns the bare root config, root groups included.
+        normalizeAccountId,
+        inheritEmptyKeys:
+          Object.keys(channelConfig.accounts ?? {}).length > 1 ? {} : { groups: "object" },
+      }).groups
+    : undefined;
+  return Object.keys(account.config.groups ?? {}).length > 0
+    ? account.config.groups
+    : hostGroups;
+}
+
+/** resolveMeshcoreGroupMatch over the host-aware effective group map. */
+export function resolveMeshcoreEffectiveGroupMatch(params: {
+  cfg: CoreConfig;
+  account: ResolvedMeshcoreAccount;
+  target: string;
+}): MeshcoreGroupMatch {
+  return resolveMeshcoreGroupMatch({
+    groups: resolveMeshcoreEffectiveGroups({ cfg: params.cfg, account: params.account }),
+    target: params.target,
+  });
+}
+
 type ResolveMeshcoreGroupToolPolicyParams = {
   cfg: CoreConfig;
   accountId?: string | null;
@@ -97,34 +147,20 @@ export function resolveMeshcoreGroupToolPolicyResolution(
 ): MeshcoreGroupToolPolicyResolution {
   const account =
     params.account ?? resolveMeshcoreAccount({ cfg: params.cfg, accountId: params.accountId });
-  const channelConfig = params.cfg.channels?.meshcore;
-  const hostGroups = channelConfig
-    ? resolveMergedAccountConfig<MeshcoreAccountConfig>({
-        channelConfig,
-        channelId: "meshcore",
-        accounts: channelConfig.accounts as
-          | Record<string, Partial<MeshcoreAccountConfig>>
-          | undefined,
-        accountId: normalizeAccountId(account.accountId),
-        inheritEmptyKeys:
-          Object.keys(channelConfig.accounts ?? {}).length > 1 ? {} : { groups: "object" },
-      }).groups
-    : undefined;
-  // The captured account is authoritative for this dispatch. The host merge
-  // only fills an empty captured map (notably groups:{} inheriting root); in
-  // normal adapter resolution both come from the same config and agree.
-  const groups = Object.keys(account.config.groups ?? {}).length > 0
-    ? account.config.groups
-    : hostGroups;
-  const match = resolveMeshcoreGroupMatch({ groups, target: params.target });
+  const match = resolveMeshcoreEffectiveGroupMatch({
+    cfg: params.cfg,
+    account,
+    target: params.target,
+  });
   const authoredPolicy = match.groupConfig?.tools ?? match.wildcardConfig?.tools;
 
   return {
     match,
     // A single named account's explicit groups:{} inherits root groups in the
     // host. Return that inherited policy directly: it is this same account's
-    // map (no cross-account risk — the host fallback resolves the same
-    // accountId, group-policy-*.mjs:255-269), and deferring would lose it
+    // map (no cross-account risk: this resolver matches account keys with
+    // normalizeAccountId, the same lookup accounts.ts uses — the host's own
+    // fallback does NOT, so it is not part of this guarantee), and deferring would lose it
     // when the authored key's case differs from the wire target: this
     // resolver matches case-insensitively while the host fallback is
     // case-sensitive (group-policy-*.mjs:187-196, reached from

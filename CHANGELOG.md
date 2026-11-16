@@ -8,6 +8,10 @@ canonical source for that text.
 
 ## Unreleased
 
+Fixed
+
+- **Group admission, mention, requireMention, systemPrompt and skills now resolve inherited root groups (#77, PR #89).** A single named account with an explicit `groups: {}` inherits root `channels.meshcore.groups` (host `inheritEmptyKeys`), but those lookups used only the account's own empty map and silently ignored the inherited groups. All five lookups now share one host-aware resolver (`resolveMeshcoreEffectiveGroups` in policy.ts) with the #76 tool-policy resolution. Two companion corrections ship with it: the merge now matches account keys with `normalizeAccountId`, so multi-account setups with non-canonical keys (e.g. `"ops.team"`) no longer receive root groups — closing the same leak in the #76 tool-policy surface — and a lone literal `accounts.default` entry counts as one named account under host semantics and therefore inherits. **Operator-visible:** in multi-account setups with non-canonical account keys, an accidentally inherited root group tool policy no longer applies (the neutral policy is used instead). That is the correct behavior, but it removes a restriction such setups previously had.
+
 Refactor
 
 - **Split the inbound pipeline into focused modules (#80; PRs #83, #85, #86).**
