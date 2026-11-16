@@ -29,7 +29,7 @@ import {
   formatMeshcoreNodeId,
   normalizeMeshcoreAllowEntry,
 } from "./normalize.js";
-import { resolveMeshcoreGroupMatch } from "./policy.js";
+import { resolveMeshcoreEffectiveGroupMatch } from "./policy.js";
 import {
   isBlockedNativeCommand,
   resolveMeshcoreCommandAuthorized,
@@ -301,8 +301,12 @@ export async function handleMeshcoreInbound(params: {
     log: (line) => runtime.log?.(line),
   });
 
-  const groupMatch = resolveMeshcoreGroupMatch({
-    groups: account.config.groups,
+  // Host-aware group map (#77): a single named account's explicit groups:{}
+  // inherits root channels.meshcore.groups, exactly as tool policy does (#76).
+  // Admission, mention, systemPrompt and skills all read this one match.
+  const groupMatch = resolveMeshcoreEffectiveGroupMatch({
+    cfg: config,
+    account,
     target: message.target,
   });
 
