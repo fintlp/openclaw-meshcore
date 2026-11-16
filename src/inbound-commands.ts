@@ -11,7 +11,8 @@ import type { ResolvedMeshcoreAccount } from "./accounts.js";
 import { authorizeDmCommand, type DmCommandAuthorization } from "./dm-identity.js";
 import type { DurabilityStore } from "./durability.js";
 import { readNodeStatusSnapshot } from "./node-status.js";
-import type { RepeaterOpsKind } from "./repeater-ops.js";
+import { assertNativePingRateLimit } from "./rate-limit.js";
+import { runRepeaterOpsCommand, type RepeaterOpsKind } from "./repeater-ops.js";
 import type { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
 
@@ -171,4 +172,63 @@ export function isBlockedNativeCommand(params: {
     params.nativeCommand &&
     (!params.commandDecision.nativeAuthorized || params.access.ingress.admission !== "dispatch"),
   );
+}
+
+/**
+ * Execute an admitted, natively authorized DM command (!ping, !status, or a
+ * repeater-ops command). Returns true when the frame was handled (replied,
+ * or refused by the !ping budget) and the orchestrator must stop; false when
+ * the body is not an executable native command.
+ *
+ * Durability bookkeeping (intake / mark / release) and reply delivery are
+ * injected by the orchestrator; this function only sequences them.
+ */
+export async function runMeshcoreNativeCommand(params: {
+  rawBody: string;
+  account: ResolvedMeshcoreAccount;
+  durability?: DurabilityStore | null;
+  deliverReply: (text: string) => Promise<void>;
+  onPingBudgetRefused: () => void;
+  commandIntake: () => number | undefined;
+  commandMark: (id: number | undefined) => void;
+  commandRelease: (id: number | undefined, err: unknown) => void;
+}): Promise<boolean> {
+  const { rawBody, account, commandIntake, commandMark } = params;
+  if (COMMAND_REPLIES.has(rawBody)) {
+    if (rawBody === "!ping") {
+      try {
+        assertNativePingRateLimit({ accountId: account.accountId });
+      } catch {
+        params.onPingBudgetRefused();
+        return true;
+      }
+    }
+    const replyText = buildCommandReply(rawBody, account.accountId, params.durability);
+    if (replyText !== undefined) {
+      const cid = commandIntake();
+      await params.deliverReply(replyText);
+      commandMark(cid);
+      return true;
+    }
+  }
+  const opsInvocation = parseRepeaterOpsInvocation(rawBody);
+  if (opsInvocation) {
+    const cid = commandIntake();
+    // nit 4: a throw mid-command releases the recorded row instead of
+    // leaking it pending forever.
+    try {
+      const replyText = await runRepeaterOpsCommand({
+        op: opsInvocation.op,
+        targetArg: opsInvocation.arg,
+        account,
+      });
+      await params.deliverReply(replyText);
+      commandMark(cid);
+    } catch (err) {
+      params.commandRelease(cid, err);
+      throw err;
+    }
+    return true;
+  }
+  return false;
 }

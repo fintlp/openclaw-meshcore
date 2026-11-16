@@ -34,15 +34,14 @@ import {
   normalizeMeshcoreAllowEntry,
 } from "./normalize.js";
 import { resolveMeshcoreGroupMatch } from "./policy.js";
-import { runRepeaterOpsCommand } from "./repeater-ops.js";
 import {
-  buildCommandReply,
   COMMAND_REPLIES,
   isBlockedNativeCommand,
   parseRepeaterOpsInvocation,
   resolveMeshcoreCommandAuthorized,
   resolveMeshcoreCommandDecision,
   resolveMeshcoreHostCommandFacts,
+  runMeshcoreNativeCommand,
 } from "./inbound-commands.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
@@ -59,7 +58,7 @@ import {
   shouldRefuseMainScopedGroupRoute,
   type MeshcoreGroupPolicy,
 } from "./inbound-decisions.js";
-import { assertNativePingRateLimit, resolveSendRateLimitConfig } from "./rate-limit.js";
+import { resolveSendRateLimitConfig } from "./rate-limit.js";
 import { runPairingChallenge } from "./pairing-budget.js";
 import {
   buildMeshcorePairingReplyText,
@@ -517,65 +516,42 @@ export async function handleMeshcoreInbound(params: {
         store.markDispatched(account.accountId, id);
       }
     };
-    if (COMMAND_REPLIES.has(rawBody)) {
-      if (rawBody === "!ping") {
-        try {
-          assertNativePingRateLimit({ accountId: account.accountId });
-        } catch {
-          logInboundSecurity({
-            runtime,
-            accountId: account.accountId,
-            reason: "native-ping-budget-refused",
-            detail: "fingerprint=" + fingerprintNodeId(message.senderNodeId),
-          });
-          return;
-        }
+    const commandRelease = (cid: number | undefined, err: unknown) => {
+      if (store && cid !== undefined) {
+        store.releaseClaim(
+          account.accountId,
+          cid,
+          err instanceof Error ? err.message : String(err),
+        );
       }
-      const replyText = buildCommandReply(rawBody, account.accountId, params.durability);
-      if (replyText !== undefined) {
-        const cid = commandIntake();
+    };
+    const handled = await runMeshcoreNativeCommand({
+      rawBody,
+      account,
+      durability: params.durability,
+      deliverReply: async (text) => {
         await deliverMeshcoreReply({
-          payload: { text: replyText },
+          payload: { text },
           cfg: config,
           target: message.senderNodeId,
           accountId: account.accountId,
           sendReply: params.sendReply,
           statusSink: params.statusSink,
         });
-        commandMark(cid);
-        return;
-      }
-    }
-    const opsInvocation = parseRepeaterOpsInvocation(rawBody);
-    if (opsInvocation) {
-      const cid = commandIntake();
-      // nit 4: a throw mid-command releases the recorded row instead of
-      // leaking it pending forever.
-      try {
-        const replyText = await runRepeaterOpsCommand({
-          op: opsInvocation.op,
-          targetArg: opsInvocation.arg,
-          account,
-        });
-        await deliverMeshcoreReply({
-          payload: { text: replyText },
-          cfg: config,
-          target: message.senderNodeId,
+      },
+      onPingBudgetRefused: () => {
+        logInboundSecurity({
+          runtime,
           accountId: account.accountId,
-          sendReply: params.sendReply,
-          statusSink: params.statusSink,
+          reason: "native-ping-budget-refused",
+          detail: "fingerprint=" + fingerprintNodeId(message.senderNodeId),
         });
-        commandMark(cid);
-      } catch (err) {
-        if (store && cid !== undefined) {
-          store.releaseClaim(
-            account.accountId,
-            cid,
-            err instanceof Error ? err.message : String(err),
-          );
-        }
-        throw err;
-      }
+      },
+      commandIntake,
+      commandMark,
+      commandRelease,
+    });
+    if (handled) {
       return;
     }
   }
