@@ -218,7 +218,7 @@ You can also set the environment variable `MESHCORE_HOST` for the default accoun
 | `dmPolicy` | `"pairing" \| "allowlist" \| "open" \| "disabled"` | `"pairing"` | How direct messages are admitted. `"open"` requires `allowFrom: ["*"]`. |
 | `allowFrom` | array of strings/numbers | `[]` | Allowed DM senders: full `!nodeId`, 12-hex prefix, advert name, or `"*"`. |
 | `groupPolicy` | `"open" \| "allowlist" \| "disabled"` | `"disabled"` | How group/broadcast messages are admitted. `"open"` = deliver to agents as a read-only monitor (transmission stays locked regardless of policy). |
-| `groupAllowFrom` | array of strings/numbers | `[]` | Allowed group senders (same formats as `allowFrom`). |
+| `groupAllowFrom` | array of strings/numbers | `[]` | Existing group-admission filter. Group frames expose the channel target, not the radio author; this is not a per-author boundary. |
 | `groups` | object | `{}` | Per-group config keyed by `channel:0` … `channel:7` or `"*"`. |
 | `channels` | array of 0–7 | `[0]` | Mesh channel indices to listen for broadcasts. |
 | `textChunkLimit` | number (40–500) | `127` | Max **UTF-8 bytes** per outbound text chunk (the wire frame limit is byte-based). Chunks split at word boundaries where possible and never inside a multibyte character. Default 127 matches the observed wire cap — see Known Limitations. |
@@ -298,10 +298,16 @@ How it works, briefly: admitted frames are appended to the log and claimed with 
 |-------|------|-------------|
 | `enabled` | boolean | Whether this group is active. |
 | `requireMention` | boolean | Only dispatch when the agent is mentioned. |
-| `allowFrom` | array | Allowed senders for this specific group. |
+| `allowFrom` | array | Existing group-admission filter; it cannot identify individual radio authors on this transport. |
 | `skills` | array of strings | Skill allowlist for this group. |
 | `systemPrompt` | string | Extra system prompt for this group. |
-| `tools` / `toolsBySender` | object | Tool policy for the group. |
+| `tools` | object | Group-wide tool policy. Exact-group `tools` override wildcard-group `tools`; `allow`, `alsoAllow`, and `deny` are preserved. |
+
+**Group author identity and tool-policy migration.** MeshCore group frames carry no radio-author identity: `groupAllowFrom` and `groups.*.allowFrom` retain their existing channel-admission behavior, but cannot distinguish the person or node that authored a group message. The unenforceable group-local `toolsBySender` setting has therefore been removed. Runtime and manifest validation now reject it in exact groups, wildcard groups, and named accounts. Move its restrictions to a deliberate group-wide `groups["channel:N"].tools.deny` policy or to the receiving agent's policy. If the old sender entries differed, choose the single group-wide policy explicitly; no per-author distinction is possible. The gateway-wide `tools.toolsBySender` recipe for **DMs** is unchanged.
+
+A group with configured `tools` must use `session.groupScope: "per-group"`, either globally or in the effective binding's `session` override. Main-scoped group sessions drop the group id that OpenClaw needs to resolve the policy, so the plugin refuses those turns before durability intake and logs the account, channel, and remediation. A queued replay is dead-lettered as `group-scope-main`. Unprotected groups may still use `main`.
+
+Group slash commands are plain text. A recognized command without a real mention cannot bypass `requireMention`; a genuinely mentioned command reaches the agent with command interpretation suppressed. Digest mode still writes each admitted group message once without resolving a route or starting a turn, and disabled groups produce neither an entry nor a turn.
 
 ## DM commands
 
@@ -325,6 +331,7 @@ Commands marked **on air** transmit real LoRa frames into the mesh in addition t
 4. **No private-key exposure.** The plugin never requests or exports the node's private key.
 5. **Node contact requirement (firmware).** Current MeshCore node firmware **silently drops DMs from senders that are not in the node's own contact list** — no ACK, no queue, no companion signaling, no error anywhere. Add expected contacts on the node itself (MeshCore app, with the gateway channel temporarily disabled — one companion client at a time) or enable auto-add on the node. First thing to check when "nothing arrives".
 6. **Mesh DM sessions inherit the agent's full toolset unless you scope it.** Admission (`dmPolicy`) decides who gets in; it does not bound what an admitted sender can make the agent *do*. Two working recipes, no plugin code required: deny dangerous tool classes per sender via the gateway's global `tools.toolsBySender` (keys `channel:meshcore:<nodeId>`), or route mesh DMs to a dedicated restricted agent via `multiAgent` bindings. Both with copy-paste examples in docs/AGENT-SCOPING.md, Layer 2. This is defense-in-depth on top of convenience-grade mesh identity (see residual risk below) — it filters what a sender may invoke, it does not authenticate them. A plugin-native per-DM policy config is blocked on a core hook (issue #9, upstream openclaw/openclaw#176348).
+7. **Group tools are group-wide and route-sensitive.** Group-local `toolsBySender` is rejected because MeshCore group frames have no radio-author identity. Configure `groups["channel:N"].tools` instead and keep protected groups on `groupScope: "per-group"`; main-scoped protected turns are refused, with replay dead-letter reason `group-scope-main`. Group commands cannot bypass mention gating.
 
 ### Pairing: what an unknown sender can and cannot do
 

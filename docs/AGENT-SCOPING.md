@@ -89,10 +89,15 @@ Match order is channel+id, id, e164, username, name, then wildcard — put speci
 }
 ```
 
-- **`toolsBySender`** for known peers inside groups — e.g. your own handheld gets more reach than everyone else.
+**Group tools are group-wide only.** MeshCore group frames do not identify their radio authors. `groupAllowFrom` and `groups.*.allowFrom` keep their existing channel-admission behavior, but are not per-author security boundaries. Group-local `toolsBySender` was never enforceable and is now rejected by both runtime and manifest validation (including wildcard groups and named accounts). Migrate restrictions to `groups["channel:N"].tools.deny` or the receiving agent's policy; where the old sender entries differed, the operator must choose one deliberate group-wide policy. This removal does not affect the gateway-wide `tools.toolsBySender` DM recipe above.
+
+Keep a tool-protected group on `session.groupScope: "per-group"`, globally or in the effective binding. `main` removes the group id needed by the host's group-policy callback, so a protected main-scoped turn is refused before durability intake; replays dead-letter as `group-scope-main`. The resolved route, including binding overrides in either direction, is authoritative. Unprotected groups can still use `main`.
+
+Slash commands in groups are plain text: command recognition cannot bypass `requireMention`, and a genuinely mentioned command is dispatched with command authority and interpretation suppressed. Digest mode remains the safer default and stores admitted messages without starting turns.
+
 - **Smart-home control from the mesh** — see the recipe below: a dedicated mesh-facing agent with a minimal tool set, and the three risk tiers (read-only / reversible / physical access).
 
-What does not exist yet (issue #9): **plugin-native** per-DM tool config — a `channels.meshcore...toolsBySender` mirroring the group shape, resolved by the plugin. Blocked on a core hook: the gateway's tool-policy resolution only consults channel plugins for group scopes, never for DM turns (upstream feature request openclaw/openclaw#176348). Until it lands, the two recipes above are the supported path.
+What does not exist yet (issue #9): **plugin-native** per-DM tool config — a `channels.meshcore...toolsBySender` analogous to the gateway-wide sender map, resolved by the plugin. Blocked on a core hook: the gateway's tool-policy resolution only consults channel plugins for group scopes, never for DM turns (upstream feature request openclaw/openclaw#176348). Until it lands, the two recipes above are the supported path.
 
 ## Layer 3 — operational hygiene
 
@@ -185,7 +190,7 @@ can).
 ## Recommended baseline (what we run)
 
 - `dmPolicy: "pairing"`, approve by hand.
-- `groupPolicy: "open"` for monitoring with agent dispatch **off** for groups (or, if on: `requireMention: true` + tool denials as above).
+- `groupPolicy: "open"` for monitoring with agent dispatch **off** for groups (or, if on: `requireMention: true` + group-wide tool denials as above + `session.groupScope: "per-group"`).
 - Mesh-facing agent has no config-editing rights and a documented habit of asking before system changes.
 
 **Heads-up on the open-policy warning:** with `groupPolicy: "open"` the gateway logs a startup warning recommending `"allowlist"` instead. That warning exists for the dispatch-on case — open + agent dispatch means any mesh stranger gets a session. If you run `open` strictly for receive-only monitoring (dispatch off), the warning is expected: acknowledge it, don't obey it. If you turn dispatch on, either set `groupPolicy: "allowlist"` with explicit `groups` entries, or accept the warning knowingly with `requireMention` + tool denials in place.

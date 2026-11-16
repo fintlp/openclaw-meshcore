@@ -3,7 +3,6 @@ import type {
   DmConfig,
   DmPolicy,
   GroupPolicy,
-  GroupToolPolicyBySenderConfig,
   GroupToolPolicyConfig,
   MarkdownConfig,
   OpenClawConfig,
@@ -14,7 +13,6 @@ import type { IdentityBinding, PrefixConsistency, PrefixMatch } from "./identity
 export type MeshcoreGroupConfig = {
   requireMention?: boolean;
   tools?: GroupToolPolicyConfig;
-  toolsBySender?: GroupToolPolicyBySenderConfig;
   skills?: string[];
   enabled?: boolean;
   allowFrom?: Array<string | number>;

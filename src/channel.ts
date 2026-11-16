@@ -38,7 +38,11 @@ import {
   normalizeMeshcoreMessagingTarget,
 } from "./normalize.js";
 import { meshcoreOutboundBaseAdapter } from "./outbound-base.js";
-import { resolveMeshcoreGroupMatch, resolveMeshcoreRequireMention } from "./policy.js";
+import {
+  resolveMeshcoreGroupMatch,
+  resolveMeshcoreGroupToolPolicy,
+  resolveMeshcoreRequireMention,
+} from "./policy.js";
 import { probeMeshcore } from "./probe.js";
 import { resolveMeshcoreOutboundSessionRoute } from "./session-route.js";
 import { meshcoreSetupAdapter, meshcoreSetupWizard } from "./setup-surface.js";
@@ -175,17 +179,12 @@ export const meshcorePlugin: ChannelPlugin<ResolvedMeshcoreAccount, MeshcoreProb
             wildcardConfig: match.wildcardConfig,
           });
         },
-        resolveToolPolicy: ({ cfg, accountId, groupId }) => {
-          const account = resolveMeshcoreAccount({ cfg: cfg as CoreConfig, accountId });
-          if (!groupId) {
-            return undefined;
-          }
-          const match = resolveMeshcoreGroupMatch({
-            groups: account.config.groups,
+        resolveToolPolicy: ({ cfg, accountId, groupId }) =>
+          resolveMeshcoreGroupToolPolicy({
+            cfg: cfg as CoreConfig,
+            accountId,
             target: groupId,
-          });
-          return match.groupConfig?.tools ?? match.wildcardConfig?.tools;
-        },
+          }),
       },
       messaging: {
         targetPrefixes: ["meshcore"],

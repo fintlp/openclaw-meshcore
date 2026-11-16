@@ -69,6 +69,29 @@ tests pin the refusal. See the README's "Safety by default" and "Security
 model" sections, and [docs/AGENT-SCOPING.md](docs/AGENT-SCOPING.md) for the
 operator-level trust model.
 
+### Group tool policy and activation
+
+MeshCore group frames carry no radio-author identity. `groupAllowFrom` and
+`groups.*.allowFrom` therefore retain only their existing channel-admission
+behavior; they cannot authenticate individual group authors. The former
+unenforced group-local `toolsBySender` key is rejected by runtime and manifest
+validation in exact groups, wildcard groups, and named accounts. Migrate to a
+single deliberately chosen `groups["channel:N"].tools` policy or the receiving
+agent's policy.
+
+OpenClaw's `groupScope: "main"` removes the group id required to resolve that
+policy. Protected main-scoped turns are refused before durability intake, with
+an operator log naming the account and channel; protected replays dead-letter
+as `group-scope-main`. Set `session.groupScope: "per-group"` globally or in the
+effective binding. Binding overrides are honored in both directions, and
+unprotected groups remain eligible for main scope.
+
+Group text commands cannot bypass `requireMention`. They are excluded from
+command authorization before mention gating; a genuinely mentioned command is
+passed to the agent as plain text with `CommandAuthorized: false` and
+`CommandInterpretationSuppressed: true`. The production digest early return,
+default-disabled group policy, and receive-only outbound guard are unchanged.
+
 ### Data at rest
 
 The inbound durability log (issue #48, default on) stores admitted message

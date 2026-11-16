@@ -34,7 +34,12 @@ import {
   formatMeshcoreNodeId,
   normalizeMeshcoreAllowEntry,
 } from "./normalize.js";
-import { resolveMeshcoreGroupMatch, resolveMeshcoreRequireMention } from "./policy.js";
+import {
+  hasMeshcoreGroupToolPolicy,
+  resolveMeshcoreGroupMatch,
+  resolveMeshcoreGroupToolPolicyResolution,
+  resolveMeshcoreRequireMention,
+} from "./policy.js";
 import { readNodeStatusSnapshot } from "./node-status.js";
 import { runRepeaterOpsCommand, type RepeaterOpsKind } from "./repeater-ops.js";
 import { getMeshcoreRuntime } from "./runtime.js";
@@ -261,7 +266,12 @@ export async function handleMeshcoreInbound(params: {
     cfg: config as OpenClawConfig,
     surface: CHANNEL_ID,
   });
-  const hasControlCommand = core.channel.text.hasControlCommand(rawBody, config as OpenClawConfig);
+  // Group commands are plain text: never let command authorization bypass
+  // requireMention. DMs retain the existing command behavior.
+  const ingressAllowTextCommands = message.isGroup ? false : allowTextCommands;
+  const hasControlCommand = message.isGroup
+    ? false
+    : core.channel.text.hasControlCommand(rawBody, config as OpenClawConfig);
   const mentionRegexes = core.channel.mentions.buildMentionRegexes(config as OpenClawConfig);
   const wasMentioned = core.channel.mentions.matchesMentionPatterns(rawBody, mentionRegexes);
   const requireMention = message.isGroup
@@ -323,17 +333,19 @@ export async function handleMeshcoreInbound(params: {
       groupAllowFromFallbackToAllowFrom: false,
       activation: {
         requireMention: message.isGroup && requireMention,
-        allowTextCommands,
+        allowTextCommands: ingressAllowTextCommands,
       },
     },
     allowFrom: account.config.allowFrom,
     groupAllowFrom: account.config.groupAllowFrom,
-    command: {
-      allowTextCommands,
-      hasControlCommand,
-    },
+    command: message.isGroup
+      ? false
+      : {
+          allowTextCommands: ingressAllowTextCommands,
+          hasControlCommand,
+        },
   });
-  const commandAuthorized = access.commandAccess.authorized;
+  const commandAuthorized = message.isGroup ? false : access.commandAccess.authorized;
 
   // Replay path: admission flipped while we were down (config changed).
   // The attempt was already counted at claim time; release the claim — the
@@ -532,6 +544,40 @@ export async function handleMeshcoreInbound(params: {
     return;
   }
 
+  const peerId = message.isGroup ? message.target : message.senderNodeId;
+  const peerKind = message.isGroup ? "group" : "direct";
+  const route = resolveAgentRoute({
+    cfg: config as OpenClawConfig,
+    channel: CHANNEL_ID,
+    accountId: account.accountId,
+    peer: {
+      kind: peerKind,
+      id: peerId,
+    },
+  });
+
+  // Main-scoped group sessions drop the group id before OpenClaw calls the
+  // channel policy adapter, silently shedding group-wide tools. Check the
+  // effective route (including binding overrides), before durability intake.
+  if (message.isGroup && route.groupScope === "main") {
+    // Use the captured account plus this dispatch's config for both the match
+    // and policy decision; do not re-resolve a newer account from live config.
+    const toolPolicy = resolveMeshcoreGroupToolPolicyResolution({
+      cfg: config,
+      account,
+      target: message.target,
+    });
+    if (hasMeshcoreGroupToolPolicy(toolPolicy.match)) {
+      runtime.log?.(
+        `meshcore: refuse group ${message.target} (account=${account.accountId}; groupScope="main" would shed its tool policy; set session.groupScope="per-group" or the effective binding's session.groupScope="per-group")`,
+      );
+      if (params.replayOf !== undefined) {
+        params.durability?.deadLetter(account.accountId, params.replayOf, "group-scope-main");
+      }
+      return;
+    }
+  }
+
   // Durability intake + claim (#48): session-bound frames are logged as
   // admitted (admission is decided above) and claimed with a lease BEFORE any
   // dispatch work. Attempts count at claim, so process deaths and crash loops
@@ -595,18 +641,6 @@ export async function handleMeshcoreInbound(params: {
   }
 
   try {
-  const peerId = message.isGroup ? message.target : message.senderNodeId;
-  const peerKind = message.isGroup ? "group" : "direct";
-  const route = resolveAgentRoute({
-    cfg: config as OpenClawConfig,
-    channel: CHANNEL_ID,
-    accountId: account.accountId,
-    peer: {
-      kind: peerKind,
-      id: peerId,
-    },
-  });
-
   const fromLabel = message.isGroup ? message.target : message.senderNodeId;
   const { storePath, envelopeOptions, previousTimestamp } =
     await resolveInboundSessionEnvelopeContextAsync({
@@ -653,6 +687,7 @@ export async function handleMeshcoreInbound(params: {
     OriginatingChannel: CHANNEL_ID,
     OriginatingTo: `meshcore:${peerId}`,
     CommandAuthorized: commandAuthorized,
+    CommandInterpretationSuppressed: message.isGroup ? true : undefined,
     ReplyToId: message.replyToId,
     ChannelStructuredContext: [
       {
