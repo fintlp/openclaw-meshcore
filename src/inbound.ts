@@ -27,31 +27,31 @@ import {
   resolveDefaultGroupPolicy,
   warnMissingProviderGroupPolicyFallbackOnce,
 } from "openclaw/plugin-sdk/runtime-group-policy";
-import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { ResolvedMeshcoreAccount } from "./accounts.js";
 import {
   buildMeshcoreAllowlistCandidates,
   formatMeshcoreNodeId,
   normalizeMeshcoreAllowEntry,
 } from "./normalize.js";
-import {
-  hasMeshcoreGroupToolPolicy,
-  resolveMeshcoreGroupMatch,
-  resolveMeshcoreGroupToolPolicyResolution,
-  resolveMeshcoreRequireMention,
-} from "./policy.js";
+import { resolveMeshcoreGroupMatch } from "./policy.js";
 import { readNodeStatusSnapshot } from "./node-status.js";
 import { runRepeaterOpsCommand, type RepeaterOpsKind } from "./repeater-ops.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
 import {
   authorizeDmCommand,
-  canonicalMeshcoreNodeId,
   dmIdentityDigestsEqual,
-  fullKeySha256,
   parseDmIdentityEvidence,
   validateDmApprovalEntries,
 } from "./dm-identity.js";
+import {
+  classifyMeshcoreAdmissionDrop,
+  decideMeshcoreDmAdmission,
+  hasEntries,
+  resolveMeshcoreGroupAccess,
+  shouldRefuseMainScopedGroupRoute,
+  type MeshcoreGroupPolicy,
+} from "./inbound-decisions.js";
 import { assertNativePingRateLimit, resolveSendRateLimitConfig } from "./rate-limit.js";
 import { runPairingChallenge } from "./pairing-budget.js";
 import {
@@ -60,7 +60,6 @@ import {
 } from "./pairing-reply.js";
 
 const CHANNEL_ID = "meshcore" as const;
-type MeshcoreGroupPolicy = "open" | "allowlist" | "disabled";
 
 const meshcoreIngressIdentity = defineStableChannelIngressIdentity({
   key: "meshcore-node",
@@ -70,10 +69,6 @@ const meshcoreIngressIdentity = defineStableChannelIngressIdentity({
   isWildcardEntry: (entry) => normalizeMeshcoreAllowEntry(entry) === "*",
   resolveEntryId: ({ entryIndex }) => `meshcore-entry-${entryIndex + 1}:node`,
 });
-
-function hasEntries(entries: Array<string | number> | undefined): boolean {
-  return normalizeStringEntries(entries).some((entry) => normalizeMeshcoreAllowEntry(entry));
-}
 
 function createMeshcoreIngressSubject(message: MeshcoreInboundMessage) {
   const candidates = buildMeshcoreAllowlistCandidates({
@@ -213,39 +208,6 @@ function fingerprintNodeId(nodeId: string): string {
 }
 
 
-function matchesConfiguredMeshOwner(params: {
-  config: CoreConfig;
-  fullKey: string;
-}): boolean {
-  const commands = (params.config as { commands?: { ownerAllowFrom?: unknown } }).commands;
-  const entries = Array.isArray(commands?.ownerAllowFrom) ? commands.ownerAllowFrom : [];
-  for (const raw of entries) {
-    if (typeof raw !== "string" && typeof raw !== "number") continue;
-    let entry = String(raw).trim();
-    if (!entry) continue;
-    // Mirror resolveOwnerAllowFromList on 2026.10.5 and 2026.11.3: strip ONE
-    // recognized provider prefix, then run the plugin's formatAllowFrom
-    // normalization. Thus meshcore:meshcore:!<key> normalizes exactly as the
-    // host sees it instead of bypassing this fail-closed owner-route refusal.
-    const separatorIndex = entry.indexOf(":");
-    if (separatorIndex > 0) {
-      // The host trims the prefix before the channel lookup
-      // (resolveOwnerAllowFromList → normalizeNullableString .trim()); mirror
-      // it so "meshcore :!key" / tab variants cannot bypass this refusal.
-      if (entry.slice(0, separatorIndex).trim().toLowerCase() !== "meshcore") continue;
-      entry = entry.slice(separatorIndex + 1).trim();
-      if (!entry) continue;
-    }
-    const normalized = normalizeMeshcoreAllowEntry(entry);
-    const hex = normalized.startsWith("!") ? normalized.slice(1) : "";
-    // Bare IDs, ! prefixes and explicit meshcore: entries all match only
-    // against the CURRENT validated full key. Short prefixes stay conservative
-    // refusals; names and other unmatchable aliases never establish a match.
-    if (/^[0-9a-f]{1,64}$/u.test(hex) && params.fullKey.startsWith(hex)) return true;
-  }
-  return false;
-}
-
 function validDmApprovals(params: {
   entries: readonly unknown[] | undefined;
   allowWildcard: boolean;
@@ -377,49 +339,19 @@ export async function handleMeshcoreInbound(params: {
   }
 
   if (!message.isGroup) {
-    const identity = message.dmIdentity;
-    const canonical = identity?.status === "unique"
-      ? canonicalMeshcoreNodeId(identity.fullKey)
-      : undefined;
-    const evidence = parseDmIdentityEvidence(message);
-    const validIdentity =
-      identity?.status === "unique" &&
-      canonical !== undefined &&
-      identity.nodeId === canonical &&
-      message.senderNodeId === canonical &&
-      message.target === canonical &&
-      evidence !== undefined &&
-      evidence.wirePrefixHex === identity.fullKey.slice(0, 12) &&
-      dmIdentityDigestsEqual(evidence.fullKeySha256, fullKeySha256(identity.fullKey));
-    if (!validIdentity || message.meshSecurity.identityBinding === "mismatch") {
+    const dmAdmission = decideMeshcoreDmAdmission({ message, config });
+    if (dmAdmission.kind === "refuse") {
       if (params.replayOf !== undefined) {
-        const reason = !evidence
-          ? "dm-identity-no-evidence"
-          : identity?.status === "ambiguous"
-            ? "dm-identity-ambiguous"
-            : "dm-identity-stale";
-        params.durability?.deadLetter(account.accountId, params.replayOf, reason);
-      }
-      logInboundSecurity({
-        runtime, accountId: account.accountId, reason: "dm-identity-refused",
-        detail: "fingerprint=" + fingerprintNodeId(message.senderNodeId),
-      });
-      return;
-    }
-    if (
-      identity?.status === "unique" &&
-      matchesConfiguredMeshOwner({ config, fullKey: identity.fullKey })
-    ) {
-      // The host exposes owner-only tools from senderIsOwner independently of
-      // CommandAuthorized. Refuse the whole unverified owner route BEFORE a
-      // session can be created; flags alone are not a complete tool gate.
-      if (params.replayOf !== undefined) {
-        params.durability?.deadLetter(account.accountId, params.replayOf, "dm-identity-stale");
+        params.durability?.deadLetter(
+          account.accountId,
+          params.replayOf,
+          dmAdmission.replayDeadLetterReason,
+        );
       }
       logInboundSecurity({
         runtime,
         accountId: account.accountId,
-        reason: "mesh-owner-unverified",
+        reason: dmAdmission.securityReason,
         detail: "fingerprint=" + fingerprintNodeId(message.senderNodeId),
       });
       return;
@@ -465,30 +397,13 @@ export async function handleMeshcoreInbound(params: {
     : false;
   const mentionRegexes = core.channel.mentions.buildMentionRegexes(config as OpenClawConfig);
   const wasMentioned = core.channel.mentions.matchesMentionPatterns(rawBody, mentionRegexes);
-  const requireMention = message.isGroup
-    ? resolveMeshcoreRequireMention({
-        groupConfig: groupMatch.groupConfig,
-        wildcardConfig: groupMatch.wildcardConfig,
-      })
-    : false;
-  const routeGroupAllowFrom = normalizeStringEntries(
-    groupMatch.groupConfig?.allowFrom?.length
-      ? groupMatch.groupConfig.allowFrom
-      : groupMatch.wildcardConfig?.allowFrom,
-  );
-  const channelAllowlistedWithoutSenderFilter =
-    groupPolicy === "allowlist" &&
-    message.isGroup &&
-    groupMatch.allowed &&
-    groupMatch.hasConfiguredGroups &&
-    !hasEntries(account.config.groupAllowFrom) &&
-    !hasEntries(routeGroupAllowFrom);
-  const accessGroupPolicy: MeshcoreGroupPolicy = channelAllowlistedWithoutSenderFilter
-    ? "open"
-    : groupPolicy === "open" &&
-        (hasEntries(account.config.groupAllowFrom) || hasEntries(routeGroupAllowFrom))
-      ? "allowlist"
-      : groupPolicy;
+  const { requireMention, routeGroupAllowFrom, accessGroupPolicy } =
+    resolveMeshcoreGroupAccess({
+      isGroup: message.isGroup,
+      groupPolicy,
+      groupMatch,
+      groupAllowFrom: account.config.groupAllowFrom,
+    });
 
   const dmConfigAllowFrom = message.isGroup
     ? account.config.allowFrom
@@ -820,32 +735,23 @@ export async function handleMeshcoreInbound(params: {
     }
     return;
   }
-  if (access.ingress.admission === "skip") {
-    runtime.log?.(`meshcore: drop channel ${message.target} (missing-mention)`);
-    return;
-  }
   if (access.ingress.admission !== "dispatch") {
-    if (
-      message.isGroup &&
-      access.ingress.decisiveGateId === "command" &&
-      access.commandAccess.shouldBlockControlCommand
-    ) {
+    const drop = classifyMeshcoreAdmissionDrop({ isGroup: message.isGroup, access });
+    if (drop === "missing-mention") {
+      runtime.log?.(`meshcore: drop channel ${message.target} (missing-mention)`);
+    } else if (drop === "unauthorized-control-command") {
       logInboundDrop({
         log: (line) => runtime.log?.(line),
         channel: CHANNEL_ID,
         reason: "control command (unauthorized)",
         target: message.senderNodeId,
       });
-      return;
-    }
-    if (message.isGroup) {
-      if (access.routeAccess.reason === "channel_not_allowlisted") {
-        runtime.log?.(`meshcore: drop channel ${message.target} (not allowlisted)`);
-      } else if (access.routeAccess.reason === "channel_disabled") {
-        runtime.log?.(`meshcore: drop channel ${message.target} (disabled)`);
-      } else {
-        runtime.log?.(`meshcore: drop group sender ${message.senderNodeId} (policy=${groupPolicy})`);
-      }
+    } else if (drop === "channel-not-allowlisted") {
+      runtime.log?.(`meshcore: drop channel ${message.target} (not allowlisted)`);
+    } else if (drop === "channel-disabled") {
+      runtime.log?.(`meshcore: drop channel ${message.target} (disabled)`);
+    } else if (drop === "group-sender-policy") {
+      runtime.log?.(`meshcore: drop group sender ${message.senderNodeId} (policy=${groupPolicy})`);
     } else {
       runtime.log?.(
         "meshcore: drop DM account=" + account.accountId +
@@ -882,23 +788,22 @@ export async function handleMeshcoreInbound(params: {
   // Main-scoped group sessions drop the group id before OpenClaw calls the
   // channel policy adapter, silently shedding group-wide tools. Check the
   // effective route (including binding overrides), before durability intake.
-  if (message.isGroup && route.groupScope === "main") {
-    // Use the captured account plus this dispatch's config for both the match
-    // and policy decision; do not re-resolve a newer account from live config.
-    const toolPolicy = resolveMeshcoreGroupToolPolicyResolution({
-      cfg: config,
+  if (
+    shouldRefuseMainScopedGroupRoute({
+      isGroup: message.isGroup,
+      route,
+      config,
       account,
       target: message.target,
-    });
-    if (hasMeshcoreGroupToolPolicy(toolPolicy.match)) {
-      runtime.log?.(
-        `meshcore: refuse group ${message.target} (account=${account.accountId}; groupScope="main" would shed its tool policy; set session.groupScope="per-group" or the effective binding's session.groupScope="per-group")`,
-      );
-      if (params.replayOf !== undefined) {
-        params.durability?.deadLetter(account.accountId, params.replayOf, "group-scope-main");
-      }
-      return;
+    })
+  ) {
+    runtime.log?.(
+      `meshcore: refuse group ${message.target} (account=${account.accountId}; groupScope="main" would shed its tool policy; set session.groupScope="per-group" or the effective binding's session.groupScope="per-group")`,
+    );
+    if (params.replayOf !== undefined) {
+      params.durability?.deadLetter(account.accountId, params.replayOf, "group-scope-main");
     }
+    return;
   }
 
   // Durability intake + claim (#48): session-bound frames are logged as
