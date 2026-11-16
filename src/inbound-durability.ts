@@ -13,7 +13,12 @@ import {
   parseDmIdentityEvidence,
   type DmCommandAuthorization,
 } from "./dm-identity.js";
-import { meshcoreDedupeKey, type DurabilityStore } from "./durability.js";
+import type { ResolvedMeshcoreAccount } from "./accounts.js";
+import {
+  DEFAULT_DURABILITY_CONFIG,
+  meshcoreDedupeKey,
+  type DurabilityStore,
+} from "./durability.js";
 import { COMMAND_REPLIES, parseRepeaterOpsInvocation } from "./inbound-commands.js";
 import type { MeshcoreInboundMessage } from "./types.js";
 
@@ -219,4 +224,144 @@ export function createCommandDurabilityHooks(params: {
     }
   };
   return { commandIntake, commandMark, commandRelease };
+}
+
+/**
+ * Durability intake + claim (#48): session-bound frames are logged as
+ * admitted (admission is decided before this point) and claimed with a lease
+ * BEFORE any dispatch work. Attempts count at claim, so process deaths and
+ * crash loops are bounded by maxDispatchAttempts. Returns "stop" when the
+ * caller must not dispatch.
+ */
+export function intakeAndClaimInboundEvent(params: {
+  store: DurabilityStore | null;
+  replayOf: number | undefined;
+  redeliverEventId: number | undefined;
+  account: ResolvedMeshcoreAccount;
+  dedupeKey: string;
+  message: MeshcoreInboundMessage;
+  rawBody: string;
+  runtime: RuntimeEnv;
+}): { kind: "stop" } | { kind: "proceed"; durabilityEventId: number | undefined } {
+  const { store, account, message, rawBody, runtime } = params;
+  let durabilityEventId: number | undefined = params.replayOf ?? params.redeliverEventId;
+  if (store && durabilityEventId === undefined) {
+    const res = store.intake({
+      accountId: account.accountId,
+      dedupeKey: params.dedupeKey,
+      kind: message.isGroup ? "group" : "direct",
+      peerId: message.isGroup ? message.target : message.senderNodeId,
+      senderLabel: message.senderName ?? message.senderNodeId,
+      senderTs: message.timestamp,
+      body: rawBody,
+      rawJson: JSON.stringify(message),
+    });
+    if (res.duplicate) {
+      runtime.log?.(
+        `meshcore: drop duplicate inbound (sender ${message.senderNodeId} ts ${message.timestamp})`,
+      );
+      return { kind: "stop" };
+    }
+    if (res.id >= 0) {
+      durabilityEventId = res.id;
+    } else {
+      // Partial store failure (review M-2): dispatch WITHOUT durability rather
+      // than drop — persistence must never be a single point of failure.
+      runtime.log?.("meshcore: durability intake degraded — dispatching without persistence");
+    }
+  }
+  // Live path claims its event (replay arrives pre-claimed by claimNext —
+  // claiming twice would double-count the attempt).
+  const durCfg = { ...DEFAULT_DURABILITY_CONFIG, ...account.config.durability };
+  if (store && durabilityEventId !== undefined && params.replayOf === undefined) {
+    const verdict = store.claim(
+      account.accountId,
+      durabilityEventId,
+      durCfg.maxDispatchAttempts,
+      durCfg.leaseMs,
+    );
+    if (verdict !== "claimed") {
+      runtime.log?.(
+        `meshcore: inbound event ${durabilityEventId} not dispatched (claim: ${verdict})`,
+      );
+      return { kind: "stop" };
+    }
+  }
+  return { kind: "proceed", durabilityEventId };
+}
+
+/**
+ * Per-dispatch durability callbacks for the claimed event: abort release
+ * (re-checked at each await boundary), host-turn finalization, and claim
+ * release when dispatch setup throws.
+ */
+export function createDispatchDurability(params: {
+  store: DurabilityStore | null;
+  durabilityEventId: number | undefined;
+  accountId: string;
+  abortSignal: AbortSignal | undefined;
+  runtime: RuntimeEnv;
+}): {
+  releaseIfAborted: (reason: string) => boolean;
+  onFinalize: (result: {
+    dispatched: boolean;
+    admission?: { kind?: string };
+    dispatchResult?: { deferredToActiveRun?: "steer" | "followup" } | null;
+  }) => void;
+  releaseOnError: (err: unknown) => void;
+} {
+  const { store, durabilityEventId, accountId, runtime } = params;
+  const releaseIfAborted = (reason: string): boolean => {
+    if (!params.abortSignal?.aborted) {
+      return false;
+    }
+    if (store && durabilityEventId !== undefined) {
+      store.releaseClaim(accountId, durabilityEventId, reason);
+    }
+    return true;
+  };
+  const onFinalize = (result: {
+    dispatched: boolean;
+    admission?: { kind?: string };
+    dispatchResult?: { deferredToActiveRun?: "steer" | "followup" } | null;
+  }) => {
+    if (!store || durabilityEventId === undefined) {
+      return;
+    }
+    if (releaseIfAborted("replay aborted before finalize")) {
+      // The monitor stopped waiting for this replay. Do not record a
+      // successful dispatch after disconnect/timeout; leave it retryable.
+      return;
+    }
+    if (result.dispatchResult?.deferredToActiveRun === "followup") {
+      // Queued behind a busy session: the host has ACCEPTED it into its
+      // follow-up queue (review round-3 m6) — mark dispatched. Residual,
+      // documented: the queue is in-memory, so a host crash before the
+      // drain loses that one follow-up; no plugin can close that gap.
+      runtime.log?.(
+        `meshcore: event ${durabilityEventId} accepted into the host follow-up queue`,
+      );
+      store.markDispatched(accountId, durabilityEventId);
+      return;
+    }
+    if (result.dispatched && result.admission?.kind === "dispatch") {
+      store.markDispatched(accountId, durabilityEventId);
+    } else {
+      store.releaseClaim(
+        accountId,
+        durabilityEventId,
+        `turn not dispatched (${result.admission?.kind ?? "unknown"})`,
+      );
+    }
+  };
+  const releaseOnError = (err: unknown) => {
+    if (store && durabilityEventId !== undefined) {
+      store.releaseClaim(
+        accountId,
+        durabilityEventId,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  };
+  return { releaseIfAborted, onFinalize, releaseOnError };
 }
