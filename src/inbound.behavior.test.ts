@@ -2095,3 +2095,51 @@ describe("issue #77: inbound group lookups use the host-aware group map", () => 
     expect(r.runtime.log).toHaveBeenCalledWith("meshcore: drop channel channel:0 (not allowlisted)");
   });
 });
+
+
+// #77 review (PR #89) finding 1, admission level: a multi-account setup with a
+// non-canonical account key and groups:{} must not be admitted through root
+// groups.
+describe("issue #77 review: non-canonical account keys do not inherit at admission", () => {
+  beforeEach(() => {
+    readAllowFromStoreMock.mockReset().mockResolvedValue([]);
+    shouldHandleTextCommandsMock.mockReset().mockReturnValue(false);
+    hasControlCommandMock.mockReset().mockReturnValue(false);
+    buildMentionRegexesMock.mockReset().mockReturnValue([]);
+    matchesMentionPatternsMock.mockReset().mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    clearMeshcoreRuntime();
+  });
+
+  it.each(["ops.team", "Ops Team"])("drops a group message for multi-account key %j", async (key) => {
+    const config = {
+      channels: {
+        meshcore: {
+          host: "192.0.2.10",
+          groupPolicy: "allowlist",
+          groups: { "channel:0": { requireMention: false, systemPrompt: "Root prompt" } },
+          accounts: { [key]: { host: "192.0.2.11", groups: {} }, lab: { host: "192.0.2.12" } },
+        },
+      },
+    } as CoreConfig;
+    const inboundRun = vi.fn(async () => ({ dispatched: true }));
+    setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRun) as never);
+    const runtime = createRuntimeEnv();
+    await handleMeshcoreInbound({
+      message: createMessage({
+        isGroup: true,
+        target: "channel:0",
+        senderNodeId: "channel:0",
+        text: "group hello",
+      }),
+      account: resolveMeshcoreAccount({ cfg: config, accountId: key }),
+      config,
+      runtime,
+      sendReply: vi.fn(async () => undefined),
+    });
+    expect(inboundRun).not.toHaveBeenCalled();
+    expect(runtime.log).toHaveBeenCalledWith("meshcore: drop channel channel:0 (not allowlisted)");
+  });
+});
