@@ -34,12 +34,18 @@ import {
   normalizeMeshcoreAllowEntry,
 } from "./normalize.js";
 import { resolveMeshcoreGroupMatch } from "./policy.js";
-import { readNodeStatusSnapshot } from "./node-status.js";
-import { runRepeaterOpsCommand, type RepeaterOpsKind } from "./repeater-ops.js";
+import {
+  COMMAND_REPLIES,
+  isBlockedNativeCommand,
+  parseRepeaterOpsInvocation,
+  resolveMeshcoreCommandAuthorized,
+  resolveMeshcoreCommandDecision,
+  resolveMeshcoreHostCommandFacts,
+  runMeshcoreNativeCommand,
+} from "./inbound-commands.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
 import {
-  authorizeDmCommand,
   dmIdentityDigestsEqual,
   parseDmIdentityEvidence,
   validateDmApprovalEntries,
@@ -52,7 +58,7 @@ import {
   shouldRefuseMainScopedGroupRoute,
   type MeshcoreGroupPolicy,
 } from "./inbound-decisions.js";
-import { assertNativePingRateLimit, resolveSendRateLimitConfig } from "./rate-limit.js";
+import { resolveSendRateLimitConfig } from "./rate-limit.js";
 import { runPairingChallenge } from "./pairing-budget.js";
 import {
   buildMeshcorePairingReplyText,
@@ -146,40 +152,6 @@ async function deliverMeshcoreReply(params: {
   });
 }
 
-const COMMAND_REPLIES = new Set(["!ping", "!status"]);
-
-/**
- * Repeater-ops commands take a node argument (!neighbours <node>, ...), so
- * they cannot live in the exact-match COMMAND_REPLIES set. They share the
- * same gate: DM-only, admission === "dispatch", commandRepliesEnabled.
- */
-const REPEATER_OPS_COMMANDS: ReadonlyArray<{ command: string; op: RepeaterOpsKind }> = [
-  { command: "!neighbours", op: "neighbours" },
-  { command: "!rstatus", op: "rstatus" },
-  { command: "!trace", op: "trace" },
-];
-
-function parseRepeaterOpsInvocation(
-  rawBody: string,
-): { op: RepeaterOpsKind; arg: string } | undefined {
-  for (const { command, op } of REPEATER_OPS_COMMANDS) {
-    if (rawBody === command) {
-      return { op, arg: "" };
-    }
-    if (rawBody.startsWith(`${command} `)) {
-      return { op, arg: rawBody.slice(command.length + 1).trim() };
-    }
-  }
-  return undefined;
-}
-
-
-function parseNativeCommand(rawBody: string): string | undefined {
-  if (COMMAND_REPLIES.has(rawBody)) return rawBody;
-  const invocation = parseRepeaterOpsInvocation(rawBody);
-  return invocation ? "!" + invocation.op : undefined;
-}
-
 const securityLogState = new Map<string, { at: number; suppressed: number }>();
 
 function logInboundSecurity(params: {
@@ -234,58 +206,6 @@ function validDmApprovals(params: {
   return [...partition.canonical, ...(wildcard ? ["*"] : [])];
 }
 
-function formatStatusReply(snapshot: ReturnType<typeof readNodeStatusSnapshot>): string {
-  if (!snapshot) {
-    return "status unavailable";
-  }
-  const parts: string[] = [];
-  parts.push(snapshot.connectionState ?? "unknown");
-  if (snapshot.name) {
-    parts.push(`name:${snapshot.name}`);
-  }
-  if (snapshot.batteryMv) {
-    parts.push(`bat:${(snapshot.batteryMv / 1000).toFixed(2)}V`);
-  }
-  if (snapshot.position?.lat !== undefined && snapshot.position?.lon !== undefined) {
-    parts.push(`pos:${snapshot.position.lat.toFixed(4)},${snapshot.position.lon.toFixed(4)}`);
-  }
-  if (snapshot.lastAdvertAt) {
-    const ageMin = Math.floor((Date.now() - new Date(snapshot.lastAdvertAt).getTime()) / 60000);
-    parts.push(`adv:${ageMin}m`);
-  }
-  if (snapshot.reconnectCount !== undefined) {
-    parts.push(`reconnects:${snapshot.reconnectCount}`);
-  }
-  return parts.join(" ");
-}
-
-function buildCommandReply(
-  command: string,
-  accountId: string,
-  durability?: DurabilityStore | null,
-): string | undefined {
-  if (command === "!ping") {
-    const snapshot = readNodeStatusSnapshot(accountId);
-    const name = snapshot?.name;
-    return name ? `pong ${name}` : "pong";
-  }
-  if (command === "!status") {
-    const base = formatStatusReply(readNodeStatusSnapshot(accountId));
-    if (!durability) {
-      return base;
-    }
-    const m = durability.metrics(accountId);
-    if (m.degraded) {
-      return `${base} queue:DEGRADED`;
-    }
-    const oldest = m.oldestPendingAt
-      ? ` oldest ${Math.max(0, Math.round((Date.now() - m.oldestPendingAt) / 1000))}s`
-      : "";
-    return `${base} queue:${m.pending} dead:${m.dead} dup:${m.duplicates}${oldest}`;
-  }
-  return undefined;
-}
-
 export async function handleMeshcoreInbound(params: {
   message: MeshcoreInboundMessage;
   account: ResolvedMeshcoreAccount;
@@ -321,13 +241,10 @@ export async function handleMeshcoreInbound(params: {
   if (!rawBody) return;
 
   // Compute ONE command decision before host command facts or native replies.
-  const nativeCommand = message.isGroup ? undefined : parseNativeCommand(rawBody);
-  const commandRepliesEnabled = account.config.commandRepliesEnabled ?? true;
-  const commandDecision = authorizeDmCommand({
-    identity: message.dmIdentity ?? { status: "invalid" },
-    nativeCommand,
-    nativePingAllowFrom: account.config.commandPingAllowFrom,
-    commandRepliesEnabled,
+  const { nativeCommand, commandDecision } = resolveMeshcoreCommandDecision({
+    message,
+    rawBody,
+    account,
   });
 
   // Native-command marker rows intentionally have rawJson "{}" and no DM
@@ -383,18 +300,13 @@ export async function handleMeshcoreInbound(params: {
     target: message.target,
   });
 
-  const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
-    cfg: config as OpenClawConfig,
-    surface: CHANNEL_ID,
+  const { ingressAllowTextCommands, hasControlCommand } = resolveMeshcoreHostCommandFacts({
+    core,
+    config,
+    isGroup: message.isGroup,
+    rawBody,
+    commandDecision,
   });
-  // Group commands are plain text: never let command authorization bypass
-  // requireMention. DM host commands additionally require independent proof.
-  const dmHostCommandsAuthorized =
-    !message.isGroup && commandDecision.hostCommandAuthorized;
-  const ingressAllowTextCommands = dmHostCommandsAuthorized ? allowTextCommands : false;
-  const hasControlCommand = dmHostCommandsAuthorized
-    ? core.channel.text.hasControlCommand(rawBody, config as OpenClawConfig)
-    : false;
   const mentionRegexes = core.channel.mentions.buildMentionRegexes(config as OpenClawConfig);
   const wasMentioned = core.channel.mentions.matchesMentionPatterns(rawBody, mentionRegexes);
   const { requireMention, routeGroupAllowFrom, accessGroupPolicy } =
@@ -472,9 +384,11 @@ export async function handleMeshcoreInbound(params: {
           hasControlCommand,
         },
   });
-  const commandAuthorized = message.isGroup
-    ? false
-    : access.commandAccess.authorized && commandDecision.hostCommandAuthorized;
+  const commandAuthorized = resolveMeshcoreCommandAuthorized({
+    isGroup: message.isGroup,
+    access,
+    commandDecision,
+  });
 
   // Replay path: admission flipped while we were down (config changed).
   // The attempt was already counted at claim time; release the claim — the
@@ -493,10 +407,7 @@ export async function handleMeshcoreInbound(params: {
 
   // A recognized native command is terminal when blocked. It never becomes a
   // pairing request, durable row, radio reply, or model turn.
-  if (
-    nativeCommand &&
-    (!commandDecision.nativeAuthorized || access.ingress.admission !== "dispatch")
-  ) {
+  if (isBlockedNativeCommand({ nativeCommand, commandDecision, access })) {
     return;
   }
 
@@ -605,65 +516,42 @@ export async function handleMeshcoreInbound(params: {
         store.markDispatched(account.accountId, id);
       }
     };
-    if (COMMAND_REPLIES.has(rawBody)) {
-      if (rawBody === "!ping") {
-        try {
-          assertNativePingRateLimit({ accountId: account.accountId });
-        } catch {
-          logInboundSecurity({
-            runtime,
-            accountId: account.accountId,
-            reason: "native-ping-budget-refused",
-            detail: "fingerprint=" + fingerprintNodeId(message.senderNodeId),
-          });
-          return;
-        }
+    const commandRelease = (cid: number | undefined, err: unknown) => {
+      if (store && cid !== undefined) {
+        store.releaseClaim(
+          account.accountId,
+          cid,
+          err instanceof Error ? err.message : String(err),
+        );
       }
-      const replyText = buildCommandReply(rawBody, account.accountId, params.durability);
-      if (replyText !== undefined) {
-        const cid = commandIntake();
+    };
+    const handled = await runMeshcoreNativeCommand({
+      rawBody,
+      account,
+      durability: params.durability,
+      deliverReply: async (text) => {
         await deliverMeshcoreReply({
-          payload: { text: replyText },
+          payload: { text },
           cfg: config,
           target: message.senderNodeId,
           accountId: account.accountId,
           sendReply: params.sendReply,
           statusSink: params.statusSink,
         });
-        commandMark(cid);
-        return;
-      }
-    }
-    const opsInvocation = parseRepeaterOpsInvocation(rawBody);
-    if (opsInvocation) {
-      const cid = commandIntake();
-      // nit 4: a throw mid-command releases the recorded row instead of
-      // leaking it pending forever.
-      try {
-        const replyText = await runRepeaterOpsCommand({
-          op: opsInvocation.op,
-          targetArg: opsInvocation.arg,
-          account,
-        });
-        await deliverMeshcoreReply({
-          payload: { text: replyText },
-          cfg: config,
-          target: message.senderNodeId,
+      },
+      onPingBudgetRefused: () => {
+        logInboundSecurity({
+          runtime,
           accountId: account.accountId,
-          sendReply: params.sendReply,
-          statusSink: params.statusSink,
+          reason: "native-ping-budget-refused",
+          detail: "fingerprint=" + fingerprintNodeId(message.senderNodeId),
         });
-        commandMark(cid);
-      } catch (err) {
-        if (store && cid !== undefined) {
-          store.releaseClaim(
-            account.accountId,
-            cid,
-            err instanceof Error ? err.message : String(err),
-          );
-        }
-        throw err;
-      }
+      },
+      commandIntake,
+      commandMark,
+      commandRelease,
+    });
+    if (handled) {
       return;
     }
   }
