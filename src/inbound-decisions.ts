@@ -14,7 +14,13 @@ import {
   parseDmIdentityEvidence,
 } from "./dm-identity.js";
 import { normalizeMeshcoreAllowEntry } from "./normalize.js";
-import { resolveMeshcoreRequireMention, type MeshcoreGroupMatch } from "./policy.js";
+import type { ResolvedMeshcoreAccount } from "./accounts.js";
+import {
+  hasMeshcoreGroupToolPolicy,
+  resolveMeshcoreGroupToolPolicyResolution,
+  resolveMeshcoreRequireMention,
+  type MeshcoreGroupMatch,
+} from "./policy.js";
 
 export type MeshcoreGroupPolicy = "open" | "allowlist" | "disabled";
 
@@ -208,4 +214,32 @@ export function classifyMeshcoreAdmissionDrop(params: {
     return "group-sender-policy";
   }
   return "dm-policy";
+}
+
+/**
+ * Main-scoped group sessions drop the group id before OpenClaw calls the
+ * channel policy adapter, silently shedding group-wide tools. True when the
+ * effective route (including binding overrides) is main-scoped AND the group
+ * has an authored tool policy that would be shed.
+ */
+export function shouldRefuseMainScopedGroupRoute(params: {
+  isGroup: boolean;
+  route: { groupScope?: string | null };
+  config: CoreConfig;
+  account: ResolvedMeshcoreAccount;
+  target: string;
+}): boolean {
+  if (params.isGroup && params.route.groupScope === "main") {
+    // Use the captured account plus this dispatch's config for both the match
+    // and policy decision; do not re-resolve a newer account from live config.
+    const toolPolicy = resolveMeshcoreGroupToolPolicyResolution({
+      cfg: params.config,
+      account: params.account,
+      target: params.target,
+    });
+    if (hasMeshcoreGroupToolPolicy(toolPolicy.match)) {
+      return true;
+    }
+  }
+  return false;
 }
