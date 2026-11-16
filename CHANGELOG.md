@@ -6,7 +6,7 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
-## Unreleased
+## 2026.11.1 - 2026-11-16
 
 **Security-breaking DM identity, replay, command, owner-route, and pairing
 changes. Read [docs/MIGRATION.md](docs/MIGRATION.md) before upgrading.**
