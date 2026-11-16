@@ -11,7 +11,6 @@ import {
 import { createChannelPairingController } from "openclaw/plugin-sdk/channel-pairing";
 import {
   DEFAULT_DURABILITY_CONFIG,
-  meshcoreDedupeKey,
   type DurabilityStore,
 } from "./durability.js";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
@@ -35,25 +34,22 @@ import {
 } from "./normalize.js";
 import { resolveMeshcoreGroupMatch } from "./policy.js";
 import {
-  COMMAND_REPLIES,
   isBlockedNativeCommand,
-  parseRepeaterOpsInvocation,
   resolveMeshcoreCommandAuthorized,
   resolveMeshcoreCommandDecision,
   resolveMeshcoreHostCommandFacts,
   runMeshcoreNativeCommand,
 } from "./inbound-commands.js";
 import {
+  createCommandDurabilityHooks,
   deadLetterNativeCommandReplay,
+  dropDuplicateNativeCommand,
+  probeInboundDuplicate,
   releaseReplayClaimIfAdmissionFlipped,
 } from "./inbound-durability.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
-import {
-  dmIdentityDigestsEqual,
-  parseDmIdentityEvidence,
-  validateDmApprovalEntries,
-} from "./dm-identity.js";
+import { validateDmApprovalEntries } from "./dm-identity.js";
 import {
   classifyMeshcoreAdmissionDrop,
   decideMeshcoreDmAdmission,
@@ -426,63 +422,20 @@ export async function handleMeshcoreInbound(params: {
   // retries and reconnect re-deliveries BEFORE any dispatch work, including
   // command replies (a re-aired !trace costs real airtime).
   const store = params.durability ?? null;
-  const dedupeKey = meshcoreDedupeKey({
-    senderNodeId: message.senderNodeId,
-    timestamp: message.timestamp,
-    body: message.text ?? rawBody,
+  const probe = probeInboundDuplicate({
+    store,
+    replayOf: params.replayOf,
+    accountId: account.accountId,
+    message,
+    rawBody,
+    commandDecision,
+    access,
+    runtime,
   });
-  // m7: a duplicate hit on a COMPLETE row is a drop; a hit on a pending /
-  // inflight row is a redelivery we must dispatch (its first attempt failed).
-  const existingDupe =
-    store && params.replayOf === undefined
-      ? store.findDuplicate(account.accountId, dedupeKey)
-      : null;
-  if (existingDupe && (existingDupe.state === "dispatched" || existingDupe.state === "dead")) {
-    runtime.log?.(
-      `meshcore: drop duplicate inbound (sender ${message.senderNodeId} ts ${message.timestamp})`,
-    );
+  if (probe.kind === "drop") {
     return;
   }
-  // A native-command marker is already running (or ran) and deliberately has
-  // no evidence payload. Drop its duplicate BEFORE inspecting evidence; the
-  // marker must stay pending for the original commandMark, not become a dead
-  // dm-identity-no-evidence row that a later mark could write to.
-  const duplicateNativeCommand = Boolean(
-    existingDupe &&
-    !message.isGroup &&
-    commandDecision.nativeAuthorized &&
-    access.ingress.admission === "dispatch" &&
-    (COMMAND_REPLIES.has(rawBody) || parseRepeaterOpsInvocation(rawBody)),
-  );
-  if (existingDupe && !message.isGroup && !duplicateNativeCommand) {
-    const previousRaw = store?.rawJsonOf(existingDupe.id) ?? null;
-    const previousEvidence = parseDmIdentityEvidence(previousRaw);
-    let previousMessageId: unknown;
-    try {
-      previousMessageId = previousRaw
-        ? (JSON.parse(previousRaw) as { messageId?: unknown }).messageId
-        : undefined;
-    } catch {
-      previousMessageId = undefined;
-    }
-    if (!previousEvidence) {
-      store?.deadLetter(account.accountId, existingDupe.id, "dm-identity-no-evidence");
-      return;
-    }
-    const currentEvidence = parseDmIdentityEvidence(message);
-    if (
-      !currentEvidence ||
-      previousMessageId !== message.messageId ||
-      previousEvidence.wirePrefixHex !== currentEvidence.wirePrefixHex ||
-      !dmIdentityDigestsEqual(previousEvidence.fullKeySha256, currentEvidence.fullKeySha256)
-    ) {
-      // Same-prefix/timestamp/body collisions are not redeliveries of a
-      // different attribution. Stop before the pending row can be reused.
-      store?.deadLetter(account.accountId, existingDupe.id, "dm-identity-stale");
-      return;
-    }
-  }
-  const redeliverEventId = existingDupe?.id;
+  const { dedupeKey, duplicateNativeCommand, redeliverEventId } = probe;
 
   // Plugin-level command replies: answered directly for DMs that pass
   // the same admission gate as a normal dispatch. Unknown/pairing-required
@@ -498,44 +451,26 @@ export async function handleMeshcoreInbound(params: {
     // row means the command is already running (or ran), never re-air it. But
     // this must only fire for real commands: a plain DM retry belongs to the
     // m7 redelivery path below (re-check regression).
-    if (duplicateNativeCommand) {
-      runtime.log?.(
-        `meshcore: drop duplicate command ${rawBody} (sender ${message.senderNodeId})`,
-      );
+    if (
+      dropDuplicateNativeCommand({
+        duplicateNativeCommand,
+        rawBody,
+        senderNodeId: message.senderNodeId,
+        runtime,
+      })
+    ) {
       return;
     }
     // m4: the command frame is recorded BEFORE the (possibly slow) run, so a
     // sender retry during it is dropped by the probe instead of re-airing.
-    const commandIntake = (): number | undefined => {
-      if (!store || params.replayOf !== undefined) {
-        return params.replayOf;
-      }
-      const r = store.intake({
-        accountId: account.accountId,
-        dedupeKey,
-        kind: "direct",
-        peerId: message.senderNodeId,
-        senderLabel: message.senderName ?? message.senderNodeId,
-        senderTs: message.timestamp,
-        body: rawBody,
-        rawJson: "{}",
-      });
-      return !r.duplicate && r.id >= 0 ? r.id : undefined;
-    };
-    const commandMark = (id: number | undefined) => {
-      if (store && id !== undefined) {
-        store.markDispatched(account.accountId, id);
-      }
-    };
-    const commandRelease = (cid: number | undefined, err: unknown) => {
-      if (store && cid !== undefined) {
-        store.releaseClaim(
-          account.accountId,
-          cid,
-          err instanceof Error ? err.message : String(err),
-        );
-      }
-    };
+    const { commandIntake, commandMark, commandRelease } = createCommandDurabilityHooks({
+      store,
+      replayOf: params.replayOf,
+      accountId: account.accountId,
+      dedupeKey,
+      message,
+      rawBody,
+    });
     const handled = await runMeshcoreNativeCommand({
       rawBody,
       account,
