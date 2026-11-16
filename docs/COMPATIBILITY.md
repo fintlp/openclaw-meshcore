@@ -8,6 +8,8 @@ The maintenance policy behind this matrix — tracked SDK surface, deprecation r
 
 | OpenClaw | Plugin | Status |
 |---|---|---|
+| 2026.10.5 | PR 2 (unreleased) | ✅ verified (2026-11-16: 717/717 tests, typecheck, dist build, manifest parity; no live-radio verification in this PR) |
+| 2026.11.3 | PR 2 (unreleased) | ✅ verified (2026-11-16: 717/717 tests, typecheck, dist build, manifest parity, lockfile-aligned build toolchain; no live-radio verification in this PR) |
 | 2026.10.5 | 2026.10.13 | ✅ verified (2026-10-20: 432/432 tests, typecheck, dist build; registered + connected on the production host after the 2026-10-20 restart) |
 | 2026.9.6 | 2026.10.1 | ✅ verified (2026-10-01 → 10-03) |
 | 2026.9.8 | 2026.10.1 | ✅ verified (2026-10-04) |

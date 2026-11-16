@@ -10,8 +10,16 @@ import {
   connectMeshcoreDevice,
   disconnectMeshcoreDevice,
   getMeshcoreDevice,
+  nodeIdToPubkey,
+  resolveContactByNodeId,
   waitForSendConfirmed,
 } from "./device-client.js";
+import { hexToBytes } from "./protocol.js";
+import {
+  rememberContact,
+  resetContactBookForTests,
+  setContactBookPathForTests,
+} from "./contact-book.js";
 import {
   readNodeStatusSnapshot,
   resetNodeStatusStateForTests,
@@ -472,5 +480,46 @@ describe("connectMeshcoreDevice numeric response code handshake", () => {
       consoleSpy.mockRestore();
       await disconnectMeshcoreDevice("acct-advert-fail");
     }
+  });
+});
+
+describe("outbound DM target identity", () => {
+  const PREFIX = "aabbccddeeff";
+  const KEY_A = PREFIX + "aa".repeat(26);
+  const KEY_B = PREFIX + "bb".repeat(26);
+  const contact = (hex: string, advName: string) => ({
+    publicKey: hexToBytes(hex),
+    type: 0,
+    flags: 0,
+    outPathLen: 0,
+    outPath: new Uint8Array(),
+    advName,
+    lastAdvert: 0,
+    advLat: 0,
+    advLon: 0,
+    lastMod: 0,
+  });
+
+  beforeEach(() => {
+    const dir = mkdtempSync(join(tmpdir(), "meshcore-outbound-identity-"));
+    setContactBookPathForTests(join(dir, "contacts.json"));
+    resetContactBookForTests();
+    rememberContact(contact(KEY_A, "A"), "default");
+    rememberContact(contact(KEY_B, "B"), "default");
+  });
+
+  afterEach(() => {
+    resetContactBookForTests();
+    setContactBookPathForTests(undefined);
+  });
+
+  it("rejects an ambiguous abbreviation while exact full keys remain usable", () => {
+    expect(() => nodeIdToPubkey(PREFIX, "default")).toThrow(/ambiguous/);
+    expect(Array.from(nodeIdToPubkey(KEY_A, "default"))).toEqual(Array.from(hexToBytes(KEY_A)));
+
+    const contacts = [contact(KEY_A, "A"), contact(KEY_B, "B")];
+    expect(resolveContactByNodeId(contacts, KEY_A)?.advName).toBe("A");
+    expect(resolveContactByNodeId(contacts, "!" + PREFIX)).toBeUndefined();
+    expect(resolveContactByNodeId(contacts, "")).toBeUndefined();
   });
 });

@@ -9,6 +9,10 @@ import { resetNodeStatusStateForTests, setNodeStatusPathForTests } from "./node-
 import type { CoreConfig, MeshcoreInboundMessage, ResolvedMeshcoreAccount } from "./types.js";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import { resolveInboundSessionEnvelopeContextAsync } from "openclaw/plugin-sdk/channel-inbound";
+import { createDmIdentityEvidence } from "./dm-identity.js";
+import { hexToBytes } from "./protocol.js";
+import { clearSendRateLimitState } from "./rate-limit.js";
+import { resetPairingRequestBudgetForTests } from "./pairing-budget.js";
 
 vi.mock("openclaw/plugin-sdk/routing", () => ({
   resolveAgentRoute: vi.fn(({ peer }) => ({
@@ -56,7 +60,7 @@ function createRuntime() {
       routing: {
         resolveAgentRoute: vi.fn(() => ({
           agentId: "meshcore",
-          sessionKey: "meshcore:!aabbccdd1122",
+          sessionKey: "meshcore:!aabbccdd11220000000000000000000000000000000000000000000000000000",
           accountId: "default",
         })),
       },
@@ -92,24 +96,35 @@ function createAccount(): ResolvedMeshcoreAccount {
     port: 5000,
     config: {
       dmPolicy: "allowlist",
-      allowFrom: ["!aabbccdd1122"],
+      allowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
       groupPolicy: "disabled",
       groupAllowFrom: [],
       channels: [0],
+      commandPingAllowFrom: ["!aabbccdd11220000000000000000000000000000000000000000000000000000"],
     },
   } satisfies ResolvedMeshcoreAccount;
 }
 
 function createMessage(text = "!ping"): MeshcoreInboundMessage {
   return {
-    messageId: "mc-dm-!aabbccdd1122-1700000000-ping",
-    target: "!aabbccdd1122",
-    senderNodeId: "!aabbccdd1122",
+    messageId: "mc-dm-!aabbccdd11220000000000000000000000000000000000000000000000000000-1700000000-ping",
+    target: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+    senderNodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
     senderName: "TestNode",
     text,
     timestamp: 1700000000000,
     isGroup: false,
     meshChannel: 0,
+    dmIdentity: {
+      status: "unique",
+      fullKey: "aabbccdd11220000000000000000000000000000000000000000000000000000",
+      nodeId: "!aabbccdd11220000000000000000000000000000000000000000000000000000",
+      name: "TestNode",
+    },
+    dmIdentityEvidence: createDmIdentityEvidence({
+      wirePrefix: hexToBytes("aabbccdd1122"),
+      fullKey: "aabbccdd11220000000000000000000000000000000000000000000000000000",
+    }),
     meshSecurity: { txtType: 0, signedPlain: false, identityBinding: "prefix-only" },
   };
 }
@@ -126,12 +141,16 @@ beforeEach(() => {
     envelopeOptions: {},
     previousTimestamp: undefined,
   });
+  resetPairingRequestBudgetForTests();
+  clearSendRateLimitState();
   setMeshcoreRuntime(createRuntime() as never);
 });
 
 afterEach(() => {
   clearMeshcoreRuntime();
   resetNodeStatusStateForTests();
+  resetPairingRequestBudgetForTests();
+  clearSendRateLimitState();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -171,6 +190,41 @@ describe("repro: command frame durability after a crash", () => {
     // => deadLetter(..., "not-replayable"). The command is therefore lost,
     // not retried, after a crash before commandMark().
     expect(raw.text).toBeUndefined();
+    store!.close();
+  });
+
+  it("classifies a native command marker as not-replayable before missing evidence", async () => {
+    const store = await openDurabilityStore({ dbPath });
+    const message = createMessage();
+    const intake = store!.intake({
+      accountId: "default",
+      dedupeKey: meshcoreDedupeKey({
+        senderNodeId: message.senderNodeId,
+        timestamp: message.timestamp,
+        body: message.text,
+      }),
+      kind: "direct",
+      peerId: message.senderNodeId,
+      senderTs: message.timestamp,
+      body: message.text,
+      rawJson: "{}",
+    });
+    delete message.dmIdentityEvidence;
+    const deadLetter = vi.spyOn(store!, "deadLetter");
+    const sendReply = vi.fn(async () => undefined);
+
+    await handleMeshcoreInbound({
+      message,
+      account: createAccount(),
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: { log: vi.fn(), error: vi.fn() } as unknown as RuntimeEnv,
+      sendReply,
+      durability: store,
+      replayOf: intake.id,
+    });
+
+    expect(deadLetter).toHaveBeenCalledWith("default", intake.id, "not-replayable");
+    expect(sendReply).not.toHaveBeenCalled();
     store!.close();
   });
 

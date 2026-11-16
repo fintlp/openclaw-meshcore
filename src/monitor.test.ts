@@ -33,6 +33,25 @@ import { bytesToHex, hexToBytes } from "./protocol.js";
 import type { CoreConfig } from "./types.js";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 
+const DM_PUBLIC_KEY = hexToBytes("aabbccddeeff" + "00".repeat(25) + "01");
+const DM_OTHER_PUBLIC_KEY = hexToBytes("aabbccddeeff" + "11".repeat(26));
+const DM_FULL_KEY = bytesToHex(DM_PUBLIC_KEY);
+const DM_NODE_ID = `!${DM_FULL_KEY}`;
+
+function radioContact(publicKey: Uint8Array = DM_PUBLIC_KEY, advName = "TestNode") {
+  return { publicKey, advName };
+}
+
+function directFrame(text: string, pubKeyPrefix: Uint8Array | readonly number[] = DM_PUBLIC_KEY.slice(0, 6)) {
+  return {
+    pubKeyPrefix,
+    pathLen: 0,
+    txtType: 0,
+    senderTimestamp: 1700000000,
+    text,
+  };
+}
+
 const {
   connectMeshcoreDeviceMock,
   disconnectMeshcoreDeviceMock,
@@ -165,14 +184,19 @@ function createResolvedAccount(overrides?: Partial<ReturnType<typeof createResol
 
 function createConnection() {
   const emitter = new EventEmitter();
+  Object.assign(emitter, {
+    getContacts: vi.fn(async () => [] as Array<Record<string, unknown>>),
+    getWaitingMessages: vi.fn(async () => []),
+  });
   return {
     connection: emitter as unknown as {
       on: (event: string | number, listener: (...args: any[]) => void) => unknown;
       off: (event: string | number, listener: (...args: any[]) => void) => unknown;
       emit: (event: string | number, ...args: unknown[]) => boolean;
-      getWaitingMessages: () => Promise.resolve([]);
+      getContacts: ReturnType<typeof vi.fn>;
+      getWaitingMessages: () => Promise<unknown[]>;
     },
-    contacts: [],
+    contacts: [] as Array<ReturnType<typeof radioContact>>,
     channels: [],
     accountId: "default",
     connected: true,
@@ -477,6 +501,7 @@ describe("monitorMeshcoreProvider", () => {
 
   it("strips the 4 leading signature bytes from SignedPlain DMs (txtType=2)", async () => {
     const handle = createConnection();
+    handle.contacts = [radioContact()];
     connectMeshcoreDeviceMock.mockResolvedValue(handle);
     const onMessage = vi.fn();
 
@@ -490,11 +515,8 @@ describe("monitorMeshcoreProvider", () => {
 
     // meshcore.js emits ContactMsgRecv as numeric code 7.
     handle.connection.emit(7, {
-      pubKeyPrefix: new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
-      pathLen: 0,
+      ...directFrame("SIGMhello from signed peer"),
       txtType: 2,
-      senderTimestamp: 1700000000,
-      text: "SIGMhello from signed peer",
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -504,6 +526,14 @@ describe("monitorMeshcoreProvider", () => {
       expect.objectContaining({
         text: "hello from signed peer",
         isGroup: false,
+        senderNodeId: DM_NODE_ID,
+        target: DM_NODE_ID,
+        dmIdentity: expect.objectContaining({ status: "unique", fullKey: DM_FULL_KEY, nodeId: DM_NODE_ID }),
+        dmIdentityEvidence: {
+          version: 1,
+          wirePrefixHex: "aabbccddeeff",
+          fullKeySha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        },
         meshSecurity: expect.objectContaining({
           txtType: 2,
           signedPlain: true,
@@ -539,6 +569,8 @@ describe("monitorMeshcoreProvider", () => {
     const prefix = bytesToHex(publicKey.slice(0, 6)).toLowerCase();
     expect(resolvePubkeyFromDmPrefix(prefix, "default")).toEqual(publicKey);
 
+    const handle = createConnection();
+    handle.contacts = [radioContact(publicKey, "SignedPeer")];
     const message = buildInboundMessage({
       message: {
         pubKeyPrefix: publicKey.slice(0, 6),
@@ -547,7 +579,7 @@ describe("monitorMeshcoreProvider", () => {
         senderTimestamp: 1700000000,
         text: "ABCDhello last4",
       },
-      handle: createConnection(),
+      handle,
       isGroup: false,
       accountId: "default",
     });
@@ -579,6 +611,9 @@ describe("monitorMeshcoreProvider", () => {
       "default",
     );
 
+    const handle = createConnection();
+    handle.contacts = [radioContact(publicKey, "SignedPeer")];
+
     function build(text: string) {
       return buildInboundMessage({
         message: {
@@ -588,7 +623,7 @@ describe("monitorMeshcoreProvider", () => {
           senderTimestamp: 1700000000,
           text,
         },
-        handle: createConnection(),
+        handle,
         isGroup: false,
         accountId: "default",
       });
@@ -633,6 +668,7 @@ describe("monitorMeshcoreProvider", () => {
     );
 
     const handle = createConnection();
+    handle.contacts = [radioContact(publicKey, "SignedPeer")];
     connectMeshcoreDeviceMock.mockResolvedValue(handle);
     const onMessage = vi.fn();
 
@@ -675,6 +711,7 @@ describe("monitorMeshcoreProvider", () => {
 
   it("includes meshSecurity on plain DMs with signedPlain=false", async () => {
     const handle = createConnection();
+    handle.contacts = [radioContact()];
     connectMeshcoreDeviceMock.mockResolvedValue(handle);
     const onMessage = vi.fn();
 
@@ -686,13 +723,7 @@ describe("monitorMeshcoreProvider", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    handle.connection.emit(7, {
-      pubKeyPrefix: new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
-      pathLen: 0,
-      txtType: 0,
-      senderTimestamp: 1700000000,
-      text: "plain hello",
-    });
+    handle.connection.emit(7, directFrame("plain hello"));
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -707,6 +738,208 @@ describe("monitorMeshcoreProvider", () => {
       }),
       handle,
     );
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it.each([
+    ["empty", []],
+    ["short", [0xaa, 0xbb, 0xcc, 0xdd, 0xee]],
+    ["out-of-range", [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 256]],
+    ["non-integer", [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 1.5]],
+  ])("drops a DM with a %s wire prefix before a custom onMessage hook", async (_label, pubKeyPrefix) => {
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const onMessage = vi.fn();
+    const runtime = createRuntimeEnv();
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime,
+      onMessage,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    handle.connection.emit(7, directFrame("must not be observed", pubKeyPrefix));
+
+    await vi.waitFor(() => {
+      expect(runtime.log).toHaveBeenCalledWith(expect.stringContaining("reason=invalid"));
+    });
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(handle.connection.getContacts).not.toHaveBeenCalled();
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("drops ambiguous same-prefix radio contacts before a custom onMessage hook", async () => {
+    const rows = [radioContact(), radioContact(DM_OTHER_PUBLIC_KEY, "OtherNode")];
+    const handle = createConnection();
+    handle.contacts = rows;
+    handle.connection.getContacts.mockResolvedValue(rows);
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const onMessage = vi.fn();
+    const runtime = createRuntimeEnv();
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime,
+      onMessage,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    handle.connection.emit(7, directFrame("ambiguous"));
+
+    await vi.waitFor(() => {
+      expect(runtime.log).toHaveBeenCalledWith(expect.stringContaining("reason=ambiguous"));
+    });
+    expect(handle.connection.getContacts).toHaveBeenCalledTimes(1);
+    expect(onMessage).not.toHaveBeenCalled();
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("deduplicates repeated records for the same full key and admits one frame", async () => {
+    const handle = createConnection();
+    handle.contacts = [radioContact(), radioContact()];
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const onMessage = vi.fn();
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      onMessage,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    handle.connection.emit(7, directFrame("duplicate contact rows"));
+
+    await vi.waitFor(() => expect(onMessage).toHaveBeenCalledTimes(1));
+    expect(onMessage.mock.calls[0][0]).toEqual(expect.objectContaining({
+      senderNodeId: DM_NODE_ID,
+      target: DM_NODE_ID,
+      dmIdentity: { status: "unique", fullKey: DM_FULL_KEY, nodeId: DM_NODE_ID, name: "TestNode" },
+      dmIdentityEvidence: {
+        version: 1,
+        wirePrefixHex: "aabbccddeeff",
+        fullKeySha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      },
+    }));
+    expect(handle.connection.getContacts).not.toHaveBeenCalled();
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("keeps a unique canonical full-key approval observable through custom onMessage", async () => {
+    const account = createResolvedAccount();
+    resolveMeshcoreAccountMock.mockReturnValue(createResolvedAccount({
+      config: { ...account.config, dmPolicy: "allowlist", allowFrom: [DM_NODE_ID] },
+    }));
+    const handle = createConnection();
+    handle.contacts = [radioContact()];
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const onMessage = vi.fn();
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      onMessage,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    handle.connection.emit(7, directFrame("approved full-key peer"));
+
+    await vi.waitFor(() => expect(onMessage).toHaveBeenCalledTimes(1));
+    expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({
+      text: "approved full-key peer",
+      senderNodeId: DM_NODE_ID,
+      target: DM_NODE_ID,
+      dmIdentity: expect.objectContaining({ status: "unique", fullKey: DM_FULL_KEY }),
+      dmIdentityEvidence: expect.objectContaining({ version: 1, wirePrefixHex: "aabbccddeeff" }),
+    }), handle);
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("coalesces one stale-snapshot refresh and re-decides concurrent DMs", async () => {
+    const handle = createConnection();
+    let releaseContacts!: (rows: Array<ReturnType<typeof radioContact>>) => void;
+    const contactsResponse = new Promise<Array<ReturnType<typeof radioContact>>>((resolve) => {
+      releaseContacts = resolve;
+    });
+    handle.connection.getContacts.mockReturnValue(contactsResponse);
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const onMessage = vi.fn();
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      onMessage,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    handle.connection.emit(7, directFrame("first stale frame"));
+    handle.connection.emit(7, directFrame("second stale frame"));
+    await vi.waitFor(() => expect(handle.connection.getContacts).toHaveBeenCalledTimes(1));
+    expect(onMessage).not.toHaveBeenCalled();
+
+    releaseContacts([radioContact()]);
+    await vi.waitFor(() => expect(onMessage).toHaveBeenCalledTimes(2));
+    expect(handle.connection.getContacts).toHaveBeenCalledTimes(1);
+    for (const [message] of onMessage.mock.calls) {
+      expect(message).toEqual(expect.objectContaining({
+        senderNodeId: DM_NODE_ID,
+        target: DM_NODE_ID,
+        dmIdentity: expect.objectContaining({ status: "unique", fullKey: DM_FULL_KEY }),
+        dmIdentityEvidence: expect.objectContaining({ version: 1, wirePrefixHex: "aabbccddeeff" }),
+      }));
+    }
+
+    handle.connection.emit("disconnected");
+    await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+  });
+
+  it("drops a SignedPlain identity mismatch before custom onMessage", async () => {
+    const publicKey = hexToBytes(
+      "aabbccdd11223344556677889900aabbccddeeff001122334455667741424344",
+    );
+    const handle = createConnection();
+    handle.contacts = [radioContact(publicKey, "SignedPeer")];
+    for (const text of ["deadbeefone", "deadbeeftwo", "deadbeefthree"]) {
+      expect(buildInboundMessage({
+        message: {
+          pubKeyPrefix: publicKey.slice(0, 6),
+          pathLen: 0,
+          txtType: 2,
+          senderTimestamp: 1700000000,
+          text,
+        },
+        handle,
+        isGroup: false,
+        accountId: "default",
+      })).not.toBeNull();
+    }
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const onMessage = vi.fn();
+    const runtime = createRuntimeEnv();
+    const monitorPromise = monitorMeshcoreProvider({
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime,
+      onMessage,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    handle.connection.emit(7, {
+      pubKeyPrefix: publicKey.slice(0, 6),
+      pathLen: 0,
+      txtType: 2,
+      senderTimestamp: 1700000000,
+      text: "cafebabeblocked",
+    });
+
+    await vi.waitFor(() => {
+      expect(runtime.log).toHaveBeenCalledWith(expect.stringContaining("reason=mismatch"));
+    });
+    expect(onMessage).not.toHaveBeenCalled();
 
     handle.connection.emit("disconnected");
     await expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);

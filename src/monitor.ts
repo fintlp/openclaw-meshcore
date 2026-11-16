@@ -6,6 +6,7 @@ import { shouldSkipConnectAdvert, startAdvertScheduler } from "./advert-schedule
 import { createAccountStatusSink } from "./channel-api.js";
 import {
   contactHasMissingMetadata,
+  getContactBookEntries,
   getContactByPubkey,
   POSITION_RESYNC_AFTER_MS,
   rememberContact,
@@ -19,7 +20,6 @@ import {
   readPrefixConsistency,
   recordPrefixObservation,
   resolveIdentityBinding,
-  resolvePubkeyFromDmPrefix,
   type IdentityBinding,
   type PrefixConsistency,
   type PrefixMatch,
@@ -33,7 +33,7 @@ import {
   connectMeshcoreDevice,
   disconnectMeshcoreDevice,
   getMeshcoreDevice,
-  resolveSenderNodeId,
+  refreshMeshcoreDeviceContacts,
   type MeshcoreDeviceHandle,
 } from "./device-client.js";
 import { appendGroupLogEntry } from "./group-log.js";
@@ -48,7 +48,15 @@ import {
   parseMeshcoreChannelIndex,
   parseMeshcoreNodeId,
 } from "./normalize.js";
-import { bytesToHex } from "./protocol.js";
+import { bytesToHex, hexToBytes } from "./protocol.js";
+import {
+  createDmIdentityEvidence,
+  decideDmIdentity,
+  dmIdentityDigestsEqual,
+  fullKeySha256,
+  parseDmIdentityEvidence,
+  type DmIdentityDecision,
+} from "./dm-identity.js";
 import { formatMeshcoreEndpoint } from "./transport.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import { sendMessageMeshcore } from "./send.js";
@@ -68,6 +76,89 @@ function positionResyncKey(accountId: string, pubkeyHex: string): string {
 /** @internal Reset staleness-based re-sync tracking; tests only. */
 export function resetPositionResyncStateForTests(): void {
   lastPositionResyncByContact.clear();
+  dmIdentityRefreshes.clear();
+  dmIdentityDropLogs.clear();
+}
+
+
+const dmIdentityRefreshes = new Map<string, Promise<void>>();
+const dmIdentityDropLogs = new Map<string, { at: number; suppressed: number }>();
+
+async function refreshDmIdentitySnapshot(params: {
+  accountId: string;
+  handle: MeshcoreDeviceHandle;
+  contactBookMaxEntries?: number;
+}): Promise<void> {
+  const existing = dmIdentityRefreshes.get(params.accountId);
+  if (existing) return existing;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const refresh = (async () => {
+    try {
+      await Promise.race([
+        refreshMeshcoreDeviceContacts({
+          handle: params.handle,
+          contactBookMaxEntries: params.contactBookMaxEntries,
+        }),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("DM identity contact sync timeout")), 10_000);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  })();
+  dmIdentityRefreshes.set(params.accountId, refresh);
+  try {
+    await refresh;
+  } finally {
+    if (dmIdentityRefreshes.get(params.accountId) === refresh) {
+      dmIdentityRefreshes.delete(params.accountId);
+    }
+  }
+}
+
+async function decideWithOneContactRefresh(params: {
+  accountId: string;
+  handle: MeshcoreDeviceHandle;
+  wirePrefix: Uint8Array | readonly number[];
+  contactBookMaxEntries?: number;
+}): Promise<{ decision: DmIdentityDecision; syncFailed: boolean }> {
+  let decision = currentMeshcoreDmIdentity(params);
+  if (decision.status === "unique" || decision.status === "invalid") {
+    return { decision, syncFailed: false };
+  }
+  try {
+    await refreshDmIdentitySnapshot(params);
+  } catch {
+    return { decision, syncFailed: true };
+  }
+  decision = currentMeshcoreDmIdentity(params);
+  return { decision, syncFailed: false };
+}
+
+function dmIdentityLogFingerprint(message: MeshcoreInboundMessage): string {
+  return message.dmIdentityEvidence?.wirePrefixHex ??
+    (message.dmIdentity?.status === "unique" ? message.dmIdentity.fullKey.slice(0, 12) : "unknown");
+}
+
+function logDmIdentityDrop(params: {
+  runtime: RuntimeEnv;
+  accountId: string;
+  reason: string;
+  fingerprint: string;
+}): void {
+  const now = Date.now();
+  const key = params.accountId + ":" + params.reason;
+  const prior = dmIdentityDropLogs.get(key);
+  if (prior && now - prior.at < 60_000) {
+    prior.suppressed += 1;
+    return;
+  }
+  const suppressed = prior?.suppressed ?? 0;
+  dmIdentityDropLogs.set(key, { at: now, suppressed: 0 });
+  params.runtime.log?.(
+    `[${params.accountId}] meshcore: DM identity drop reason=${params.reason} fingerprint=${params.fingerprint.slice(0, 12)} suppressed=${suppressed}`,
+  );
 }
 
 function shouldResyncPosition(stored: { lastAdvert: number }, accountId: string, pubkeyHex: string): boolean {
@@ -123,19 +214,16 @@ function channelIndexFromPacket(channel: number): number {
   return 0;
 }
 
-function messageIdFromContactMessage(message: {
-  pubKeyPrefix?: Uint8Array;
-  senderTimestamp?: number;
-  text?: string;
-}): string {
-  const prefix = message.pubKeyPrefix
-    ? Array.from(new Uint8Array(message.pubKeyPrefix))
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("")
-    : "unknown";
+function messageIdFromContactMessage(
+  message: { senderTimestamp?: number; text?: string },
+  selectedFullKey?: string,
+): string {
+  // Full-key attribution prevents two same-prefix keys from sharing delivery
+  // identity. Non-unique frames never reach dedupe or a consumer.
+  const identity = selectedFullKey ?? "invalid";
   const timestamp = Number(message.senderTimestamp ?? Date.now());
   const hash = String(message.text ?? "").slice(0, 20);
-  return `mc-dm-${prefix}-${timestamp}-${hash}`;
+  return "mc-dm-" + identity + "-" + timestamp + "-" + hash;
 }
 
 function messageIdFromChannelMessage(message: {
@@ -149,6 +237,28 @@ function messageIdFromChannelMessage(message: {
   return `mc-ch-${channel}-${timestamp}-${hash}`;
 }
 
+export function currentMeshcoreDmIdentity(params: {
+  accountId: string;
+  handle: MeshcoreDeviceHandle;
+  wirePrefix: Uint8Array | readonly number[];
+}): DmIdentityDecision {
+  return decideDmIdentity({
+    accountId: params.accountId,
+    wirePrefix: params.wirePrefix,
+    radioContacts: params.handle.contacts,
+    accountContacts: getContactBookEntries(params.accountId).map((entry) => ({
+      ...entry,
+      accountId: params.accountId,
+    })),
+  });
+}
+
+function rawWirePrefix(value: unknown): Uint8Array | readonly number[] {
+  return value instanceof Uint8Array || Array.isArray(value)
+    ? (value as Uint8Array | readonly number[])
+    : [];
+}
+
 export function buildInboundMessage(params: {
   message: Record<string, unknown>;
   handle: MeshcoreDeviceHandle;
@@ -156,17 +266,11 @@ export function buildInboundMessage(params: {
   accountId: string;
 }): MeshcoreInboundMessage | null {
   const rawText = String(params.message.text ?? "").trim();
-  if (!rawText) {
-    return null;
-  }
-  if (isOutboundEcho(rawText)) {
-    return null;
-  }
+  if (!rawText || isOutboundEcho(rawText)) return null;
 
   const meshChannel = channelIndexFromPacket(Number(params.message.channelIdx ?? 0));
   const txtType = Number(params.message.txtType ?? 0);
   const isSignedPlain = txtType === 2 && !params.isGroup;
-
   let text = rawText;
   let senderPrefixHex: string | null = null;
   let lossy = false;
@@ -177,6 +281,8 @@ export function buildInboundMessage(params: {
     lossy = parsed.lossy;
   }
 
+  const timestamp = Number(params.message.senderTimestamp ?? Date.now()) * 1000;
+  const snr = typeof params.message.snr === "number" ? params.message.snr : undefined;
   if (params.isGroup) {
     const target = formatMeshcoreChannelTarget(meshChannel);
     return {
@@ -184,50 +290,39 @@ export function buildInboundMessage(params: {
       target,
       senderNodeId: target,
       text,
-      timestamp: Number(params.message.senderTimestamp ?? Date.now()) * 1000,
+      timestamp,
       isGroup: true,
       meshChannel,
-      snr: typeof params.message.snr === "number" ? params.message.snr : undefined,
-      meshSecurity: {
-        txtType,
-        signedPlain: false,
-        identityBinding: "prefix-only",
-      },
+      ...(snr === undefined ? {} : { snr }),
+      meshSecurity: { txtType, signedPlain: false, identityBinding: "prefix-only" },
     };
   }
 
-  const pubKeyPrefix = params.message.pubKeyPrefix;
-  const prefixBytes =
-    pubKeyPrefix instanceof Uint8Array
-      ? pubKeyPrefix
-      : Array.isArray(pubKeyPrefix)
-        ? new Uint8Array(pubKeyPrefix)
-        : new Uint8Array(0);
-
-  const { nodeId, name } = resolveSenderNodeId({
-    pubkeyPrefix: prefixBytes,
-    contacts: params.handle.contacts,
+  const wirePrefix = rawWirePrefix(params.message.pubKeyPrefix);
+  const dmIdentity = currentMeshcoreDmIdentity({
+    accountId: params.accountId,
+    handle: params.handle,
+    wirePrefix,
   });
-
-  const prefixMatchHex = bytesToHex(prefixBytes.slice(0, 6)).toLowerCase();
-  const resolvedPubkey = resolvePubkeyFromDmPrefix(prefixMatchHex, params.accountId);
+  const unique = dmIdentity.status === "unique" ? dmIdentity : undefined;
+  const dmIdentityEvidence = unique
+    ? createDmIdentityEvidence({ wirePrefix, fullKey: unique.fullKey })
+    : undefined;
+  const nodeId = unique?.nodeId ?? "!unresolved";
 
   let prefixMatch: PrefixMatch = "unresolved";
   let consistency: PrefixConsistency = "insufficient";
   let identityBinding: IdentityBinding = "prefix-only";
-
-  if (isSignedPlain && resolvedPubkey) {
+  if (isSignedPlain && unique) {
+    // Diagnostics are computed against THE selected key. A separate cache
+    // lookup must never attach a grade belonging to a different full key.
+    const resolvedPubkey = hexToBytes(unique.fullKey);
     prefixMatch = classifySignedPlainPrefix({
       senderPrefixHex,
       publicKey: resolvedPubkey,
       lossy,
     });
-    // Read the PRE-observation tracked constant so a contradicting prefix is
-    // flagged before it poisons the consistency window.
     const trackedConstantPrefix = getTrackedConstantPrefix(resolvedPubkey, params.accountId);
-    // Record the observation first; the meshSecurity consistency field then
-    // reflects the post-observation window while mismatch detection used the
-    // pre-observation constant above.
     recordPrefixObservation({
       publicKey: resolvedPubkey,
       senderPrefixHex,
@@ -245,15 +340,17 @@ export function buildInboundMessage(params: {
   }
 
   return {
-    messageId: messageIdFromContactMessage(params.message),
+    messageId: messageIdFromContactMessage(params.message, unique?.fullKey),
     target: nodeId,
     senderNodeId: nodeId,
-    senderName: name,
+    ...(unique?.name === undefined ? {} : { senderName: unique.name }),
     text,
-    timestamp: Number(params.message.senderTimestamp ?? Date.now()) * 1000,
+    timestamp,
     isGroup: false,
     meshChannel,
-    snr: typeof params.message.snr === "number" ? params.message.snr : undefined,
+    ...(snr === undefined ? {} : { snr }),
+    dmIdentity,
+    ...(dmIdentityEvidence === undefined ? {} : { dmIdentityEvidence }),
     meshSecurity: {
       txtType,
       signedPlain: isSignedPlain,
@@ -325,7 +422,12 @@ export function monitorMeshcoreProvider(
     // one builder, identical params, channel filter applied in both modes.
     const allowedChannels = new Set(account.config.channels ?? [0]);
 
-    const dmSendReply = async (target: string, text: string, replyToId?: string) => {
+    const dmSendReply = async (
+      target: string,
+      text: string,
+      replyToId?: string,
+      purpose?: "dm" | "pairing",
+    ) => {
       try {
         const { sendMessageMeshcore } = await import("./send.js");
         await sendMessageMeshcore(target, text, {
@@ -333,6 +435,7 @@ export function monitorMeshcoreProvider(
           accountId: account.accountId,
           replyTo: replyToId,
           deviceHandle: handle,
+          purpose: purpose ?? "dm",
         });
         rememberOutboundEcho(text);
         opts.statusSink?.({ lastOutboundAt: Date.now() });
@@ -344,9 +447,17 @@ export function monitorMeshcoreProvider(
       } catch (err) {
         // A failed reply (e.g. a pairing challenge to a prefix-only sender whose
         // full pubkey is not yet known) must not fail the inbound/pairing flow.
+        const targetLabel = purpose === "pairing" ? target.slice(0, 13) : target;
+        const detail = purpose === "pairing" ? "" : ": " + String(err);
         console.error(
-          `[${account.accountId}] DM reply to ${target} failed (non-fatal): ${String(err)}`,
+          `[${account.accountId}] ${purpose === "pairing" ? "pairing" : "DM"} reply to ${targetLabel} failed (non-fatal)${detail}`,
         );
+        if (purpose === "pairing") {
+          // The host controller owns pending-record expiry and its
+          // onReplyError hook. Normal agent replies retain the old non-fatal
+          // behavior, but pairing delivery failures must reach that path.
+          throw err;
+        }
       }
     };
 
@@ -461,13 +572,53 @@ export function monitorMeshcoreProvider(
       });
       void (async () => {
         try {
-          const inbound = buildInboundMessage({
+          let inbound = buildInboundMessage({
             message,
             handle,
             isGroup: false,
             accountId: account.accountId,
           });
-          if (inbound && inbound.meshSecurity.signedPlain) {
+          if (!inbound) return;
+
+          // The security boundary is BEFORE logging-as-ingress, custom
+          // observation hooks, durability, pairing, and normal dispatch.
+          const current = await decideWithOneContactRefresh({
+            accountId: account.accountId,
+            handle,
+            wirePrefix: rawWirePrefix(message.pubKeyPrefix),
+            contactBookMaxEntries: account.config.contactBookMaxEntries,
+          });
+          if (current.syncFailed) {
+            logDmIdentityDrop({
+              runtime, accountId: account.accountId, reason: "contact-sync-failed",
+              fingerprint: dmIdentityLogFingerprint(inbound),
+            });
+            return;
+          }
+          if (current.decision.status !== "unique") {
+            logDmIdentityDrop({
+              runtime, accountId: account.accountId, reason: current.decision.status,
+              fingerprint: dmIdentityLogFingerprint(inbound),
+            });
+            return;
+          }
+          if (
+            inbound.dmIdentity?.status !== "unique" ||
+            inbound.dmIdentity.fullKey !== current.decision.fullKey
+          ) {
+            inbound = buildInboundMessage({
+              message, handle, isGroup: false, accountId: account.accountId,
+            });
+            if (!inbound) return;
+          }
+          if (inbound.meshSecurity.identityBinding === "mismatch") {
+            logDmIdentityDrop({
+              runtime, accountId: account.accountId, reason: "mismatch",
+              fingerprint: dmIdentityLogFingerprint(inbound),
+            });
+            return;
+          }
+          if (inbound.meshSecurity.signedPlain) {
             console.log(
               formatSignedPlainLogLine({
                 timestamp: new Date(inbound.timestamp).toISOString(),
@@ -479,9 +630,6 @@ export function monitorMeshcoreProvider(
                 lossy: inbound.meshSecurity.lossy ?? false,
               }),
             );
-          }
-          if (!inbound) {
-            return;
           }
           logger.info(
             formatInboundLogLine({
@@ -847,8 +995,9 @@ export function monitorMeshcoreProvider(
         lastClaimId = ev.id;
         claimed += 1;
         let raw: MeshcoreInboundMessage | null = null;
+        let rawJson: string | null = null;
         try {
-          const rawJson = store.rawJsonOf(ev.id);
+          rawJson = store.rawJsonOf(ev.id);
           raw = rawJson ? (JSON.parse(rawJson) as MeshcoreInboundMessage) : null;
         } catch {
           raw = null;
@@ -858,6 +1007,60 @@ export function monitorMeshcoreProvider(
         if (!raw || typeof raw.text !== "string") {
           store.deadLetter(account.accountId, ev.id, raw ? "not-replayable" : "corrupt-raw");
           continue;
+        }
+        if (!raw.isGroup) {
+          const evidence = parseDmIdentityEvidence(rawJson);
+          if (!evidence) {
+            store.deadLetter(account.accountId, ev.id, "dm-identity-no-evidence");
+            continue;
+          }
+          const current = await decideWithOneContactRefresh({
+            accountId: account.accountId,
+            handle,
+            wirePrefix: hexToBytes(evidence.wirePrefixHex),
+            contactBookMaxEntries: account.config.contactBookMaxEntries,
+          });
+          if (current.syncFailed) {
+            // Temporary radio/contact failure: claim returns to pending and
+            // maxDispatchAttempts still bounds retries across restarts.
+            store.releaseClaim(account.accountId, ev.id, "dm-identity-contact-sync");
+            continue;
+          }
+          if (current.decision.status === "ambiguous") {
+            store.deadLetter(account.accountId, ev.id, "dm-identity-ambiguous");
+            continue;
+          }
+          if (current.decision.status !== "unique") {
+            store.deadLetter(account.accountId, ev.id, "dm-identity-stale");
+            continue;
+          }
+          const digestMatches = dmIdentityDigestsEqual(
+            evidence.fullKeySha256,
+            fullKeySha256(current.decision.fullKey),
+          );
+          const canonicalRouteMatches =
+            ev.kind === "direct" &&
+            ev.peerId === current.decision.nodeId &&
+            raw.senderNodeId === current.decision.nodeId &&
+            raw.target === current.decision.nodeId;
+          if (
+            !digestMatches ||
+            !canonicalRouteMatches ||
+            raw.meshSecurity?.identityBinding === "mismatch"
+          ) {
+            store.deadLetter(account.accountId, ev.id, "dm-identity-stale");
+            continue;
+          }
+          // Stored decisions are never trusted. Re-enter the shared inbound
+          // path with CURRENT validated facts and the original evidence.
+          raw = {
+            ...raw,
+            senderNodeId: current.decision.nodeId,
+            target: current.decision.nodeId,
+            senderName: current.decision.name,
+            dmIdentity: current.decision,
+            dmIdentityEvidence: evidence,
+          };
         }
         const replayAbort = new AbortController();
         const abortReplay = () => replayAbort.abort();

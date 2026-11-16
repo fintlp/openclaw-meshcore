@@ -44,6 +44,20 @@ import { readNodeStatusSnapshot } from "./node-status.js";
 import { runRepeaterOpsCommand, type RepeaterOpsKind } from "./repeater-ops.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
+import {
+  authorizeDmCommand,
+  canonicalMeshcoreNodeId,
+  dmIdentityDigestsEqual,
+  fullKeySha256,
+  parseDmIdentityEvidence,
+  validateDmApprovalEntries,
+} from "./dm-identity.js";
+import { assertNativePingRateLimit, resolveSendRateLimitConfig } from "./rate-limit.js";
+import { runPairingChallenge } from "./pairing-budget.js";
+import {
+  buildMeshcorePairingReplyText,
+  countMeshcorePairingReplyPackets,
+} from "./pairing-reply.js";
 
 const CHANNEL_ID = "meshcore" as const;
 type MeshcoreGroupPolicy = "open" | "allowlist" | "disabled";
@@ -113,14 +127,24 @@ async function deliverMeshcoreReply(params: {
   cfg: CoreConfig;
   target: string;
   accountId: string;
-  sendReply?: (target: string, text: string, replyToId?: string) => Promise<void>;
+  sendReply?: (
+    target: string,
+    text: string,
+    replyToId?: string,
+    purpose?: "dm" | "pairing",
+  ) => Promise<void>;
+  purpose?: "dm" | "pairing";
   statusSink?: (patch: { lastOutboundAt?: number }) => void;
 }) {
   await deliverFormattedTextWithAttachments({
     payload: params.payload,
     send: async ({ text, replyToId }) => {
       if (params.sendReply) {
-        await params.sendReply(params.target, text, replyToId);
+        if (params.purpose) {
+          await params.sendReply(params.target, text, replyToId, params.purpose);
+        } else {
+          await params.sendReply(params.target, text, replyToId);
+        }
       }
       params.statusSink?.({ lastOutboundAt: Date.now() });
     },
@@ -152,6 +176,100 @@ function parseRepeaterOpsInvocation(
     }
   }
   return undefined;
+}
+
+
+function parseNativeCommand(rawBody: string): string | undefined {
+  if (COMMAND_REPLIES.has(rawBody)) return rawBody;
+  const invocation = parseRepeaterOpsInvocation(rawBody);
+  return invocation ? "!" + invocation.op : undefined;
+}
+
+const securityLogState = new Map<string, { at: number; suppressed: number }>();
+
+function logInboundSecurity(params: {
+  runtime: RuntimeEnv;
+  accountId: string;
+  reason: string;
+  detail?: string;
+}): void {
+  const now = Date.now();
+  const key = params.accountId + ":" + params.reason;
+  const prior = securityLogState.get(key);
+  if (prior && now - prior.at < 60_000) {
+    prior.suppressed += 1;
+    return;
+  }
+  const suppressed = prior?.suppressed ?? 0;
+  securityLogState.set(key, { at: now, suppressed: 0 });
+  params.runtime.log?.(
+    "meshcore: " + params.reason + " account=" + params.accountId +
+      (params.detail ? " " + params.detail : "") + " suppressed=" + suppressed,
+  );
+}
+
+function fingerprintNodeId(nodeId: string): string {
+  return nodeId.startsWith("!") ? nodeId.slice(0, 13) : "unknown";
+}
+
+
+function matchesConfiguredMeshOwner(params: {
+  config: CoreConfig;
+  fullKey: string;
+}): boolean {
+  const commands = (params.config as { commands?: { ownerAllowFrom?: unknown } }).commands;
+  const entries = Array.isArray(commands?.ownerAllowFrom) ? commands.ownerAllowFrom : [];
+  for (const raw of entries) {
+    if (typeof raw !== "string" && typeof raw !== "number") continue;
+    let entry = String(raw).trim();
+    if (!entry) continue;
+    // Mirror resolveOwnerAllowFromList on 2026.10.5 and 2026.11.3: strip ONE
+    // recognized provider prefix, then run the plugin's formatAllowFrom
+    // normalization. Thus meshcore:meshcore:!<key> normalizes exactly as the
+    // host sees it instead of bypassing this fail-closed owner-route refusal.
+    const separatorIndex = entry.indexOf(":");
+    if (separatorIndex > 0) {
+      // The host trims the prefix before the channel lookup
+      // (resolveOwnerAllowFromList → normalizeNullableString .trim()); mirror
+      // it so "meshcore :!key" / tab variants cannot bypass this refusal.
+      if (entry.slice(0, separatorIndex).trim().toLowerCase() !== "meshcore") continue;
+      entry = entry.slice(separatorIndex + 1).trim();
+      if (!entry) continue;
+    }
+    const normalized = normalizeMeshcoreAllowEntry(entry);
+    const hex = normalized.startsWith("!") ? normalized.slice(1) : "";
+    // Bare IDs, ! prefixes and explicit meshcore: entries all match only
+    // against the CURRENT validated full key. Short prefixes stay conservative
+    // refusals; names and other unmatchable aliases never establish a match.
+    if (/^[0-9a-f]{1,64}$/u.test(hex) && params.fullKey.startsWith(hex)) return true;
+  }
+  return false;
+}
+
+function validDmApprovals(params: {
+  entries: readonly unknown[] | undefined;
+  allowWildcard: boolean;
+  runtime: RuntimeEnv;
+  accountId: string;
+  source: "config" | "pairing-store";
+}): Array<string | number> {
+  const entries = Array.isArray(params.entries) ? params.entries : [];
+  const partition = validateDmApprovalEntries(entries);
+  const wildcard = params.allowWildcard && entries.some(
+    (entry) => typeof entry === "string" && normalizeMeshcoreAllowEntry(entry) === "*",
+  );
+  const ignored = partition.legacyOrInvalid.filter(
+    (entry) => !(typeof entry === "string" && normalizeMeshcoreAllowEntry(entry) === "*" && params.allowWildcard),
+  );
+  if (ignored.length > 0) {
+    logInboundSecurity({
+      runtime: params.runtime,
+      accountId: params.accountId,
+      reason: "legacy-dm-approvals-ignored",
+      detail: "source=" + params.source + " count=" + ignored.length,
+    });
+  }
+  return [...partition.canonical, ...(wildcard ? ["*"] : [])];
 }
 
 function formatStatusReply(snapshot: ReturnType<typeof readNodeStatusSnapshot>): string {
@@ -211,7 +329,12 @@ export async function handleMeshcoreInbound(params: {
   account: ResolvedMeshcoreAccount;
   config: CoreConfig;
   runtime: RuntimeEnv;
-  sendReply?: (target: string, text: string, replyToId?: string) => Promise<void>;
+  sendReply?: (
+    target: string,
+    text: string,
+    replyToId?: string,
+    purpose?: "dm" | "pairing",
+  ) => Promise<void>;
   statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
   /** If provided for group messages, called after admission succeeds and then normal session dispatch is skipped. */
   onAdmittedGroup?: (message: MeshcoreInboundMessage) => void | Promise<void>;
@@ -233,8 +356,74 @@ export async function handleMeshcoreInbound(params: {
   });
 
   const rawBody = message.text?.trim() ?? "";
-  if (!rawBody) {
+  if (!rawBody) return;
+
+  // Compute ONE command decision before host command facts or native replies.
+  const nativeCommand = message.isGroup ? undefined : parseNativeCommand(rawBody);
+  const commandRepliesEnabled = account.config.commandRepliesEnabled ?? true;
+  const commandDecision = authorizeDmCommand({
+    identity: message.dmIdentity ?? { status: "invalid" },
+    nativeCommand,
+    nativePingAllowFrom: account.config.commandPingAllowFrom,
+    commandRepliesEnabled,
+  });
+
+  // Native-command marker rows intentionally have rawJson "{}" and no DM
+  // identity evidence. Classify them as non-replayable BEFORE the evidence
+  // gate so they cannot be mislabeled dm-identity-no-evidence.
+  if (!message.isGroup && params.replayOf !== undefined && nativeCommand) {
+    params.durability?.deadLetter(account.accountId, params.replayOf, "not-replayable");
     return;
+  }
+
+  if (!message.isGroup) {
+    const identity = message.dmIdentity;
+    const canonical = identity?.status === "unique"
+      ? canonicalMeshcoreNodeId(identity.fullKey)
+      : undefined;
+    const evidence = parseDmIdentityEvidence(message);
+    const validIdentity =
+      identity?.status === "unique" &&
+      canonical !== undefined &&
+      identity.nodeId === canonical &&
+      message.senderNodeId === canonical &&
+      message.target === canonical &&
+      evidence !== undefined &&
+      evidence.wirePrefixHex === identity.fullKey.slice(0, 12) &&
+      dmIdentityDigestsEqual(evidence.fullKeySha256, fullKeySha256(identity.fullKey));
+    if (!validIdentity || message.meshSecurity.identityBinding === "mismatch") {
+      if (params.replayOf !== undefined) {
+        const reason = !evidence
+          ? "dm-identity-no-evidence"
+          : identity?.status === "ambiguous"
+            ? "dm-identity-ambiguous"
+            : "dm-identity-stale";
+        params.durability?.deadLetter(account.accountId, params.replayOf, reason);
+      }
+      logInboundSecurity({
+        runtime, accountId: account.accountId, reason: "dm-identity-refused",
+        detail: "fingerprint=" + fingerprintNodeId(message.senderNodeId),
+      });
+      return;
+    }
+    if (
+      identity?.status === "unique" &&
+      matchesConfiguredMeshOwner({ config, fullKey: identity.fullKey })
+    ) {
+      // The host exposes owner-only tools from senderIsOwner independently of
+      // CommandAuthorized. Refuse the whole unverified owner route BEFORE a
+      // session can be created; flags alone are not a complete tool gate.
+      if (params.replayOf !== undefined) {
+        params.durability?.deadLetter(account.accountId, params.replayOf, "dm-identity-stale");
+      }
+      logInboundSecurity({
+        runtime,
+        accountId: account.accountId,
+        reason: "mesh-owner-unverified",
+        detail: "fingerprint=" + fingerprintNodeId(message.senderNodeId),
+      });
+      return;
+    }
   }
 
   params.statusSink?.({
@@ -267,11 +456,13 @@ export async function handleMeshcoreInbound(params: {
     surface: CHANNEL_ID,
   });
   // Group commands are plain text: never let command authorization bypass
-  // requireMention. DMs retain the existing command behavior.
-  const ingressAllowTextCommands = message.isGroup ? false : allowTextCommands;
-  const hasControlCommand = message.isGroup
-    ? false
-    : core.channel.text.hasControlCommand(rawBody, config as OpenClawConfig);
+  // requireMention. DM host commands additionally require independent proof.
+  const dmHostCommandsAuthorized =
+    !message.isGroup && commandDecision.hostCommandAuthorized;
+  const ingressAllowTextCommands = dmHostCommandsAuthorized ? allowTextCommands : false;
+  const hasControlCommand = dmHostCommandsAuthorized
+    ? core.channel.text.hasControlCommand(rawBody, config as OpenClawConfig)
+    : false;
   const mentionRegexes = core.channel.mentions.buildMentionRegexes(config as OpenClawConfig);
   const wasMentioned = core.channel.mentions.matchesMentionPatterns(rawBody, mentionRegexes);
   const requireMention = message.isGroup
@@ -299,12 +490,33 @@ export async function handleMeshcoreInbound(params: {
       ? "allowlist"
       : groupPolicy;
 
+  const dmConfigAllowFrom = message.isGroup
+    ? account.config.allowFrom
+    : validDmApprovals({
+        entries: account.config.allowFrom,
+        allowWildcard: true,
+        runtime,
+        accountId: account.accountId,
+        source: "config",
+      });
+
   const access = await createChannelIngressResolver({
     channelId: CHANNEL_ID,
     accountId: account.accountId,
     identity: meshcoreIngressIdentity,
     cfg: config as OpenClawConfig,
-    readStoreAllowFrom: async () => await pairing.readAllowFromStore(),
+    readStoreAllowFrom: async () => {
+      const stored = await pairing.readAllowFromStore();
+      return message.isGroup
+        ? stored
+        : validDmApprovals({
+            entries: stored,
+            allowWildcard: false,
+            runtime,
+            accountId: account.accountId,
+            source: "pairing-store",
+          });
+    },
   }).message({
     subject: createMeshcoreIngressSubject(message),
     conversation: {
@@ -336,7 +548,7 @@ export async function handleMeshcoreInbound(params: {
         allowTextCommands: ingressAllowTextCommands,
       },
     },
-    allowFrom: account.config.allowFrom,
+    allowFrom: dmConfigAllowFrom,
     groupAllowFrom: account.config.groupAllowFrom,
     command: message.isGroup
       ? false
@@ -345,7 +557,9 @@ export async function handleMeshcoreInbound(params: {
           hasControlCommand,
         },
   });
-  const commandAuthorized = message.isGroup ? false : access.commandAccess.authorized;
+  const commandAuthorized = message.isGroup
+    ? false
+    : access.commandAccess.authorized && commandDecision.hostCommandAuthorized;
 
   // Replay path: admission flipped while we were down (config changed).
   // The attempt was already counted at claim time; release the claim — the
@@ -359,6 +573,15 @@ export async function handleMeshcoreInbound(params: {
     runtime.log?.(
       `meshcore: replay event ${params.replayOf} no longer admitted (${access.ingress.admission}) — claim released`,
     );
+    return;
+  }
+
+  // A recognized native command is terminal when blocked. It never becomes a
+  // pairing request, durable row, radio reply, or model turn.
+  if (
+    nativeCommand &&
+    (!commandDecision.nativeAuthorized || access.ingress.admission !== "dispatch")
+  ) {
     return;
   }
 
@@ -383,6 +606,45 @@ export async function handleMeshcoreInbound(params: {
     );
     return;
   }
+  // A native-command marker is already running (or ran) and deliberately has
+  // no evidence payload. Drop its duplicate BEFORE inspecting evidence; the
+  // marker must stay pending for the original commandMark, not become a dead
+  // dm-identity-no-evidence row that a later mark could write to.
+  const duplicateNativeCommand = Boolean(
+    existingDupe &&
+    !message.isGroup &&
+    commandDecision.nativeAuthorized &&
+    access.ingress.admission === "dispatch" &&
+    (COMMAND_REPLIES.has(rawBody) || parseRepeaterOpsInvocation(rawBody)),
+  );
+  if (existingDupe && !message.isGroup && !duplicateNativeCommand) {
+    const previousRaw = store?.rawJsonOf(existingDupe.id) ?? null;
+    const previousEvidence = parseDmIdentityEvidence(previousRaw);
+    let previousMessageId: unknown;
+    try {
+      previousMessageId = previousRaw
+        ? (JSON.parse(previousRaw) as { messageId?: unknown }).messageId
+        : undefined;
+    } catch {
+      previousMessageId = undefined;
+    }
+    if (!previousEvidence) {
+      store?.deadLetter(account.accountId, existingDupe.id, "dm-identity-no-evidence");
+      return;
+    }
+    const currentEvidence = parseDmIdentityEvidence(message);
+    if (
+      !currentEvidence ||
+      previousMessageId !== message.messageId ||
+      previousEvidence.wirePrefixHex !== currentEvidence.wirePrefixHex ||
+      !dmIdentityDigestsEqual(previousEvidence.fullKeySha256, currentEvidence.fullKeySha256)
+    ) {
+      // Same-prefix/timestamp/body collisions are not redeliveries of a
+      // different attribution. Stop before the pending row can be reused.
+      store?.deadLetter(account.accountId, existingDupe.id, "dm-identity-stale");
+      return;
+    }
+  }
   const redeliverEventId = existingDupe?.id;
 
   // Plugin-level command replies: answered directly for DMs that pass
@@ -390,9 +652,8 @@ export async function handleMeshcoreInbound(params: {
   // senders fall through to the normal pairing flow so we never leak gateway
   // internals to strangers. Covers !ping/!status (exact match) and the
   // repeater-ops commands (!neighbours <node>, ...) which put frames on air.
-  const commandRepliesEnabled = account.config.commandRepliesEnabled ?? true;
   if (
-    commandRepliesEnabled &&
+    commandDecision.nativeAuthorized &&
     !message.isGroup &&
     access.ingress.admission === "dispatch"
   ) {
@@ -400,7 +661,7 @@ export async function handleMeshcoreInbound(params: {
     // row means the command is already running (or ran), never re-air it. But
     // this must only fire for real commands: a plain DM retry belongs to the
     // m7 redelivery path below (re-check regression).
-    if (existingDupe && (COMMAND_REPLIES.has(rawBody) || parseRepeaterOpsInvocation(rawBody))) {
+    if (duplicateNativeCommand) {
       runtime.log?.(
         `meshcore: drop duplicate command ${rawBody} (sender ${message.senderNodeId})`,
       );
@@ -430,6 +691,19 @@ export async function handleMeshcoreInbound(params: {
       }
     };
     if (COMMAND_REPLIES.has(rawBody)) {
+      if (rawBody === "!ping") {
+        try {
+          assertNativePingRateLimit({ accountId: account.accountId });
+        } catch {
+          logInboundSecurity({
+            runtime,
+            accountId: account.accountId,
+            reason: "native-ping-budget-refused",
+            detail: "fingerprint=" + fingerprintNodeId(message.senderNodeId),
+          });
+          return;
+        }
+      }
       const replyText = buildCommandReply(rawBody, account.accountId, params.durability);
       if (replyText !== undefined) {
         const cid = commandIntake();
@@ -480,25 +754,70 @@ export async function handleMeshcoreInbound(params: {
   }
 
   if (access.ingress.admission === "pairing-required") {
-    await pairing.issueChallenge({
-      senderId: message.senderNodeId,
-      senderIdLine: `Your MeshCore node id: ${message.senderNodeId}`,
-      meta: { name: message.senderName ?? message.senderNodeId },
-      sendPairingReply: async (text) => {
-        await deliverMeshcoreReply({
-          payload: { text },
-          cfg: config,
-          target: message.senderNodeId,
-          accountId: account.accountId,
-          sendReply: params.sendReply,
-          statusSink: params.statusSink,
+    const sendRateLimit = resolveSendRateLimitConfig(
+      account.config.sendRateLimit as Record<string, unknown> | undefined,
+    );
+    const senderIdLine = "Your MeshCore node id: " + message.senderNodeId;
+    const requiredPackets = countMeshcorePairingReplyPackets({
+      senderIdLine,
+      textChunkLimit: account.config.textChunkLimit,
+      chunkNumbering: account.config.chunkNumbering,
+      outboundSignedPlain: account.config.outboundSignedPlain,
+    });
+    const result = await runPairingChallenge({
+      accountId: account.accountId,
+      nodeId: message.senderNodeId,
+      maxSends: sendRateLimit.maxSends,
+      requiredPackets,
+      issue: async () => {
+        let replyFailed = false;
+        const challenge = await pairing.issueChallenge({
+          senderId: message.senderNodeId,
+          senderIdLine,
+          meta: { name: message.senderName ?? message.senderNodeId },
+          buildReplyText: buildMeshcorePairingReplyText,
+          sendPairingReply: async (text) => {
+            await deliverMeshcoreReply({
+              payload: { text },
+              cfg: config,
+              target: message.senderNodeId,
+              accountId: account.accountId,
+              sendReply: params.sendReply,
+              purpose: "pairing",
+              statusSink: params.statusSink,
+            });
+          },
+          onReplyError: () => {
+            // The real 2026.10.5/2026.11.3 host logs through this callback,
+            // keeps the pending record until its TTL, then returns created:true.
+            replyFailed = true;
+            runtime.error?.(
+              "meshcore: pairing reply failed account=" + account.accountId +
+                " fingerprint=" + fingerprintNodeId(message.senderNodeId),
+            );
+          },
         });
-      },
-      onReplyError: (err) => {
-        runtime.error?.(`meshcore: pairing reply failed for ${message.senderNodeId}: ${String(err)}`);
+        return {
+          created: challenge.created,
+          replyDelivered: challenge.created && !replyFailed,
+        };
       },
     });
-    runtime.log?.(`meshcore: drop DM sender ${message.senderNodeId} (dmPolicy=${dmPolicy})`);
+    if (!result.issued) {
+      logInboundSecurity({
+        runtime,
+        accountId: account.accountId,
+        reason: "pairing-request-refused",
+        detail: "cause=" + (result.reason ?? "unknown") +
+          " fingerprint=" + fingerprintNodeId(message.senderNodeId),
+      });
+    } else {
+      runtime.log?.(
+        "meshcore: pairing challenge completed account=" + account.accountId +
+          " fingerprint=" + fingerprintNodeId(message.senderNodeId) +
+          " coalesced=" + result.coalesced,
+      );
+    }
     return;
   }
   if (access.ingress.admission === "skip") {
@@ -528,7 +847,11 @@ export async function handleMeshcoreInbound(params: {
         runtime.log?.(`meshcore: drop group sender ${message.senderNodeId} (policy=${groupPolicy})`);
       }
     } else {
-      runtime.log?.(`meshcore: drop DM sender ${message.senderNodeId} (dmPolicy=${dmPolicy})`);
+      runtime.log?.(
+        "meshcore: drop DM account=" + account.accountId +
+          " fingerprint=" + fingerprintNodeId(message.senderNodeId) +
+          " dmPolicy=" + dmPolicy,
+      );
     }
     return;
   }
@@ -687,7 +1010,8 @@ export async function handleMeshcoreInbound(params: {
     OriginatingChannel: CHANNEL_ID,
     OriginatingTo: `meshcore:${peerId}`,
     CommandAuthorized: commandAuthorized,
-    CommandInterpretationSuppressed: message.isGroup ? true : undefined,
+    CommandInterpretationSuppressed:
+      message.isGroup || commandDecision.commandInterpretationSuppressed ? true : undefined,
     ReplyToId: message.replyToId,
     ChannelStructuredContext: [
       {

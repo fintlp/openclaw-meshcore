@@ -468,6 +468,19 @@
       "default": true,
       "type": "boolean"
     },
+    "commandPingAllowFrom": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "number"
+          }
+        ]
+      }
+    },
     "contactBookMaxEntries": {
       "default": 500,
       "type": "integer",
@@ -1489,6 +1502,19 @@
         "commandRepliesEnabled": {
           "default": true,
           "type": "boolean"
+        },
+        "commandPingAllowFrom": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          }
         },
         "contactBookMaxEntries": {
           "default": 500,

@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assertNativePingRateLimit,
   assertSendRateLimit,
   clearSendRateLimitState,
   resolveSendRateLimitConfig,
   SEND_RATE_LIMIT_DEFAULTS,
   SendRateLimitExceededError,
 } from "./rate-limit.js";
+import { countMeshcorePairingReplyPackets } from "./pairing-reply.js";
 
 const BASE_NOW = 1_800_000_000_000;
 
@@ -88,5 +90,117 @@ describe("assertSendRateLimit", () => {
     expect(() =>
       assertSendRateLimit({ accountId: "alpha", packets: 1, config, nowMs: BASE_NOW + 1 }),
     ).toThrow(SendRateLimitExceededError);
+  });
+
+  it("partitions pairing packets from normal DMs and counts every chunk", () => {
+    const config = resolveSendRateLimitConfig({ maxSends: 20 });
+    for (let i = 0; i < 3; i += 1) {
+      assertSendRateLimit({
+        accountId: "default", packets: 1, config, purpose: "pairing", nowMs: BASE_NOW + i,
+      });
+    }
+    expect(() =>
+      assertSendRateLimit({
+        accountId: "default", packets: 1, config, purpose: "pairing", nowMs: BASE_NOW + 4,
+      }),
+    ).toThrow(/pairing packet budget/i);
+
+    // Pairing may never consume the final normal-DM allocation, and all
+    // packets share the account's overall cap.
+    assertSendRateLimit({ accountId: "default", packets: 17, config, nowMs: BASE_NOW + 5 });
+    expect(() =>
+      assertSendRateLimit({ accountId: "default", packets: 1, config, nowMs: BASE_NOW + 6 }),
+    ).toThrow(SendRateLimitExceededError);
+  });
+
+  it("enforces the nine-packet default-challenge ceiling even when the DM limiter is disabled", () => {
+    const config = resolveSendRateLimitConfig({ enabled: false, maxSends: 20 });
+    assertSendRateLimit({ accountId: "default", packets: 50, config, nowMs: BASE_NOW });
+    for (let n = 0; n < 3; n += 1) {
+      assertSendRateLimit({
+        accountId: "default", packets: 3, config, purpose: "pairing", nowMs: BASE_NOW + n,
+      });
+    }
+    expect(() =>
+      assertSendRateLimit({
+        accountId: "default", packets: 3, config, purpose: "pairing", nowMs: BASE_NOW + 4,
+      }),
+    ).toThrow(/pairing packet budget/i);
+  });
+
+  it("rejects pairing at maxSends:1 without consuming the sole normal-DM packet", () => {
+    const config = resolveSendRateLimitConfig({ maxSends: 1 });
+    expect(() =>
+      assertSendRateLimit({
+        accountId: "default", packets: 1, config, purpose: "pairing", nowMs: BASE_NOW,
+      }),
+    ).toThrow(/maxSends.*1|pairing.*disabled/i);
+    assertSendRateLimit({ accountId: "default", packets: 1, config, nowMs: BASE_NOW + 1 });
+  });
+
+  it("fits three real three-chunk challenges into the default partition", () => {
+    const challengePackets = countMeshcorePairingReplyPackets({
+      senderIdLine: "Your MeshCore node id: !" + "ab".repeat(32),
+    });
+    expect(challengePackets).toBe(3);
+    const config = resolveSendRateLimitConfig({ maxSends: 20 });
+    for (let n = 0; n < 3; n += 1) {
+      assertSendRateLimit({
+        accountId: "default", packets: challengePackets, config,
+        purpose: "pairing", nowMs: BASE_NOW + n,
+      });
+    }
+    expect(() => assertSendRateLimit({
+      accountId: "default", packets: challengePackets, config,
+      purpose: "pairing", nowMs: BASE_NOW + 4,
+    })).toThrow(/pairing packet budget/i);
+    // Nine pairing packets leave eleven normal packets under the hard total.
+    assertSendRateLimit({ accountId: "default", packets: 11, config, nowMs: BASE_NOW + 5 });
+    expect(() => assertSendRateLimit({
+      accountId: "default", packets: 1, config, nowMs: BASE_NOW + 6,
+    })).toThrow(SendRateLimitExceededError);
+  });
+
+  it("fits one real challenge at maxSends:4 while retaining a normal packet", () => {
+    const challengePackets = countMeshcorePairingReplyPackets({
+      senderIdLine: "Your MeshCore node id: !" + "ab".repeat(32),
+    });
+    const config = resolveSendRateLimitConfig({ maxSends: 4 });
+    assertSendRateLimit({
+      accountId: "default", packets: challengePackets, config,
+      purpose: "pairing", nowMs: BASE_NOW,
+    });
+    expect(() => assertSendRateLimit({
+      accountId: "default", packets: challengePackets, config,
+      purpose: "pairing", nowMs: BASE_NOW + 1,
+    })).toThrow(/pairing packet budget/i);
+    assertSendRateLimit({ accountId: "default", packets: 1, config, nowMs: BASE_NOW + 2 });
+  });
+
+  it("budgets native ping replies separately at three per account per window", () => {
+    for (const accountId of ["default", "default", "default", "other"]) {
+      assertNativePingRateLimit({ accountId, nowMs: BASE_NOW });
+    }
+    expect(() => assertNativePingRateLimit({ accountId: "default", nowMs: BASE_NOW + 1 }))
+      .toThrow(/native !ping reply budget/i);
+    // Pairing and ordinary packet sends do not spend this independent budget.
+    const config = resolveSendRateLimitConfig({ maxSends: 4 });
+    assertSendRateLimit({
+      accountId: "default", packets: 3, config, purpose: "pairing", nowMs: BASE_NOW + 2,
+    });
+    expect(() => assertNativePingRateLimit({ accountId: "default", nowMs: BASE_NOW + 3 }))
+      .toThrow(SendRateLimitExceededError);
+    assertNativePingRateLimit({ accountId: "default", nowMs: BASE_NOW + 600_001 });
+  });
+
+  it("refuses an over-budget multi-chunk challenge atomically", () => {
+    const config = resolveSendRateLimitConfig({ maxSends: 4 });
+    expect(() =>
+      assertSendRateLimit({
+        accountId: "default", packets: 4, config, purpose: "pairing", nowMs: BASE_NOW,
+      }),
+    ).toThrow(/pairing packet budget/i);
+    // No portion of the refused challenge was charged.
+    assertSendRateLimit({ accountId: "default", packets: 4, config, nowMs: BASE_NOW + 1 });
   });
 });

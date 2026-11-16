@@ -11,6 +11,16 @@ import { resetGroupLogStateForTests, setGroupLogPathForTests } from "./group-log
 import { resetNodeStatusStateForTests, setNodeStatusPathForTests } from "./node-status.js";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
+import { createDmIdentityEvidence } from "./dm-identity.js";
+import { hexToBytes } from "./protocol.js";
+
+const REPLAY_FULL_KEY = "aabbccddeeff" + "00".repeat(25) + "01";
+const REPLAY_CHANGED_FULL_KEY = "aabbccddeeff" + "11".repeat(26);
+const REPLAY_NODE_ID = `!${REPLAY_FULL_KEY}`;
+
+function radioContact(fullKey = REPLAY_FULL_KEY) {
+  return { publicKey: hexToBytes(fullKey), advName: "TestNode" };
+}
 
 // The monitor tests below intentionally mock inbound to isolate signal
 // propagation and race control. Real inbound finalization is covered by the
@@ -94,31 +104,42 @@ function createResolvedAccount() {
     },
   };
 }
-function createConnection() {
+function createConnection(contacts: Array<ReturnType<typeof radioContact>> = [radioContact()]) {
   const emitter = new EventEmitter();
+  Object.assign(emitter, {
+    getContacts: vi.fn(async () => contacts),
+    getWaitingMessages: vi.fn(async () => []),
+  });
   return {
     connection: emitter as unknown as {
       on: (event: string | number, listener: (...args: any[]) => void) => unknown;
       off: (event: string | number, listener: (...args: any[]) => void) => unknown;
       emit: (event: string | number, ...args: unknown[]) => boolean;
-      getWaitingMessages: () => Promise.resolve([]),
+      getContacts: ReturnType<typeof vi.fn>;
+      getWaitingMessages: () => Promise<unknown[]>;
     },
-    contacts: [],
+    contacts,
     channels: [],
     accountId: "default",
     connected: true,
   };
 }
-function makeMessage(text = "hello"): MeshcoreInboundMessage {
+function makeMessage(text = "hello", fullKey = REPLAY_FULL_KEY): MeshcoreInboundMessage {
+  const nodeId = `!${fullKey}`;
   return {
     messageId: "mc-repro-1",
-    target: "!aabbccdd1122",
-    senderNodeId: "!aabbccdd1122",
+    target: nodeId,
+    senderNodeId: nodeId,
     senderName: "TestNode",
     text,
     timestamp: 1700000000000,
     isGroup: false,
     meshChannel: 0,
+    dmIdentity: { status: "unique", fullKey, nodeId, name: "TestNode" },
+    dmIdentityEvidence: createDmIdentityEvidence({
+      wirePrefix: hexToBytes(fullKey.slice(0, 12)),
+      fullKey,
+    }),
     meshSecurity: { txtType: 0, signedPlain: false, identityBinding: "prefix-only" },
   };
 }
@@ -329,12 +350,194 @@ describe("monitor durability replay repros", () => {
     }
   });
 
-  it("still marks a normally completed replay dispatch as dispatched", async () => {
-    const message = makeMessage("normal replay");
-    store!.intake({
+  it("dead-letters a replay when the same prefix now maps to a changed full key", async () => {
+    const message = makeMessage("changed key");
+    const intake = store!.intake({
       accountId: "default",
       dedupeKey: keyFor(message),
       kind: "direct",
+      peerId: message.senderNodeId,
+      senderTs: message.timestamp,
+      body: message.text,
+      rawJson: JSON.stringify(message),
+    });
+    const deadLetter = vi.spyOn(store!, "deadLetter");
+    const handle = createConnection([radioContact(REPLAY_CHANGED_FULL_KEY)]);
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const monitorPromise = monitorMeshcoreProvider(monitorOptions());
+    const rejected = expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+
+    await vi.waitFor(() => {
+      expect(deadLetter).toHaveBeenCalledWith("default", intake.id, "dm-identity-stale");
+    });
+    expect(store!.findDuplicate("default", keyFor(message))?.state).toBe("dead");
+    expect(handleMeshcoreInboundMock).not.toHaveBeenCalled();
+    expect(handle.connection.getContacts).not.toHaveBeenCalled();
+    handle.connection.emit("disconnected");
+    await rejected;
+  });
+
+
+  it("dead-letters when stored evidence digest differs from the currently selected key", async () => {
+    const message = makeMessage("tampered evidence digest");
+    message.dmIdentityEvidence = {
+      ...message.dmIdentityEvidence!,
+      fullKeySha256: "0".repeat(64),
+    };
+    const intake = store!.intake({
+      accountId: "default",
+      dedupeKey: keyFor(message),
+      kind: "direct",
+      peerId: message.senderNodeId,
+      senderTs: message.timestamp,
+      body: message.text,
+      rawJson: JSON.stringify(message),
+    });
+    const deadLetter = vi.spyOn(store!, "deadLetter");
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const monitorPromise = monitorMeshcoreProvider(monitorOptions());
+    const rejected = expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+
+    await vi.waitFor(() => {
+      expect(deadLetter).toHaveBeenCalledWith("default", intake.id, "dm-identity-stale");
+    });
+    expect(store!.findDuplicate("default", keyFor(message))?.state).toBe("dead");
+    expect(handleMeshcoreInboundMock).not.toHaveBeenCalled();
+    handle.connection.emit("disconnected");
+    await rejected;
+  });
+
+  it("dead-letters an ambiguous denied replay without an agent turn, pairing, command, or radio reply", async () => {
+    const message = makeMessage("!ping");
+    const intake = store!.intake({
+      accountId: "default",
+      dedupeKey: keyFor(message),
+      kind: "direct",
+      peerId: message.senderNodeId,
+      senderTs: message.timestamp,
+      body: message.text,
+      rawJson: JSON.stringify(message),
+    });
+    const deadLetter = vi.spyOn(store!, "deadLetter");
+    const handle = createConnection([
+      radioContact(),
+      radioContact(REPLAY_CHANGED_FULL_KEY),
+    ]);
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const monitorPromise = monitorMeshcoreProvider(monitorOptions());
+    const rejected = expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+
+    await vi.waitFor(() => {
+      expect(deadLetter).toHaveBeenCalledWith("default", intake.id, "dm-identity-ambiguous");
+    });
+    expect(store!.findDuplicate("default", keyFor(message))?.state).toBe("dead");
+    // The mocked inbound boundary covers native commands, pairing, and agent
+    // dispatch: none may run when the monitor refuses the durable row.
+    expect(handleMeshcoreInboundMock).not.toHaveBeenCalled();
+    const { sendMessageMeshcore } = await import("./send.js");
+    expect(sendMessageMeshcore).not.toHaveBeenCalled();
+    handle.connection.emit("disconnected");
+    await rejected;
+  });
+
+  it("dead-letters a replay whose intake contact has retired", async () => {
+    const message = makeMessage("retired contact");
+    const intake = store!.intake({
+      accountId: "default",
+      dedupeKey: keyFor(message),
+      kind: "direct",
+      peerId: message.senderNodeId,
+      senderTs: message.timestamp,
+      body: message.text,
+      rawJson: JSON.stringify(message),
+    });
+    const deadLetter = vi.spyOn(store!, "deadLetter");
+    const handle = createConnection([]);
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const monitorPromise = monitorMeshcoreProvider(monitorOptions());
+    const rejected = expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+
+    await vi.waitFor(() => {
+      expect(deadLetter).toHaveBeenCalledWith("default", intake.id, "dm-identity-stale");
+    });
+    expect(store!.findDuplicate("default", keyFor(message))?.state).toBe("dead");
+    expect(handleMeshcoreInboundMock).not.toHaveBeenCalled();
+    expect(handle.connection.getContacts).toHaveBeenCalledTimes(1);
+    handle.connection.emit("disconnected");
+    await rejected;
+  });
+
+  it("dead-letters a legacy DM row with no versioned identity evidence", async () => {
+    const message = makeMessage("legacy no evidence");
+    delete message.dmIdentityEvidence;
+    const intake = store!.intake({
+      accountId: "default",
+      dedupeKey: keyFor(message),
+      kind: "direct",
+      peerId: message.senderNodeId,
+      senderTs: message.timestamp,
+      body: message.text,
+      rawJson: JSON.stringify(message),
+    });
+    const deadLetter = vi.spyOn(store!, "deadLetter");
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const monitorPromise = monitorMeshcoreProvider(monitorOptions());
+    const rejected = expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+
+    await vi.waitFor(() => {
+      expect(deadLetter).toHaveBeenCalledWith("default", intake.id, "dm-identity-no-evidence");
+    });
+    expect(store!.findDuplicate("default", keyFor(message))?.state).toBe("dead");
+    expect(handleMeshcoreInboundMock).not.toHaveBeenCalled();
+    expect(handle.connection.getContacts).not.toHaveBeenCalled();
+    handle.connection.emit("disconnected");
+    await rejected;
+  });
+
+  it("releases a replay claim for bounded retry when contact sync fails", async () => {
+    const message = makeMessage("sync failure");
+    const intake = store!.intake({
+      accountId: "default",
+      dedupeKey: keyFor(message),
+      kind: "direct",
+      peerId: message.senderNodeId,
+      senderTs: message.timestamp,
+      body: message.text,
+      rawJson: JSON.stringify(message),
+    });
+    const releaseClaim = vi.spyOn(store!, "releaseClaim");
+    const handle = createConnection([]);
+    handle.connection.getContacts.mockRejectedValue(new Error("contact sync unavailable"));
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const monitorPromise = monitorMeshcoreProvider(monitorOptions());
+    const rejected = expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+
+    await vi.waitFor(() => {
+      expect(releaseClaim).toHaveBeenCalledWith("default", intake.id, "dm-identity-contact-sync");
+    });
+    expect(store!.findDuplicate("default", keyFor(message))?.state).toBe("pending");
+    expect(handleMeshcoreInboundMock).not.toHaveBeenCalled();
+    expect(handle.connection.getContacts).toHaveBeenCalledTimes(1);
+    handle.connection.emit("disconnected");
+    await rejected;
+  });
+
+  it("keeps legacy group replay rows evidence-free", async () => {
+    const message: MeshcoreInboundMessage = {
+      ...makeMessage("group replay"),
+      messageId: "mc-group-replay",
+      target: "channel:0",
+      senderNodeId: "channel:0",
+      isGroup: true,
+      dmIdentity: undefined,
+      dmIdentityEvidence: undefined,
+    };
+    store!.intake({
+      accountId: "default",
+      dedupeKey: keyFor(message),
+      kind: "group",
       peerId: message.senderNodeId,
       senderTs: message.timestamp,
       body: message.text,
@@ -354,6 +557,58 @@ describe("monitor durability replay repros", () => {
       expect(store!.findDuplicate("default", keyFor(message))?.state).toBe("dispatched");
     });
     expect(handleMeshcoreInboundMock).toHaveBeenCalledTimes(1);
+    expect(handleMeshcoreInboundMock.mock.calls[0][0].message).toEqual(expect.objectContaining({
+      isGroup: true,
+      target: "channel:0",
+      senderNodeId: "channel:0",
+    }));
+    handle.connection.emit("disconnected");
+    await rejected;
+  });
+
+  it("replays the same current mapping once and marks it dispatched", async () => {
+    const message = makeMessage("normal replay");
+    const intake = store!.intake({
+      accountId: "default",
+      dedupeKey: keyFor(message),
+      kind: "direct",
+      peerId: message.senderNodeId,
+      senderTs: message.timestamp,
+      body: message.text,
+      rawJson: JSON.stringify(message),
+    });
+    const duplicate = store!.intake({
+      accountId: "default",
+      dedupeKey: keyFor(message),
+      kind: "direct",
+      peerId: message.senderNodeId,
+      senderTs: message.timestamp,
+      body: message.text,
+      rawJson: JSON.stringify(message),
+    });
+    expect(duplicate).toEqual({ id: intake.id, duplicate: true });
+    handleMeshcoreInboundMock.mockImplementation(async (params: any) => {
+      if (params.replayOf !== undefined && !params.abortSignal?.aborted) {
+        params.durability.markDispatched(params.account.accountId, params.replayOf);
+      }
+    });
+    const handle = createConnection();
+    connectMeshcoreDeviceMock.mockResolvedValue(handle);
+    const monitorPromise = monitorMeshcoreProvider(monitorOptions());
+    const rejected = expect(monitorPromise).rejects.toThrow(/MeshCore device disconnected/);
+
+    await vi.waitFor(() => {
+      expect(store!.findDuplicate("default", keyFor(message))?.state).toBe("dispatched");
+    });
+    expect(handleMeshcoreInboundMock).toHaveBeenCalledTimes(1);
+    const call = handleMeshcoreInboundMock.mock.calls[0][0];
+    expect(call.replayOf).toBe(intake.id);
+    expect(call.message).toEqual(expect.objectContaining({
+      senderNodeId: REPLAY_NODE_ID,
+      target: REPLAY_NODE_ID,
+      dmIdentity: expect.objectContaining({ status: "unique", fullKey: REPLAY_FULL_KEY }),
+      dmIdentityEvidence: message.dmIdentityEvidence,
+    }));
     handle.connection.emit("disconnected");
     await rejected;
   });

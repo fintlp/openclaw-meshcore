@@ -8,6 +8,11 @@
  * message is either sent whole or refused whole — never partially aired.
  */
 
+import {
+  PAIRING_DEFAULT_REPLY_PACKETS,
+  PAIRING_REQUEST_MAX_ATTEMPTS,
+} from "./pairing-constants.js";
+
 export type SendRateLimitConfig = {
   enabled: boolean;
   /** Maximum packets per rolling window. */
@@ -49,16 +54,45 @@ export class SendRateLimitExceededError extends Error {
   }
 }
 
-/** Packet timestamps per account, pruned to the rolling window on each check. */
+/** Packet timestamps per account and purpose, pruned per rolling window. */
 const buckets = new Map<string, number[]>();
+const pairingBuckets = new Map<string, number[]>();
+const nativePingBuckets = new Map<string, number[]>();
 
 /** Test hook: drop all recorded send activity. */
 export function clearSendRateLimitState(accountId?: string): void {
   if (accountId === undefined) {
     buckets.clear();
+    pairingBuckets.clear();
+    nativePingBuckets.clear();
   } else {
     buckets.delete(accountId);
+    pairingBuckets.delete(accountId);
+    nativePingBuckets.delete(accountId);
   }
+}
+
+export function pairingPacketCap(
+  config: SendRateLimitConfig,
+  challengePackets = PAIRING_DEFAULT_REPLY_PACKETS,
+): number {
+  // Size the partition from the REAL chunk count: three default challenges
+  // must be realizable, not merely one three-chunk reply. The maxSends - 1
+  // ceiling always preserves at least one packet for ordinary DM traffic.
+  return Math.min(
+    PAIRING_REQUEST_MAX_ATTEMPTS * challengePackets,
+    Math.max(0, config.maxSends - 1),
+  );
+}
+
+function recentPackets(map: Map<string, number[]>, accountId: string, windowStart: number): number[] {
+  const recent = (map.get(accountId) ?? []).filter((t) => t > windowStart);
+  map.set(accountId, recent);
+  return recent;
+}
+
+function retryAfterMs(recent: number[], now: number, windowMs: number): number {
+  return Math.max(1_000, (recent[0] ?? now) + windowMs - now);
 }
 
 export function assertSendRateLimit(params: {
@@ -67,34 +101,71 @@ export function assertSendRateLimit(params: {
   packets: number;
   config: SendRateLimitConfig;
   nowMs?: number;
+  /** Trusted internal send purpose; never a public tool parameter. */
+  purpose?: "dm" | "pairing";
   /** Free-form label for error text, e.g. "DM" or "group channel". */
   scope?: string;
   /** Config path surface for error text, e.g. "channels.meshcore.sendRateLimit". */
   configPath?: string;
 }): void {
   const { config } = params;
-  if (!config.enabled || params.packets <= 0) {
+  const purpose = params.purpose ?? "dm";
+  if (params.packets <= 0 || (purpose === "dm" && !config.enabled)) {
     return;
   }
   const now = params.nowMs ?? Date.now();
   const windowStart = now - config.windowMs;
-  const recent = (buckets.get(params.accountId) ?? []).filter((t) => t > windowStart);
-  buckets.set(params.accountId, recent);
+  const normal = recentPackets(buckets, params.accountId, windowStart);
+  const pairing = recentPackets(pairingBuckets, params.accountId, windowStart);
+  const recent = purpose === "pairing" ? pairing : normal;
+  const windowMinutes = Math.round(config.windowMs / 60_000);
+  const configPath = params.configPath ?? "channels.meshcore.sendRateLimit";
 
-  if (recent.length + params.packets > config.maxSends) {
-    const oldest = recent[0] ?? now;
-    const retryAfterMs = Math.max(1_000, oldest + config.windowMs - now);
-    const windowMinutes = Math.round(config.windowMs / 60_000);
+  if (purpose === "pairing") {
+    const cap = pairingPacketCap(config, params.packets);
+    const overPairingShare = pairing.length + params.packets > cap;
+    const overTotal = config.enabled && normal.length + pairing.length + params.packets > config.maxSends;
+    if (overPairingShare || overTotal) {
+      const delay = retryAfterMs(pairing.length > 0 ? pairing : [...normal, ...pairing].sort((a, b) => a - b), now, config.windowMs);
+      throw new SendRateLimitExceededError(
+        cap === 0
+          ? `MeshCore pairing is disabled by the packet partition: maxSends=${config.maxSends} leaves no pairing packet while preserving one normal DM packet.`
+          : `MeshCore pairing packet budget reached: ${pairing.length}/${cap} pairing packet(s) in the last ${windowMinutes}m; ` +
+            `this challenge needs ${params.packets}. Retry in ~${Math.ceil(delay / 1_000)}s, or tune ${configPath} (LoRa airtime rule).`,
+        delay,
+      );
+    }
+    for (let i = 0; i < params.packets; i += 1) pairing.push(now);
+    return;
+  }
+
+  const total = normal.length + pairing.length;
+  if (total + params.packets > config.maxSends) {
+    const delay = retryAfterMs([...normal, ...pairing].sort((a, b) => a - b), now, config.windowMs);
     throw new SendRateLimitExceededError(
-      `MeshCore send rate limit reached: ${recent.length} packet(s) sent in the last ` +
+      `MeshCore send rate limit reached: ${total} packet(s) sent in the last ` +
         `${windowMinutes}m (limit ${config.maxSends}); this ${params.scope ?? "message"} needs ` +
-        `${params.packets} more. Retry in ~${Math.ceil(retryAfterMs / 1_000)}s, or tune ` +
-        `${params.configPath ?? "channels.meshcore.sendRateLimit"} (LoRa airtime rule).`,
-      retryAfterMs,
+        `${params.packets} more. Retry in ~${Math.ceil(delay / 1_000)}s, or tune ` +
+        `${configPath} (LoRa airtime rule).`,
+      delay,
     );
   }
+  for (let i = 0; i < params.packets; i += 1) normal.push(now);
+}
 
-  for (let i = 0; i < params.packets; i += 1) {
-    recent.push(now);
+
+/** The explicit native !ping compatibility exception has its own 3/10 min budget. */
+export function assertNativePingRateLimit(params: { accountId: string; nowMs?: number }): void {
+  const now = params.nowMs ?? Date.now();
+  const windowMs = 600_000;
+  const recent = recentPackets(nativePingBuckets, params.accountId, now - windowMs);
+  if (recent.length >= 3) {
+    const delay = retryAfterMs(recent, now, windowMs);
+    throw new SendRateLimitExceededError(
+      "MeshCore native !ping reply budget reached (3 per 10m per account); " +
+        "retry after the window slides. This budget is independent of pairing and normal DM sends.",
+      delay,
+    );
   }
+  recent.push(now);
 }

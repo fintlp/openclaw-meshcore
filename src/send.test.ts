@@ -6,6 +6,7 @@ import { clearOutboundEchoCache, isOutboundEcho } from "./echo-dedupe.js";
 import { clearPacingStateForTests } from "./pacing.js";
 import { clearSendRateLimitState } from "./rate-limit.js";
 import { MeshcoreSendAbortedError, sendMessageMeshcore } from "./send.js";
+import { buildMeshcorePairingReplyText } from "./pairing-reply.js";
 import type { CoreConfig } from "./types.js";
 
 const TEST_NODE_ID = "!00000000000000000000000000000000000000000000000000000000aabbccdd";
@@ -210,6 +211,41 @@ describe("sendMessageMeshcore", () => {
     ).rejects.toThrow(/rate limit/);
 
     expect(sendTextMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects pairing at intake when maxSends:1 leaves no pairing packet", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+
+    await expect(
+      sendMessageMeshcore(TEST_NODE_ID, "challenge", {
+        cfg: createConfig({ sendRateLimit: { maxSends: 1 } }),
+        purpose: "pairing",
+      }),
+    ).rejects.toThrow(/pairing/i);
+    expect(sendTextMessage).not.toHaveBeenCalled();
+  });
+
+  it("charges real multi-chunk pairing replies against their ceiling even with the DM limiter disabled", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+    const cfg = createConfig({
+      chunkNumbering: true,
+      sendRateLimit: { enabled: false, maxSends: 20 },
+    });
+    const text = buildMeshcorePairingReplyText({
+      code: "ABCD2345",
+      senderIdLine: "Your MeshCore node id: " + TEST_NODE_ID,
+    });
+
+    for (let n = 0; n < 3; n += 1) {
+      await sendMessageMeshcore(TEST_NODE_ID, text, { cfg, purpose: "pairing" });
+    }
+    expect(sendTextMessage).toHaveBeenCalledTimes(9);
+    await expect(
+      sendMessageMeshcore(TEST_NODE_ID, text, { cfg, purpose: "pairing" }),
+    ).rejects.toThrow(/pairing packet budget/i);
+    expect(sendTextMessage).toHaveBeenCalledTimes(9);
   });
 
   it("allows sends within budget, then refuses until the window slides", async () => {

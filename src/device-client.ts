@@ -3,12 +3,13 @@ import {
   rememberContact,
   rememberSelfInfo,
   resolveContactPubkeyByPrefix,
+  getContactBookEntries,
 } from "./contact-book.js";
 import { updateNodeStatusOps, writeNodeStatusSnapshot } from "./node-status.js";
 import type { MeshcoreContact, MeshcoreDeviceInfo, MeshcoreSelfInfo } from "./types.js";
+import { decideDmIdentity } from "./dm-identity.js";
 import {
   bytesToHex,
-  formatNodeIdFromBytes,
   hexToBytes,
   isValidPubkeyHex,
   normalizePubkeyHex,
@@ -683,35 +684,44 @@ export function getMeshcoreDevice(accountId: string): MeshcoreDeviceHandle | und
   return devices.get(accountId);
 }
 
-export function resolveSenderNodeId(params: {
-  pubkeyPrefix: Uint8Array;
-  contacts: MeshcoreContact[];
-}): { nodeId: string; name?: string } {
-  const prefixHex = bytesToHex(params.pubkeyPrefix).toLowerCase();
-  for (const contact of params.contacts) {
-    const contactHex = bytesToHex(contact.publicKey).toLowerCase();
-    if (contactHex === prefixHex || contactHex.startsWith(prefixHex)) {
-      return {
-        nodeId: formatNodeIdFromBytes(contact.publicKey),
-        name: contact.advName || undefined,
-      };
-    }
-  }
-  return { nodeId: `!${prefixHex}` };
-}
-
 export function resolveContactByNodeId(
   contacts: MeshcoreContact[],
   nodeId: string,
 ): MeshcoreContact | undefined {
   const hex = normalizePubkeyHex(nodeId.replace(/^!/u, ""));
-  if (!hex) {
+  if (!hex || (hex.length !== 12 && hex.length !== 64)) {
     return undefined;
   }
-  return contacts.find((contact) => {
-    const contactHex = bytesToHex(contact.publicKey).toLowerCase();
-    return contactHex === hex || contactHex.startsWith(hex);
+  if (hex.length === 64) {
+    return contacts.find((contact) => bytesToHex(contact.publicKey).toLowerCase() === hex);
+  }
+  const decision = decideDmIdentity({
+    accountId: "outbound-target",
+    wirePrefix: hexToBytes(hex),
+    radioContacts: contacts,
   });
+  if (decision.status !== "unique") return undefined;
+  return contacts.find(
+    (contact) => bytesToHex(contact.publicKey).toLowerCase() === decision.fullKey,
+  );
+}
+
+/** Refresh one handle's synchronized radio snapshot and its same-account cache. */
+export async function refreshMeshcoreDeviceContacts(params: {
+  handle: MeshcoreDeviceHandle;
+  contactBookMaxEntries?: number;
+}): Promise<void> {
+  const raw = await params.handle.connection.getContacts();
+  if (!Array.isArray(raw)) throw new Error("contact sync returned a non-array");
+  const contacts = raw.map((row) => normalizeContact(row));
+  params.handle.contacts = contacts;
+  for (const contact of contacts) {
+    rememberContact(
+      { ...contact, source: "contact-sync", identityBasis: "firmware-advert-verified" },
+      params.handle.accountId,
+      params.contactBookMaxEntries,
+    );
+  }
 }
 
 /**
@@ -726,21 +736,38 @@ export function rememberAdvertContact(
   rememberContact({ publicKey, advName: name }, accountId);
 }
 
-export { resolveContactPubkeyByPrefix as resolveAdvertPubkeyByPrefix };
 
 export function nodeIdToPubkey(
   nodeId: string,
   accountId: string | undefined = undefined,
 ): Uint8Array {
   const hex = normalizePubkeyHex(nodeId.replace(/^!/u, ""));
-  if (!isValidPubkeyHex(hex)) {
-    if (hex && accountId) {
-      const resolved = resolveContactPubkeyByPrefix(hex, accountId);
-      if (resolved) {
-        return resolved;
-      }
-    }
-    throw new Error(`invalid MeshCore node id: ${nodeId}`);
+  if (isValidPubkeyHex(hex)) {
+    // Exact full-key targets remain usable without a contact lookup.
+    return hexToBytes(hex);
   }
-  return hexToBytes(hex);
+  if (hex.length !== 12 || !accountId) {
+    throw new Error("invalid MeshCore node id: " + nodeId);
+  }
+  const handle = getMeshcoreDevice(accountId);
+  const accountContacts = getContactBookEntries(accountId).map((entry) => ({
+    ...entry,
+    accountId,
+  }));
+  const decision = decideDmIdentity({
+    accountId,
+    wirePrefix: hexToBytes(hex),
+    // Outbound operator targets may use a unique account-scoped cache row
+    // when no live handle was supplied. This is deliberately different from
+    // untrusted inbound attribution, where cache-only NEVER establishes a
+    // mapping. Conflicting/ambiguous abbreviations are still refused.
+    radioContacts: handle?.contacts.length ? handle.contacts : accountContacts,
+    accountContacts,
+  });
+  if (decision.status !== "unique") {
+    throw new Error(
+      "refused " + decision.status + " abbreviated MeshCore target; use a canonical full key",
+    );
+  }
+  return hexToBytes(decision.fullKey);
 }
