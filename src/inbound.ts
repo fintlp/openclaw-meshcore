@@ -229,7 +229,10 @@ function matchesConfiguredMeshOwner(params: {
     // host sees it instead of bypassing this fail-closed owner-route refusal.
     const separatorIndex = entry.indexOf(":");
     if (separatorIndex > 0) {
-      if (entry.slice(0, separatorIndex).toLowerCase() !== "meshcore") continue;
+      // The host trims the prefix before the channel lookup
+      // (resolveOwnerAllowFromList → normalizeNullableString .trim()); mirror
+      // it so "meshcore :!key" / tab variants cannot bypass this refusal.
+      if (entry.slice(0, separatorIndex).trim().toLowerCase() !== "meshcore") continue;
       entry = entry.slice(separatorIndex + 1).trim();
       if (!entry) continue;
     }

@@ -1050,6 +1050,9 @@ describe("meshcore inbound behavior", () => {
         "meshcore:meshcore:" + TEST_NODE_ID,
         "meshcore:meshcore:!" + TEST_NODE_ID.slice(1, 13),
         "meshcore:!" + TEST_NODE_ID.slice(1, 13),
+        // Host trims the prefix before lookup: whitespace variants must refuse too.
+        "meshcore :" + TEST_NODE_ID,
+        "MeshCore\t:" + TEST_NODE_ID,
       ];
       for (const ownerAllowFrom of aliases) {
         const inboundRunMock = vi.fn(async () => ({ dispatched: true }));
