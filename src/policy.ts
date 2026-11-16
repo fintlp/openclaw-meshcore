@@ -103,6 +103,10 @@ export function resolveMeshcoreEffectiveGroups(params: {
           | Record<string, Partial<MeshcoreAccountConfig>>
           | undefined,
         accountId: normalizeAccountId(account.accountId),
+        // Same key matching as accounts.ts: without it the SDK falls back to
+        // lowercase-only key lookup, misses non-canonical keys ("ops.team",
+        // "Ops Team") and returns the bare root config, root groups included.
+        normalizeAccountId,
         inheritEmptyKeys:
           Object.keys(channelConfig.accounts ?? {}).length > 1 ? {} : { groups: "object" },
       }).groups
