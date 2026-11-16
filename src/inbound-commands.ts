@@ -6,9 +6,16 @@
  * callback) but runs as a self-contained function the orchestrator calls.
  * Durability bookkeeping is injected by the caller, not owned here.
  */
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import type { ResolvedMeshcoreAccount } from "./accounts.js";
+import { authorizeDmCommand, type DmCommandAuthorization } from "./dm-identity.js";
 import type { DurabilityStore } from "./durability.js";
 import { readNodeStatusSnapshot } from "./node-status.js";
 import type { RepeaterOpsKind } from "./repeater-ops.js";
+import type { getMeshcoreRuntime } from "./runtime.js";
+import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
+
+const CHANNEL_ID = "meshcore" as const;
 
 export const COMMAND_REPLIES = new Set(["!ping", "!status"]);
 
@@ -93,4 +100,75 @@ export function buildCommandReply(
     return `${base} queue:${m.pending} dead:${m.dead} dup:${m.duplicates}${oldest}`;
   }
   return undefined;
+}
+
+/**
+ * The ONE command decision for an inbound frame: which native command (DMs
+ * only) it invokes, and the fail-closed DM command authorization.
+ */
+export function resolveMeshcoreCommandDecision(params: {
+  message: MeshcoreInboundMessage;
+  rawBody: string;
+  account: ResolvedMeshcoreAccount;
+}): { nativeCommand: string | undefined; commandDecision: DmCommandAuthorization } {
+  const { message, rawBody, account } = params;
+  const nativeCommand = message.isGroup ? undefined : parseNativeCommand(rawBody);
+  const commandRepliesEnabled = account.config.commandRepliesEnabled ?? true;
+  const commandDecision = authorizeDmCommand({
+    identity: message.dmIdentity ?? { status: "invalid" },
+    nativeCommand,
+    nativePingAllowFrom: account.config.commandPingAllowFrom,
+    commandRepliesEnabled,
+  });
+  return { nativeCommand, commandDecision };
+}
+
+/** Host text/control command facts handed to the ingress resolver. */
+export function resolveMeshcoreHostCommandFacts(params: {
+  core: ReturnType<typeof getMeshcoreRuntime>;
+  config: CoreConfig;
+  isGroup: boolean;
+  rawBody: string;
+  commandDecision: DmCommandAuthorization;
+}): { ingressAllowTextCommands: boolean; hasControlCommand: boolean } {
+  const { core, config, rawBody, commandDecision } = params;
+  const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
+    cfg: config as OpenClawConfig,
+    surface: CHANNEL_ID,
+  });
+  // Group commands are plain text: never let command authorization bypass
+  // requireMention. DM host commands additionally require independent proof.
+  const dmHostCommandsAuthorized =
+    !params.isGroup && commandDecision.hostCommandAuthorized;
+  const ingressAllowTextCommands = dmHostCommandsAuthorized ? allowTextCommands : false;
+  const hasControlCommand = dmHostCommandsAuthorized
+    ? core.channel.text.hasControlCommand(rawBody, config as OpenClawConfig)
+    : false;
+  return { ingressAllowTextCommands, hasControlCommand };
+}
+
+/** CommandAuthorized for the agent turn: never for groups; DMs need both gates. */
+export function resolveMeshcoreCommandAuthorized(params: {
+  isGroup: boolean;
+  access: { commandAccess: { authorized: boolean } };
+  commandDecision: DmCommandAuthorization;
+}): boolean {
+  return params.isGroup
+    ? false
+    : params.access.commandAccess.authorized && params.commandDecision.hostCommandAuthorized;
+}
+
+/**
+ * A recognized native command is terminal when blocked: not natively
+ * authorized, or not admitted for dispatch.
+ */
+export function isBlockedNativeCommand(params: {
+  nativeCommand: string | undefined;
+  commandDecision: DmCommandAuthorization;
+  access: { ingress: { admission: string } };
+}): boolean {
+  return Boolean(
+    params.nativeCommand &&
+    (!params.commandDecision.nativeAuthorized || params.access.ingress.admission !== "dispatch"),
+  );
 }

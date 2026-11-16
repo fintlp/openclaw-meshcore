@@ -38,13 +38,15 @@ import { runRepeaterOpsCommand } from "./repeater-ops.js";
 import {
   buildCommandReply,
   COMMAND_REPLIES,
-  parseNativeCommand,
+  isBlockedNativeCommand,
   parseRepeaterOpsInvocation,
+  resolveMeshcoreCommandAuthorized,
+  resolveMeshcoreCommandDecision,
+  resolveMeshcoreHostCommandFacts,
 } from "./inbound-commands.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
 import {
-  authorizeDmCommand,
   dmIdentityDigestsEqual,
   parseDmIdentityEvidence,
   validateDmApprovalEntries,
@@ -240,13 +242,10 @@ export async function handleMeshcoreInbound(params: {
   if (!rawBody) return;
 
   // Compute ONE command decision before host command facts or native replies.
-  const nativeCommand = message.isGroup ? undefined : parseNativeCommand(rawBody);
-  const commandRepliesEnabled = account.config.commandRepliesEnabled ?? true;
-  const commandDecision = authorizeDmCommand({
-    identity: message.dmIdentity ?? { status: "invalid" },
-    nativeCommand,
-    nativePingAllowFrom: account.config.commandPingAllowFrom,
-    commandRepliesEnabled,
+  const { nativeCommand, commandDecision } = resolveMeshcoreCommandDecision({
+    message,
+    rawBody,
+    account,
   });
 
   // Native-command marker rows intentionally have rawJson "{}" and no DM
@@ -302,18 +301,13 @@ export async function handleMeshcoreInbound(params: {
     target: message.target,
   });
 
-  const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
-    cfg: config as OpenClawConfig,
-    surface: CHANNEL_ID,
+  const { ingressAllowTextCommands, hasControlCommand } = resolveMeshcoreHostCommandFacts({
+    core,
+    config,
+    isGroup: message.isGroup,
+    rawBody,
+    commandDecision,
   });
-  // Group commands are plain text: never let command authorization bypass
-  // requireMention. DM host commands additionally require independent proof.
-  const dmHostCommandsAuthorized =
-    !message.isGroup && commandDecision.hostCommandAuthorized;
-  const ingressAllowTextCommands = dmHostCommandsAuthorized ? allowTextCommands : false;
-  const hasControlCommand = dmHostCommandsAuthorized
-    ? core.channel.text.hasControlCommand(rawBody, config as OpenClawConfig)
-    : false;
   const mentionRegexes = core.channel.mentions.buildMentionRegexes(config as OpenClawConfig);
   const wasMentioned = core.channel.mentions.matchesMentionPatterns(rawBody, mentionRegexes);
   const { requireMention, routeGroupAllowFrom, accessGroupPolicy } =
@@ -391,9 +385,11 @@ export async function handleMeshcoreInbound(params: {
           hasControlCommand,
         },
   });
-  const commandAuthorized = message.isGroup
-    ? false
-    : access.commandAccess.authorized && commandDecision.hostCommandAuthorized;
+  const commandAuthorized = resolveMeshcoreCommandAuthorized({
+    isGroup: message.isGroup,
+    access,
+    commandDecision,
+  });
 
   // Replay path: admission flipped while we were down (config changed).
   // The attempt was already counted at claim time; release the claim — the
@@ -412,10 +408,7 @@ export async function handleMeshcoreInbound(params: {
 
   // A recognized native command is terminal when blocked. It never becomes a
   // pairing request, durable row, radio reply, or model turn.
-  if (
-    nativeCommand &&
-    (!commandDecision.nativeAuthorized || access.ingress.admission !== "dispatch")
-  ) {
+  if (isBlockedNativeCommand({ nativeCommand, commandDecision, access })) {
     return;
   }
 
