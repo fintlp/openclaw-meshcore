@@ -46,12 +46,11 @@ import { getMeshcoreRuntime } from "./runtime.js";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
 import {
   authorizeDmCommand,
-  canonicalMeshcoreNodeId,
   dmIdentityDigestsEqual,
-  fullKeySha256,
   parseDmIdentityEvidence,
   validateDmApprovalEntries,
 } from "./dm-identity.js";
+import { decideMeshcoreDmAdmission } from "./inbound-decisions.js";
 import { assertNativePingRateLimit, resolveSendRateLimitConfig } from "./rate-limit.js";
 import { runPairingChallenge } from "./pairing-budget.js";
 import {
@@ -213,39 +212,6 @@ function fingerprintNodeId(nodeId: string): string {
 }
 
 
-function matchesConfiguredMeshOwner(params: {
-  config: CoreConfig;
-  fullKey: string;
-}): boolean {
-  const commands = (params.config as { commands?: { ownerAllowFrom?: unknown } }).commands;
-  const entries = Array.isArray(commands?.ownerAllowFrom) ? commands.ownerAllowFrom : [];
-  for (const raw of entries) {
-    if (typeof raw !== "string" && typeof raw !== "number") continue;
-    let entry = String(raw).trim();
-    if (!entry) continue;
-    // Mirror resolveOwnerAllowFromList on 2026.10.5 and 2026.11.3: strip ONE
-    // recognized provider prefix, then run the plugin's formatAllowFrom
-    // normalization. Thus meshcore:meshcore:!<key> normalizes exactly as the
-    // host sees it instead of bypassing this fail-closed owner-route refusal.
-    const separatorIndex = entry.indexOf(":");
-    if (separatorIndex > 0) {
-      // The host trims the prefix before the channel lookup
-      // (resolveOwnerAllowFromList → normalizeNullableString .trim()); mirror
-      // it so "meshcore :!key" / tab variants cannot bypass this refusal.
-      if (entry.slice(0, separatorIndex).trim().toLowerCase() !== "meshcore") continue;
-      entry = entry.slice(separatorIndex + 1).trim();
-      if (!entry) continue;
-    }
-    const normalized = normalizeMeshcoreAllowEntry(entry);
-    const hex = normalized.startsWith("!") ? normalized.slice(1) : "";
-    // Bare IDs, ! prefixes and explicit meshcore: entries all match only
-    // against the CURRENT validated full key. Short prefixes stay conservative
-    // refusals; names and other unmatchable aliases never establish a match.
-    if (/^[0-9a-f]{1,64}$/u.test(hex) && params.fullKey.startsWith(hex)) return true;
-  }
-  return false;
-}
-
 function validDmApprovals(params: {
   entries: readonly unknown[] | undefined;
   allowWildcard: boolean;
@@ -377,49 +343,19 @@ export async function handleMeshcoreInbound(params: {
   }
 
   if (!message.isGroup) {
-    const identity = message.dmIdentity;
-    const canonical = identity?.status === "unique"
-      ? canonicalMeshcoreNodeId(identity.fullKey)
-      : undefined;
-    const evidence = parseDmIdentityEvidence(message);
-    const validIdentity =
-      identity?.status === "unique" &&
-      canonical !== undefined &&
-      identity.nodeId === canonical &&
-      message.senderNodeId === canonical &&
-      message.target === canonical &&
-      evidence !== undefined &&
-      evidence.wirePrefixHex === identity.fullKey.slice(0, 12) &&
-      dmIdentityDigestsEqual(evidence.fullKeySha256, fullKeySha256(identity.fullKey));
-    if (!validIdentity || message.meshSecurity.identityBinding === "mismatch") {
+    const dmAdmission = decideMeshcoreDmAdmission({ message, config });
+    if (dmAdmission.kind === "refuse") {
       if (params.replayOf !== undefined) {
-        const reason = !evidence
-          ? "dm-identity-no-evidence"
-          : identity?.status === "ambiguous"
-            ? "dm-identity-ambiguous"
-            : "dm-identity-stale";
-        params.durability?.deadLetter(account.accountId, params.replayOf, reason);
-      }
-      logInboundSecurity({
-        runtime, accountId: account.accountId, reason: "dm-identity-refused",
-        detail: "fingerprint=" + fingerprintNodeId(message.senderNodeId),
-      });
-      return;
-    }
-    if (
-      identity?.status === "unique" &&
-      matchesConfiguredMeshOwner({ config, fullKey: identity.fullKey })
-    ) {
-      // The host exposes owner-only tools from senderIsOwner independently of
-      // CommandAuthorized. Refuse the whole unverified owner route BEFORE a
-      // session can be created; flags alone are not a complete tool gate.
-      if (params.replayOf !== undefined) {
-        params.durability?.deadLetter(account.accountId, params.replayOf, "dm-identity-stale");
+        params.durability?.deadLetter(
+          account.accountId,
+          params.replayOf,
+          dmAdmission.replayDeadLetterReason,
+        );
       }
       logInboundSecurity({
         runtime,
         accountId: account.accountId,
-        reason: "mesh-owner-unverified",
+        reason: dmAdmission.securityReason,
         detail: "fingerprint=" + fingerprintNodeId(message.senderNodeId),
       });
       return;
