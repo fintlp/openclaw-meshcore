@@ -21,7 +21,7 @@ Get a user's OpenClaw agent onto their MeshCore mesh — reachable by DM from an
 
 ## Compatibility (read before installing)
 
-- **Minimum OpenClaw: 2026.10.1** — the plugin's declared floor (peerDependencies, compat.pluginApi and install.minHostVersion are all >=2026.10.1).
+- **Minimum OpenClaw: 2026.10.5** — the plugin's declared floor (peerDependencies.openclaw is >=2026.10.5).
 - **OpenClaw 2026.10.5 or newer requires plugin 2026.10.13 or newer.** 2026.10.5 removed the SDK export runStoppablePassiveMonitor; older plugin versions fail to register at gateway boot with: The requested module 'openclaw/plugin-sdk/extension-shared' does not provide an export named 'runStoppablePassiveMonitor'. Fix: update or reinstall to the current release, then restart the gateway.
 
 ## Fast path
@@ -50,6 +50,7 @@ openclaw channels add meshcore --host 192.168.1.20
 ## Access & safety defaults (do not loosen without a reason)
 
 - `dmPolicy: "pairing"` — every new contact needs explicit approval.
+- **DM identity is gated.** A DM whose six-byte key prefix resolves ambiguously (conflicting contact-book row or cross-account attempt) is rejected before pairing and dispatch. Stored DMs are re-checked at gateway restart against the *current* key mapping and admission — a key change blocks dispatch of queued replays. Details: SECURITY.md.
 - **Groups are receive-only by code-level design**: the agent can listen but never transmits on channels. LoRa airtime is a shared commons; there is no delete button on the airwaves.
 - Flood guard caps outbound DM airtime; replies are chunked to mesh-safe sizes.
 
