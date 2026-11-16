@@ -27,7 +27,6 @@ import {
   resolveDefaultGroupPolicy,
   warnMissingProviderGroupPolicyFallbackOnce,
 } from "openclaw/plugin-sdk/runtime-group-policy";
-import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { ResolvedMeshcoreAccount } from "./accounts.js";
 import {
   buildMeshcoreAllowlistCandidates,
@@ -38,7 +37,6 @@ import {
   hasMeshcoreGroupToolPolicy,
   resolveMeshcoreGroupMatch,
   resolveMeshcoreGroupToolPolicyResolution,
-  resolveMeshcoreRequireMention,
 } from "./policy.js";
 import { readNodeStatusSnapshot } from "./node-status.js";
 import { runRepeaterOpsCommand, type RepeaterOpsKind } from "./repeater-ops.js";
@@ -50,7 +48,12 @@ import {
   parseDmIdentityEvidence,
   validateDmApprovalEntries,
 } from "./dm-identity.js";
-import { decideMeshcoreDmAdmission } from "./inbound-decisions.js";
+import {
+  decideMeshcoreDmAdmission,
+  hasEntries,
+  resolveMeshcoreGroupAccess,
+  type MeshcoreGroupPolicy,
+} from "./inbound-decisions.js";
 import { assertNativePingRateLimit, resolveSendRateLimitConfig } from "./rate-limit.js";
 import { runPairingChallenge } from "./pairing-budget.js";
 import {
@@ -59,7 +62,6 @@ import {
 } from "./pairing-reply.js";
 
 const CHANNEL_ID = "meshcore" as const;
-type MeshcoreGroupPolicy = "open" | "allowlist" | "disabled";
 
 const meshcoreIngressIdentity = defineStableChannelIngressIdentity({
   key: "meshcore-node",
@@ -69,10 +71,6 @@ const meshcoreIngressIdentity = defineStableChannelIngressIdentity({
   isWildcardEntry: (entry) => normalizeMeshcoreAllowEntry(entry) === "*",
   resolveEntryId: ({ entryIndex }) => `meshcore-entry-${entryIndex + 1}:node`,
 });
-
-function hasEntries(entries: Array<string | number> | undefined): boolean {
-  return normalizeStringEntries(entries).some((entry) => normalizeMeshcoreAllowEntry(entry));
-}
 
 function createMeshcoreIngressSubject(message: MeshcoreInboundMessage) {
   const candidates = buildMeshcoreAllowlistCandidates({
@@ -401,30 +399,13 @@ export async function handleMeshcoreInbound(params: {
     : false;
   const mentionRegexes = core.channel.mentions.buildMentionRegexes(config as OpenClawConfig);
   const wasMentioned = core.channel.mentions.matchesMentionPatterns(rawBody, mentionRegexes);
-  const requireMention = message.isGroup
-    ? resolveMeshcoreRequireMention({
-        groupConfig: groupMatch.groupConfig,
-        wildcardConfig: groupMatch.wildcardConfig,
-      })
-    : false;
-  const routeGroupAllowFrom = normalizeStringEntries(
-    groupMatch.groupConfig?.allowFrom?.length
-      ? groupMatch.groupConfig.allowFrom
-      : groupMatch.wildcardConfig?.allowFrom,
-  );
-  const channelAllowlistedWithoutSenderFilter =
-    groupPolicy === "allowlist" &&
-    message.isGroup &&
-    groupMatch.allowed &&
-    groupMatch.hasConfiguredGroups &&
-    !hasEntries(account.config.groupAllowFrom) &&
-    !hasEntries(routeGroupAllowFrom);
-  const accessGroupPolicy: MeshcoreGroupPolicy = channelAllowlistedWithoutSenderFilter
-    ? "open"
-    : groupPolicy === "open" &&
-        (hasEntries(account.config.groupAllowFrom) || hasEntries(routeGroupAllowFrom))
-      ? "allowlist"
-      : groupPolicy;
+  const { requireMention, routeGroupAllowFrom, accessGroupPolicy } =
+    resolveMeshcoreGroupAccess({
+      isGroup: message.isGroup,
+      groupPolicy,
+      groupMatch,
+      groupAllowFrom: account.config.groupAllowFrom,
+    });
 
   const dmConfigAllowFrom = message.isGroup
     ? account.config.allowFrom

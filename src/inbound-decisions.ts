@@ -5,6 +5,7 @@
  * refused, or routed, and leave every side effect (logging, durability
  * dead-letters / claims, replies, dispatch) to the orchestrator in inbound.ts.
  */
+import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
 import {
   canonicalMeshcoreNodeId,
@@ -13,6 +14,59 @@ import {
   parseDmIdentityEvidence,
 } from "./dm-identity.js";
 import { normalizeMeshcoreAllowEntry } from "./normalize.js";
+import { resolveMeshcoreRequireMention, type MeshcoreGroupMatch } from "./policy.js";
+
+export type MeshcoreGroupPolicy = "open" | "allowlist" | "disabled";
+
+export function hasEntries(entries: Array<string | number> | undefined): boolean {
+  return normalizeStringEntries(entries).some((entry) => normalizeMeshcoreAllowEntry(entry));
+}
+
+export type MeshcoreGroupAccess = {
+  requireMention: boolean;
+  routeGroupAllowFrom: string[];
+  accessGroupPolicy: MeshcoreGroupPolicy;
+};
+
+/**
+ * Group access policy: mention requirement, per-route sender allowlist, and
+ * the effective group policy handed to the ingress resolver (an allowlisted
+ * channel with no sender filter is open; an open policy with sender filters
+ * becomes an allowlist).
+ */
+export function resolveMeshcoreGroupAccess(params: {
+  isGroup: boolean;
+  groupPolicy: MeshcoreGroupPolicy;
+  groupMatch: MeshcoreGroupMatch;
+  groupAllowFrom: Array<string | number> | undefined;
+}): MeshcoreGroupAccess {
+  const { groupPolicy, groupMatch } = params;
+  const requireMention = params.isGroup
+    ? resolveMeshcoreRequireMention({
+        groupConfig: groupMatch.groupConfig,
+        wildcardConfig: groupMatch.wildcardConfig,
+      })
+    : false;
+  const routeGroupAllowFrom = normalizeStringEntries(
+    groupMatch.groupConfig?.allowFrom?.length
+      ? groupMatch.groupConfig.allowFrom
+      : groupMatch.wildcardConfig?.allowFrom,
+  );
+  const channelAllowlistedWithoutSenderFilter =
+    groupPolicy === "allowlist" &&
+    params.isGroup &&
+    groupMatch.allowed &&
+    groupMatch.hasConfiguredGroups &&
+    !hasEntries(params.groupAllowFrom) &&
+    !hasEntries(routeGroupAllowFrom);
+  const accessGroupPolicy: MeshcoreGroupPolicy = channelAllowlistedWithoutSenderFilter
+    ? "open"
+    : groupPolicy === "open" &&
+        (hasEntries(params.groupAllowFrom) || hasEntries(routeGroupAllowFrom))
+      ? "allowlist"
+      : groupPolicy;
+  return { requireMention, routeGroupAllowFrom, accessGroupPolicy };
+}
 
 export type MeshcoreDmAdmissionDecision =
   | { kind: "admit" }
