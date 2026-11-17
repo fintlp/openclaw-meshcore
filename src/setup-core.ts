@@ -163,10 +163,16 @@ export function setMeshcoreGroupAccess(
   const effectiveKeys = Object.keys(resolveMeshcoreEffectiveGroups({ cfg, account }) ?? {}).map(
     (key) => normalizeGroupEntry(key) ?? key,
   );
-  // No own groups and the operator kept what is effectively in force: do not
-  // freeze inherited root groups into the account (later root edits must keep
-  // applying). Policy/enabled are still applied.
-  if (Object.keys(ownGroups ?? {}).length === 0 && sameKeySet(normalizedEntries, effectiveKeys)) {
+  // Something is actually inherited (non-empty effective map), the account has
+  // no own groups, and the operator kept exactly that set: do not freeze the
+  // inherited root groups into the account (later root edits must keep
+  // applying). Policy/enabled are still applied. With nothing inherited an
+  // empty list is a deliberate "allow nothing" and still writes groups: {}.
+  if (
+    effectiveKeys.length > 0 &&
+    Object.keys(ownGroups ?? {}).length === 0 &&
+    sameKeySet(normalizedEntries, effectiveKeys)
+  ) {
     return updateMeshcoreAccountConfig(cfg, accountId, { enabled: true, groupPolicy: "allowlist" });
   }
   return updateMeshcoreAccountConfig(cfg, accountId, {
