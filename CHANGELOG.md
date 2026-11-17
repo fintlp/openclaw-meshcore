@@ -6,7 +6,7 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
-## Unreleased
+## 2026.11.2 - 2026-11-17
 
 Fixed
 
