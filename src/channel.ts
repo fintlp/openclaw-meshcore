@@ -40,13 +40,14 @@ import {
 import { meshcoreOutboundBaseAdapter } from "./outbound-base.js";
 import {
   resolveMeshcoreEffectiveGroupMatch,
+  resolveMeshcoreEffectiveGroups,
   resolveMeshcoreGroupToolPolicy,
   resolveMeshcoreRequireMention,
 } from "./policy.js";
 import { probeMeshcore } from "./probe.js";
 import { resolveMeshcoreOutboundSessionRoute } from "./session-route.js";
 import { meshcoreSetupAdapter, meshcoreSetupWizard } from "./setup-surface.js";
-import type { CoreConfig, MeshcoreProbe } from "./types.js";
+import type { CoreConfig, MeshcoreGroupConfig, MeshcoreProbe } from "./types.js";
 
 const meta = {
   id: "meshcore",
@@ -69,25 +70,47 @@ async function loadMeshcoreChannelRuntime(): Promise<MeshcoreChannelRuntimeModul
   return await meshcoreChannelRuntimePromise;
 }
 
+/**
+ * Directory listers show the groups the account effectively uses (the same
+ * host-aware map admission, mention and tool policy resolve against, #90): a
+ * single named account with groups:{} inherits root groups. Display only;
+ * nothing here decides admission or policy.
+ */
+type MeshcoreDirectoryAccount = {
+  account: ResolvedMeshcoreAccount;
+  groups: Record<string, MeshcoreGroupConfig>;
+};
+
+function resolveMeshcoreDirectoryAccount(
+  cfg: unknown,
+  accountId?: string | null,
+): MeshcoreDirectoryAccount {
+  const account = resolveMeshcoreAccount({ cfg: cfg as CoreConfig, accountId });
+  return {
+    account,
+    groups: resolveMeshcoreEffectiveGroups({ cfg: cfg as CoreConfig, account }) ?? {},
+  };
+}
+
 const listMeshcoreDirectoryPeersFromConfig =
-  createResolvedDirectoryEntriesLister<ResolvedMeshcoreAccount>({
+  createResolvedDirectoryEntriesLister<MeshcoreDirectoryAccount>({
     kind: "user",
-    resolveAccount: adaptScopedAccountAccessor(resolveMeshcoreAccount),
-    resolveSources: (account) => [
+    resolveAccount: resolveMeshcoreDirectoryAccount,
+    resolveSources: ({ account, groups }) => [
       account.config.allowFrom ?? [],
       account.config.groupAllowFrom ?? [],
-      ...Object.values(account.config.groups ?? {}).map((group) => group.allowFrom ?? []),
+      ...Object.values(groups).map((group) => group.allowFrom ?? []),
     ],
     normalizeId: (entry) => normalizeMeshcoreAllowEntry(entry) || null,
   });
 
 const listMeshcoreDirectoryGroupsFromConfig =
-  createResolvedDirectoryEntriesLister<ResolvedMeshcoreAccount>({
+  createResolvedDirectoryEntriesLister<MeshcoreDirectoryAccount>({
     kind: "group",
-    resolveAccount: adaptScopedAccountAccessor(resolveMeshcoreAccount),
-    resolveSources: (account) => [
+    resolveAccount: resolveMeshcoreDirectoryAccount,
+    resolveSources: ({ account, groups }) => [
       ...(account.config.channels ?? []).map((channelIndex) => `channel:${channelIndex}`),
-      Object.keys(account.config.groups ?? {}),
+      Object.keys(groups),
     ],
     normalizeId: (entry) => {
       const normalized = normalizeMeshcoreMessagingTarget(String(entry));
