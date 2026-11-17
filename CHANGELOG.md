@@ -6,6 +6,12 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## Unreleased
+
+Fixed
+
+- **Setup wizard no longer wipes per-group settings or freezes inherited root groups (#94).** The group-access step used to rewrite the account's whole `groups` map as `{ <entry>: {} }` even when the operator accepted the prefilled allowlist unchanged: `requireMention`, `tools`, `allowFrom`, `systemPrompt` and `skills` of every group were lost, and an account without its own `groups` copied the root groups into its own config so later root edits stopped applying. The intermediate `setPolicy("allowlist")` call the host makes before applying the entries also cleared the map with `{}`. Now the policy step only sets `groupPolicy`/`enabled`; entries are merged into the existing group objects (retained keys keep their config exactly, new keys get `{}`, removed keys are dropped); and when the account has no own groups and the entries equal what is effectively inherited, no explicit `groups` map is written. Also fixed: for an account stored under a non-canonical key (e.g. `"Ops Team"`) the setup writers added a second `ops-team` account section next to it instead of patching the stored one, and the default-mention step silently did nothing; both now use the same account-key lookup as the account reader. **Operator-visible:** when you deliberately edit an inherited list in the wizard, the result is an explicit account-level override (retained keys carry their current settings, new keys start empty).
+
 ## 2026.11.2 - 2026-11-17
 
 Fixed
