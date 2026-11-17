@@ -11,7 +11,11 @@ import {
   splitSetupEntries,
 } from "openclaw/plugin-sdk/setup";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { resolveDefaultMeshcoreAccountId, resolveMeshcoreAccount } from "./accounts.js";
+import {
+  resolveDefaultMeshcoreAccountId,
+  resolveMeshcoreAccount,
+  resolveMeshcoreAccountKey,
+} from "./accounts.js";
 import { probeMeshcore } from "./probe.js";
 import {
   formatMeshcoreChannelTarget,
@@ -24,6 +28,7 @@ import {
   meshcoreSetupAdapter,
   parsePort,
   setMeshcoreGroupAccess,
+  setMeshcoreGroupPolicy,
   updateMeshcoreAccountConfig,
 } from "./setup-core.js";
 import type { CoreConfig, MeshcoreAccountConfig, MeshcoreProbe } from "./types.js";
@@ -66,12 +71,13 @@ function readAccountSection(
   if (accountId === DEFAULT_ACCOUNT_ID) {
     return section;
   }
-  return section.accounts?.[accountId];
+  const storedKey = resolveMeshcoreAccountKey(cfg, accountId);
+  return storedKey === undefined ? undefined : section.accounts?.[storedKey];
 }
 
 /** Mesh group entries created during setup default to mention-gated.
  * Existing explicit values are never clobbered. */
-function withDefaultRequireMention(cfg: CoreConfig, accountId: string): CoreConfig {
+export function withDefaultRequireMention(cfg: CoreConfig, accountId: string): CoreConfig {
   const section = readAccountSection(cfg, accountId);
   const groups = section?.groups;
   if (!groups || typeof groups !== "object") {
@@ -310,8 +316,10 @@ export const meshcoreSetupWizard: ChannelSetupWizard = {
     currentEntries: ({ cfg, accountId }) =>
       Object.keys(resolveMeshcoreAccount({ cfg: cfg as CoreConfig, accountId }).config.groups ?? {}),
     updatePrompt: () => true,
+    // Policy only: the host calls setPolicy("allowlist") before applyAllowlist,
+    // so this step must never touch the groups map (#94).
     setPolicy: ({ cfg, accountId, policy }) =>
-      setMeshcoreGroupAccess(cfg as CoreConfig, accountId, policy, [], normalizeGroupEntry),
+      setMeshcoreGroupPolicy(cfg as CoreConfig, accountId, policy),
     resolveAllowlist: async ({ entries }) => entries,
     applyAllowlist: ({ cfg, accountId, resolved }) =>
       setMeshcoreGroupAccess(

@@ -1,6 +1,6 @@
 import { createAccountListHelpers } from "openclaw/plugin-sdk/account-helpers";
 import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk/account-id";
-import { resolveMergedAccountConfig } from "openclaw/plugin-sdk/account-resolution";
+import { resolveAccountKey, resolveMergedAccountConfig } from "openclaw/plugin-sdk/account-resolution";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -69,6 +69,24 @@ const {
   },
 });
 export { listMeshcoreAccountIds, resolveDefaultMeshcoreAccountId };
+
+/**
+ * The key an account is stored under in channels.meshcore.accounts, or
+ * undefined when it has no own section. Uses the same lookup the account
+ * reader (resolveMergedAccountConfig below) applies, so a non-canonical stored
+ * key ("Ops Team") is found for the normalized id ("ops-team"). Setup writers
+ * and readers must go through this instead of indexing accounts[accountId].
+ */
+export function resolveMeshcoreAccountKey(
+  cfg: CoreConfig,
+  accountId?: string | null,
+): string | undefined {
+  return resolveAccountKey(
+    cfg.channels?.meshcore?.accounts as Record<string, unknown> | undefined,
+    normalizeAccountId(accountId),
+    normalizeAccountId,
+  );
+}
 
 function mergeMeshcoreAccountConfig(cfg: CoreConfig, accountId: string): MeshcoreAccountConfig {
   return resolveMergedAccountConfig<MeshcoreAccountConfig>({
