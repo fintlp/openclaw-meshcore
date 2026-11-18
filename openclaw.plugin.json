@@ -408,6 +408,46 @@
             ],
             "additionalProperties": false
           },
+          "sessionSendRateLimit": {
+            "default": {
+              "enabled": true,
+              "maxSends": 8,
+              "maxBytes": 768,
+              "windowMs": 600000
+            },
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "default": true,
+                "type": "boolean"
+              },
+              "maxSends": {
+                "default": 8,
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "maxBytes": {
+                "default": 768,
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "windowMs": {
+                "default": 600000,
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "enabled",
+              "maxSends",
+              "maxBytes",
+              "windowMs"
+            ],
+            "additionalProperties": false
+          },
           "sendRetry": {
             "default": {
               "enabled": false,
@@ -900,6 +940,46 @@
                   ],
                   "additionalProperties": false
                 },
+                "sessionSendRateLimit": {
+                  "default": {
+                    "enabled": true,
+                    "maxSends": 8,
+                    "maxBytes": 768,
+                    "windowMs": 600000
+                  },
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "default": true,
+                      "type": "boolean"
+                    },
+                    "maxSends": {
+                      "default": 8,
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "maxBytes": {
+                      "default": 768,
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "windowMs": {
+                      "default": 600000,
+                      "type": "integer",
+                      "minimum": 1000,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "enabled",
+                    "maxSends",
+                    "maxBytes",
+                    "windowMs"
+                  ],
+                  "additionalProperties": false
+                },
                 "sendRetry": {
                   "default": {
                     "enabled": false,
@@ -1046,6 +1126,7 @@
                 "groupPolicy",
                 "sendPacing",
                 "sendRateLimit",
+                "sessionSendRateLimit",
                 "sendRetry"
               ],
               "additionalProperties": false
@@ -1104,6 +1185,7 @@
           "groupPolicy",
           "sendPacing",
           "sendRateLimit",
+          "sessionSendRateLimit",
           "sendRetry"
         ],
         "additionalProperties": false
@@ -1152,6 +1234,10 @@
         "sendRateLimit": {
           "label": "Send Rate Limit",
           "help": "Flood guard: caps outbound airtime packets per rolling window (default 20 per 10 minutes). Refuses with a retry hint when tripped. Set enabled:false to disable."
+        },
+        "sessionSendRateLimit": {
+          "label": "Per-Session Send Rate Limit",
+          "help": "Pre-delivery flood guard per trusted canonical session (default 8 estimated radio packets and 768 UTF-8 text bytes per 10 minutes). Refuses the whole payload with a retry hint; no queue. enabled:false affects only this layer, never the account Send Rate Limit."
         },
         "sendRetry": {
           "label": "DM Delivery Retry",

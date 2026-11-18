@@ -45,6 +45,10 @@ export const meshcoreChannelConfigUiHints = {
     label: "Send Rate Limit",
     help: "Flood guard: caps outbound airtime packets per rolling window (default 20 per 10 minutes). Refuses with a retry hint when tripped. Set enabled:false to disable.",
   },
+  sessionSendRateLimit: {
+    label: "Per-Session Send Rate Limit",
+    help: "Pre-delivery flood guard per trusted canonical session (default 8 estimated radio packets and 768 UTF-8 text bytes per 10 minutes). Refuses the whole payload with a retry hint; no queue. enabled:false affects only this layer, never the account Send Rate Limit.",
+  },
   sendRetry: {
     label: "DM Delivery Retry",
     help: "Auto-retry DMs that the mesh never confirms (default off). Waits for the node's delivery report, then retransmits up to maxAttempts-1 times with backoffMs between attempts. Every attempt consumes Send Rate Limit budget.",

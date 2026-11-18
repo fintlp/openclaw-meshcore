@@ -160,6 +160,10 @@ Group-row behavior is unchanged, and native-command markers remain
 non-replayable. Evidence records the mapping used at intake; it is not a
 signature or cryptographic proof of origin.
 
+### Per-session outbound load containment
+
+The `message_sending` hook applies `sessionSendRateLimit` before durable/provider delivery and before the channel adapter. Its defaults are 8 estimated radio packets and 768 UTF-8 bytes of trimmed payload text per trusted channel+account+canonical session per 10 minutes. It uses the production chunker/config for packet estimates, synchronously charges accepted payloads so concurrent bursts cannot race the limiter, and returns `cancel: true` with a retry-bearing `cancelReason`; it does not throw to enforce a refusal and never queues a flood. Missing session keys are not merged into a synthetic identity: those internal sends remain governed by the account guard only. Disabling this layer has no effect on `sendRateLimit`, pairing partitions, native-ping budgets, pacing, or delivery-retry accounting. The final radio-path account guard is unchanged and still bounds the aggregate across sessions. Session usage is in memory and resets on gateway restart.
+
 ### Pairing and reply load containment
 
 Pairing is limited to 3 successfully replied-to new challenges per 10 minutes

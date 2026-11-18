@@ -8,12 +8,14 @@ canonical source for that text.
 
 ## Unreleased
 
+Security
+
+- **Added a per-session outbound flood guard (#46).** `sessionSendRateLimit` now refuses runaway replies at the host `message_sending` boundary, before durable/provider delivery or radio I/O. Defaults per trusted channel+account+canonical session are 8 estimated radio packets (using the real account chunking/SignedPlain configuration) and 768 UTF-8 payload bytes per rolling 10 minutes. Refusals cancel the whole payload with a retry delay; there is deliberately no queue/backpressure. Independent sessions and accounts have independent buckets, while the existing 20-packet account guard remains the unchanged aggregate backstop and retry/pairing budgets stay intact. No-session sends remain account-only. **Upgrading?** normal session replies are now capped by default; set `channels.meshcore.sessionSendRateLimit.enabled=false` to opt out of only this layer, or tune `maxSends`, `maxBytes`, and `windowMs` deliberately. This never disables the existing account or pairing guards.
+
 Documentation
 
 - **Group monitoring is documented as opt-in, end to end.** README (safety section, first experiments, config reference, minimal config), QUICKSTART, AGENT-SCOPING, USE-CASES and the meshcore-connect skill now say the same thing: the default is `groupPolicy: "disabled"`, monitoring is a deliberate choice, and the plugin never transmits to a group in any policy or mode. The README explains what `disabled` / `allowlist` / `open` admit, what digest versus session mode does, the exact `openclaw config set` commands (gateway stopped) and the privacy note that the digest keeps full message text on disk. The QUICKSTART and the AGENT-SCOPING baseline no longer start from `"open"`.
 - **Docs no longer claim that the native DM commands answer.** USE-CASES recipe 3 and the skill advertised `!status` / `!neighbours` / `!rstatus` / `!trace` answering in DM; they are default-deny (README "DM commands"). A short note also says the never-transmit rule is specific to MeshCore and does not carry over to the Meshtastic plugin.
-- No code, schema or manifest change.
-
 ## 2026.11.3 - 2026-11-18
 
 Fixed

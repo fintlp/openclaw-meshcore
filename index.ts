@@ -1,4 +1,5 @@
 import { defineBundledChannelEntry } from "openclaw/plugin-sdk/channel-entry-contract";
+import { registerMeshcoreSessionSendRateLimit } from "./src/session-rate-limit.js";
 
 export default defineBundledChannelEntry({
   id: "meshcore",
@@ -13,4 +14,5 @@ export default defineBundledChannelEntry({
     specifier: "./runtime-api.js",
     exportName: "setMeshcoreRuntime",
   },
+  registerFull: registerMeshcoreSessionSendRateLimit,
 });

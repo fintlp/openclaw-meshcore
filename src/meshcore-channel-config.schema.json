@@ -390,6 +390,46 @@
       ],
       "additionalProperties": false
     },
+    "sessionSendRateLimit": {
+      "default": {
+        "enabled": true,
+        "maxSends": 8,
+        "maxBytes": 768,
+        "windowMs": 600000
+      },
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "maxSends": {
+          "default": 8,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "maxBytes": {
+          "default": 768,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "windowMs": {
+          "default": 600000,
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "enabled",
+        "maxSends",
+        "maxBytes",
+        "windowMs"
+      ],
+      "additionalProperties": false
+    },
     "sendRetry": {
       "default": {
         "enabled": false,
@@ -882,6 +922,46 @@
             ],
             "additionalProperties": false
           },
+          "sessionSendRateLimit": {
+            "default": {
+              "enabled": true,
+              "maxSends": 8,
+              "maxBytes": 768,
+              "windowMs": 600000
+            },
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "default": true,
+                "type": "boolean"
+              },
+              "maxSends": {
+                "default": 8,
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "maxBytes": {
+                "default": 768,
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "windowMs": {
+                "default": 600000,
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "enabled",
+              "maxSends",
+              "maxBytes",
+              "windowMs"
+            ],
+            "additionalProperties": false
+          },
           "sendRetry": {
             "default": {
               "enabled": false,
@@ -989,6 +1069,7 @@
           "groupPolicy",
           "sendPacing",
           "sendRateLimit",
+          "sessionSendRateLimit",
           "sendRetry"
         ],
         "additionalProperties": false
@@ -1047,6 +1128,7 @@
     "groupPolicy",
     "sendPacing",
     "sendRateLimit",
+    "sessionSendRateLimit",
     "sendRetry"
   ],
   "additionalProperties": false,
@@ -1442,6 +1524,46 @@
           ],
           "additionalProperties": false
         },
+        "sessionSendRateLimit": {
+          "default": {
+            "enabled": true,
+            "maxSends": 8,
+            "maxBytes": 768,
+            "windowMs": 600000
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            },
+            "maxSends": {
+              "default": 8,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "maxBytes": {
+              "default": 768,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "windowMs": {
+              "default": 600000,
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "enabled",
+            "maxSends",
+            "maxBytes",
+            "windowMs"
+          ],
+          "additionalProperties": false
+        },
         "sendRetry": {
           "default": {
             "enabled": false,
@@ -1588,6 +1710,7 @@
         "groupPolicy",
         "sendPacing",
         "sendRateLimit",
+        "sessionSendRateLimit",
         "sendRetry"
       ],
       "additionalProperties": false

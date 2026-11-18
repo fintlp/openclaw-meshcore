@@ -89,6 +89,21 @@ const MeshcoreAccountSchemaBase = z
         maxSends: 20,
         windowMs: 600_000,
       }),
+    sessionSendRateLimit: z
+      .object({
+        enabled: z.boolean().optional().default(true),
+        maxSends: z.number().int().min(1).optional().default(8),
+        maxBytes: z.number().int().min(1).optional().default(768),
+        windowMs: z.number().int().min(1_000).optional().default(600_000),
+      })
+      .strict()
+      .optional()
+      .default({
+        enabled: true,
+        maxSends: 8,
+        maxBytes: 768,
+        windowMs: 600_000,
+      }),
     sendRetry: z
       .object({
         enabled: z.boolean().optional().default(false),

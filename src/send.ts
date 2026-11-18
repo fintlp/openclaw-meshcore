@@ -23,7 +23,7 @@ import {
 } from "./normalize.js";
 import { withPacedSend, type WithPacedSendOptions } from "./pacing.js";
 import { getMeshcoreRuntime } from "./runtime.js";
-import type { CoreConfig } from "./types.js";
+import type { CoreConfig, MeshcoreAccountConfig } from "./types.js";
 import { resolveSendPacingConfig } from "./airtime.js";
 import { assertSendRateLimit, resolveSendRateLimitConfig } from "./rate-limit.js";
 import {
@@ -310,6 +310,25 @@ function resolveTarget(to: string, opts?: SendMeshcoreOptions): string {
   throw new Error(`Invalid MeshCore target: ${to}`);
 }
 
+/** Single source of truth for hook-time packet estimates and the radio send path. */
+export function chunkMeshcoreOutboundText(
+  text: string,
+  config: Pick<
+    MeshcoreAccountConfig,
+    "textChunkLimit" | "outboundSignedPlain" | "chunkNumbering"
+  >,
+): string[] {
+  // Values above the firmware cap are clamped in both paths.
+  const plainChunkLimit = Math.min(
+    config.textChunkLimit ?? MESHCORE_WIRE_CHUNK_LIMIT,
+    MESHCORE_WIRE_CHUNK_LIMIT,
+  );
+  const chunkLimit = config.outboundSignedPlain === true
+    ? Math.max(1, plainChunkLimit - MESHCORE_SIGNED_PLAIN_PREFIX_LENGTH)
+    : plainChunkLimit;
+  return chunkTextWithNumbering(text, chunkLimit, config.chunkNumbering ?? true);
+}
+
 export async function sendMessageMeshcore(
   to: string,
   text: string,
@@ -335,21 +354,8 @@ export async function sendMessageMeshcore(
   }
 
   const target = resolveTarget(to, opts);
-  // The firmware drops the TCP companion session when a text frame exceeds
-  // 127 bytes (live-proven 2026-10-09), so values above the wire cap are
-  // clamped even if an operator sets them.
-  const plainChunkLimit = Math.min(
-    account.config.textChunkLimit ?? MESHCORE_WIRE_CHUNK_LIMIT,
-    MESHCORE_WIRE_CHUNK_LIMIT,
-  );
   const outboundSignedPlain = account.config.outboundSignedPlain === true;
-  // SignedPlain payloads embed a 4-byte sender_prefix in the wire text field.
-  // Reserve that space from the text budget to avoid firmware truncation.
-  const chunkLimit = outboundSignedPlain
-    ? Math.max(1, plainChunkLimit - MESHCORE_SIGNED_PLAIN_PREFIX_LENGTH)
-    : plainChunkLimit;
-  const chunkNumbering = account.config.chunkNumbering ?? true;
-  const chunks = chunkTextWithNumbering(text, chunkLimit, chunkNumbering);
+  const chunks = chunkMeshcoreOutboundText(text, account.config);
   if (chunks.length === 0) {
     throw new Error("Message must be non-empty for MeshCore sends");
   }
