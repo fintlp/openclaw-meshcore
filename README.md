@@ -58,10 +58,12 @@ One privacy note as well: if your node advertises a GPS position, that position 
 The most important safety property of this plugin is that **the agent can never transmit to a group channel** — and this does not depend on the AI's behavior, mood, or instructions. It is enforced in three independent layers:
 
 1. **In the code.** The plugin's send path refuses every group-addressed message, unconditionally, no matter what any config file or any agent says. This is covered by automated tests, and removing it would take a deliberate code change.
-2. **In the defaults.** Group monitoring starts `disabled`. If you enable it, the default is **digest mode**: public-channel traffic is quietly written to a log file and no agent session is started per message. Your agent can summarize the chatter when *you* ask — it never chimes in on its own.
+2. **In the defaults.** Group monitoring is **opt-in** and starts `disabled` — no group traffic is admitted or recorded at all. If you deliberately enable it, the default is **digest mode**: public-channel traffic is quietly written to a log file and no agent session is started per message. Your agent can summarize the chatter when *you* ask — it never chimes in on its own.
 3. **In your agent's instructions (recommended).** Give your agent a standing rule to never reply on mesh group channels. It is belt and suspenders on top of layer 1 — cheap insurance in case a future code change ever misbehaves.
 
 Why so strict? Because LoRa airtime is a shared commons. Every transmission on a public channel is heard by everyone and occupies the frequency for everyone. A chatty agent would not just embarrass you — it would degrade the mesh for every other user in range. Being a good mesh citizen is part of the design.
+
+> **Sibling-plugin note:** this never-transmit rule is specific to MeshCore. The Meshtastic plugin can transmit to channels when you enable its `groupTransmit` setting, so this rule and these defaults do not carry over to that plugin.
 
 ### The flood guard: the agent cannot shout in DMs either
 
@@ -77,7 +79,7 @@ For that reason this plugin only ever **reads** radio parameters — they show u
 
 ### What this means for your first experiments
 
-Start with the defaults: `dmPolicy: "pairing"`, so every new contact needs your explicit approval, and group monitoring `disabled`. Send yourself a DM from a second device, watch the messages arrive, and get a feel for the pacing. When you grow curious about the public channel, switch on monitoring in digest mode and simply ask your agent what the mesh has been saying. You will learn the ropes without ever risking a public transmission — the code has your back, literally.
+Start with the defaults: `dmPolicy: "pairing"`, so every new contact needs your explicit approval, and group monitoring `disabled` — nothing is listened to, nothing is recorded. Send yourself a DM from a second device, watch the messages arrive, and get a feel for the pacing. When you grow curious about the public channel, switch on monitoring in digest mode and simply ask your agent what the mesh has been saying. You will learn the ropes without ever risking a public transmission — the code has your back, literally.
 
 For the operator-level detail (trust model, per-group tool policies, hardened examples), see [docs/AGENT-SCOPING.md](docs/AGENT-SCOPING.md).
 
@@ -169,19 +171,37 @@ The file is schema-versioned:
 - **v1** was a plain array `[{ publicKeyHex, name? }, ...]`. v1 files still load cleanly; missing fields are defaulted to zero/empty and the file is rewritten as v2 on the next advert or SelfInfo.
 - **v2** is an object `{ version: 2, contacts: [...] }` containing every field listed above. `outPath` is hex-encoded in the JSON file.
 
-#### Group monitoring digest mode
+#### Group monitoring (opt-in, digest by default)
 
-By default (`groupMonitorMode: "digest"`), the plugin does **not** wake an agent session for every group/broadcast message. Instead, admitted group messages are appended as JSON lines to `~/.openclaw/state/meshcore-group-log.jsonl`:
+Group monitoring is **opt-in**: the default `groupPolicy: "disabled"` drops every group/broadcast message with a log line, and nothing is recorded. When you deliberately enable monitoring, `groupPolicy` decides *what is admitted* and `groupMonitorMode` decides *what happens to it*:
+
+- `groupPolicy: "disabled"` (default) — drop all group traffic with a log line.
+- `groupPolicy: "allowlist"` — admit only the groups listed under `groups` (for example `groups: { "channel:0": {} }`).
+- `groupPolicy: "open"` — admit every broadcast channel the node hears. The gateway logs a startup warning recommending `"allowlist"`; for receive-only digest monitoring that warning is expected (see [docs/AGENT-SCOPING.md](docs/AGENT-SCOPING.md)).
+- `groupMonitorMode: "digest"` (default) — admitted messages are appended as JSON lines to `~/.openclaw/state/meshcore-group-log.jsonl` and **no agent session is woken** per message. Ask your agent "what has the mesh been saying?" when you want a summary.
+- `groupMonitorMode: "session"` — routes each admitted group message to an agent session like a DM. Replies still never transmit. Use only with a tool-restricted agent (see the safety section above).
+
+In every policy and every mode the plugin **never transmits to a group** — monitoring only changes inbound routing.
+
+Example digest line:
 
 ```json
 {"ts":"2026-10-05T09:00:00.000Z","channel":"channel:0","senderPubkeyPrefix":"aabbccdd1122","name":"TestNode","text":"hello mesh"}
 ```
 
 - The log is rotated at approximately 1000 lines, keeping the newest entries.
-- The never-transmit-to-groups rule is unchanged; digest mode only changes inbound routing.
 - **Privacy:** the digest stores the **full text** of admitted group messages, on disk, in plain JSON. This is more content than the gateway log keeps when `logInboundMessageContent` is disabled — treat the file as sensitive.
 - **Upgrading?** Digest is the default for every deployment, including existing ones. If you relied on group messages reaching agent sessions, set `groupMonitorMode: "session"` explicitly after upgrading.
-- Use `"session"` mode to restore the previous behavior of routing each admitted group message to an agent session.
+
+Switch monitoring on or off with the gateway **stopped**:
+
+```bash
+openclaw gateway stop
+openclaw config set channels.meshcore.groupPolicy '"allowlist"'      # or '"open"' / '"disabled"'
+openclaw config set channels.meshcore.groupMonitorMode '"digest"'    # or '"session"'
+openclaw config set channels.meshcore.groups '{ "channel:0": {} }'   # allowlist only: declare the groups
+openclaw gateway start
+```
 
 #### Latitude / longitude scaling
 
@@ -212,6 +232,8 @@ Minimal `channels.meshcore` config:
 }
 ```
 
+`"groupPolicy": "disabled"` is the shipped default and shown for clarity — group monitoring is opt-in. To deliberately listen to public-channel traffic, see [Group monitoring](#group-monitoring-opt-in-digest-by-default).
+
 You can also set the environment variable `MESHCORE_HOST` for the default account. (`192.0.2.10` above is an RFC 5737 documentation placeholder — use your node's real LAN address.)
 
 ## Config reference
@@ -227,7 +249,7 @@ You can also set the environment variable `MESHCORE_HOST` for the default accoun
 | `port` | number | `5000` | TCP port. Ignored when `host` includes a port. |
 | `dmPolicy` | `"pairing" \| "allowlist" \| "open" \| "disabled"` | `"pairing"` | How direct messages are admitted. `"open"` requires `allowFrom: ["*"]` and admits only uniquely addressable peers. |
 | `allowFrom` | array of strings/numbers | `[]` | DM chat approvals: canonical `!` + 64 hex (full 32-byte key), or `"*"` for chat access only. Legacy prefixes, bare keys, names, and numbers are ignored with a bounded warning; see [docs/MIGRATION.md](docs/MIGRATION.md). |
-| `groupPolicy` | `"open" \| "allowlist" \| "disabled"` | `"disabled"` | How group/broadcast messages are admitted. `"open"` = deliver to agents as a read-only monitor (transmission stays locked regardless of policy). |
+| `groupPolicy` | `"open" \| "allowlist" \| "disabled"` | `"disabled"` | Group/broadcast admission. Monitoring is **opt-in**: `"disabled"` drops all group traffic with a log line (nothing recorded); `"allowlist"` admits only the groups listed under `groups`; `"open"` admits every broadcast channel the node hears. Transmission to groups stays locked in every policy. |
 | `groupAllowFrom` | array of strings/numbers | `[]` | Existing group-admission filter, separate from canonical DM approval validation. Group frames expose the channel target, not the radio author; this is not a per-author boundary. |
 | `groups` | object | `{}` | Per-group config keyed by `channel:0` … `channel:7` or `"*"`. |
 | `channels` | array of 0–7 | `[0]` | Mesh channel indices to listen for broadcasts. |
@@ -242,7 +264,7 @@ You can also set the environment variable `MESHCORE_HOST` for the default accoun
 | `logInboundMessageContent` | boolean | `false` | When `true`, inbound log lines include up to 80 chars of text. |
 | `advertLat` | number (-90..90) | — | Override the node's advertised latitude. Requires `advertLon` and a difference >1e-5° from current position. |
 | `advertLon` | number (-180..180) | — | Override the node's advertised longitude. Requires `advertLat` and a difference >1e-5° from current position. |
-| `groupMonitorMode` | `"digest" \| "session"` | `"digest"` | Group/broadcast monitoring mode. `"digest"` writes admitted group messages to `state/meshcore-group-log.jsonl` without waking sessions; `"session"` routes them to agent sessions. Groups remain receive-only in both modes. |
+| `groupMonitorMode` | `"digest" \| "session"` | `"digest"` | How admitted group/broadcast messages (see `groupPolicy`) are handled. `"digest"` appends them to `state/meshcore-group-log.jsonl` without waking an agent session (the default); `"session"` routes each to an agent session like a DM. Groups remain receive-only in both modes. |
 | `advertOnConnect` | boolean | `false` | Send one self-advert immediately after the node connects. |
 | `advertIntervalHours` | number ≥ 0 | `0` | Hours between scheduled self-adverts while connected. `0` disables scheduled adverts. Values > 0 are clamped to a minimum of 1 hour. |
 | `advertScope` | `"zero-hop" \| "flood"` | `"zero-hop"` | Self-advert scope. `"zero-hop"` reaches only direct-range neighbours; `"flood"` propagates mesh-wide and consumes shared airtime on every relay. |

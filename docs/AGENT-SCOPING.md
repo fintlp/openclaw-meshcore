@@ -75,7 +75,7 @@ Match order is channel+id, id, e164, username, name, then wildcard — put speci
 }
 ```
 
-- **Group sessions** (if you enable `groupPolicy` monitoring with agent dispatch): full per-group control —
+- **Group sessions** (only if you have opted in to group monitoring — `groupPolicy` is `"disabled"` by default — *and* enabled agent dispatch via `groupMonitorMode: "session"`): full per-group control —
 
 ```json
 "groups": {
@@ -190,7 +190,7 @@ can).
 ## Recommended baseline (what we run)
 
 - `dmPolicy: "pairing"`, approve by hand.
-- `groupPolicy: "open"` for monitoring with agent dispatch **off** for groups (or, if on: `requireMention: true` + group-wide tool denials as above + `session.groupScope: "per-group"`).
+- Group monitoring stays **opt-in**: default `groupPolicy: "disabled"`. When you deliberately monitor, prefer `"allowlist"` with explicit `groups` entries and `groupMonitorMode: "digest"` — agent dispatch off, so traffic lands in the digest log and wakes no agent (or, if dispatch is on: `requireMention: true` + group-wide tool denials as above + `session.groupScope: "per-group"`).
 - Mesh-facing agent has no config-editing rights and a documented habit of asking before system changes.
 
 **Heads-up on the open-policy warning:** with `groupPolicy: "open"` the gateway logs a startup warning recommending `"allowlist"` instead. That warning exists for the dispatch-on case — open + agent dispatch means any mesh stranger gets a session. If you run `open` strictly for receive-only monitoring (dispatch off), the warning is expected: acknowledge it, don't obey it. If you turn dispatch on, either set `groupPolicy: "allowlist"` with explicit `groups` entries, or accept the warning knowingly with `requireMention` + tool denials in place.
