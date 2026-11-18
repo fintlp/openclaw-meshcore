@@ -6,6 +6,14 @@ The ClawHub versions page sources its per-release text from the publish
 command's `--changelog` flag (see docs/PUBLISHING.md) — this file is the
 canonical source for that text.
 
+## Unreleased
+
+Documentation
+
+- **Group monitoring is documented as opt-in, end to end.** README (safety section, first experiments, config reference, minimal config), QUICKSTART, AGENT-SCOPING, USE-CASES and the meshcore-connect skill now say the same thing: the default is `groupPolicy: "disabled"`, monitoring is a deliberate choice, and the plugin never transmits to a group in any policy or mode. The README explains what `disabled` / `allowlist` / `open` admit, what digest versus session mode does, the exact `openclaw config set` commands (gateway stopped) and the privacy note that the digest keeps full message text on disk. The QUICKSTART and the AGENT-SCOPING baseline no longer start from `"open"`.
+- **Docs no longer claim that the native DM commands answer.** USE-CASES recipe 3 and the skill advertised `!status` / `!neighbours` / `!rstatus` / `!trace` answering in DM; they are default-deny (README "DM commands"). A short note also says the never-transmit rule is specific to MeshCore and does not carry over to the Meshtastic plugin.
+- No code, schema or manifest change.
+
 ## 2026.11.3 - 2026-11-18
 
 Fixed

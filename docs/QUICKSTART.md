@@ -88,7 +88,17 @@ Then verify the channel came up — `openclaw status`, or in the gateway log:
 2. With `dmPolicy: "pairing"` (the default), unknown senders get a pairing challenge. Approve it in the **Control UI** (or via `openclaw pairing approve`).
 3. Chat. A few things that are *normal*, not bugs:
    - Long agent replies arrive as several mesh messages — the plugin splits at **127 bytes** (the node's wire cap) and paces frames by LoRa airtime + ACK round-trips (~1–3 s per frame at SF8). A 300-character reply is three bubbles a few seconds apart.
-   - Group channels are **receive-only by design**. Set `groupPolicy: "open"` to *monitor* public-channel traffic; the plugin will never transmit to a group, regardless of policy. LoRa airtime is a shared resource.
+   - Group channels are **receive-only by design** — the plugin never transmits to a group, in any policy or mode. LoRa airtime is a shared resource.
+   - Group monitoring is **opt-in** and off by default: `groupPolicy: "disabled"` drops group traffic with a log line and records nothing. To deliberately listen to the public channel, with the gateway **stopped**:
+
+     ```bash
+     openclaw gateway stop
+     openclaw config set channels.meshcore.groupPolicy '"allowlist"'
+     openclaw config set channels.meshcore.groups '{ "channel:0": {} }'
+     openclaw gateway start
+     ```
+
+     Admitted messages land in `~/.openclaw/state/meshcore-group-log.jsonl` (digest mode, the default — no agent session is woken per message); ask your agent "what has the mesh been saying?". **Privacy:** the digest stores the full text of admitted messages on disk in plain JSON — treat the file as sensitive.
 
 ---
 

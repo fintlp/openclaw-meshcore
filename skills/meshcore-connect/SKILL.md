@@ -50,8 +50,10 @@ openclaw channels add meshcore --host 192.168.1.20
 ## Access & safety defaults (do not loosen without a reason)
 
 - `dmPolicy: "pairing"` — every new contact needs explicit approval.
+- `groupPolicy: "disabled"` — group monitoring is **opt-in**: no public-channel traffic is admitted or recorded until the operator deliberately enables it. To switch it on (gateway stopped): `openclaw config set channels.meshcore.groupPolicy '"allowlist"'` and `openclaw config set channels.meshcore.groups '{ "channel:0": {} }'`; admitted traffic lands in a digest log (see README "Group monitoring").
 - **DM identity is gated.** A DM whose six-byte key prefix resolves ambiguously (conflicting contact-book row or cross-account attempt) is rejected before pairing and dispatch. Stored DMs are re-checked at gateway restart against the *current* key mapping and admission — a key change blocks dispatch of queued replays. Details: SECURITY.md.
-- **Groups are receive-only by code-level design**: the agent can listen but never transmits on channels. LoRa airtime is a shared commons; there is no delete button on the airwaves.
+- **Groups are receive-only by code-level design**: even with monitoring on, the agent can listen but never transmits on channels, in any policy or mode. LoRa airtime is a shared commons; there is no delete button on the airwaves.
+- **Native DM commands are default-deny** — `!status`, `!neighbours`, `!rstatus` and `!trace` stay off for everyone, including explicitly allowlisted peers; this release has no option to re-enable them (README "DM commands").
 - Flood guard caps outbound DM airtime; replies are chunked to mesh-safe sizes.
 
 
@@ -61,7 +63,7 @@ When the user asks "what can I do with this now?", offer a recipe from docs/USE-
 
 1. **Off-grid assistant** (default) — full agent sessions per admitted DM peer. Pair strangers deliberately (dmPolicy pairing).
 2. **Emergency / backup channel** — add sendRetry.enabled:true; durability (on by default) replays undispatched messages after gateway updates/crashes, at-least-once (a restart mid-turn can duplicate a reply). Honest limits: nothing is received while the gateway itself is down, and a follow-up queued behind a busy session is only as durable as the host process.
-3. **Unattended-node / repeater monitor** — groupMonitorMode digest + groupPolicy allowlist; !status / !neighbours / !rstatus / !trace answer in DM.
+3. **Unattended-node / repeater monitor** — groupMonitorMode digest + groupPolicy allowlist; the agent answers DMs about what the digest log heard. (The native `!status` / `!neighbours` / `!rstatus` / `!trace` commands are default-deny in this release.)
 4. **Field-expedition hub** — base-camp gateway, approve each handheld once (pairing), hub answers everyone in DM.
 5. **Festival / event bot** — pairing-gated; it can never spam the public channel (that boundary is code, not a promise).
 6. **Cross-channel bridge** — a mesh DM can produce effects on the agent's other channels (WhatsApp, notes, reminders) — never for unpaired strangers, other channels' policies still apply.

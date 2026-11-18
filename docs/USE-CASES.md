@@ -51,8 +51,9 @@ A node on a hill (or in the attic) you can interrogate: how is it doing, what do
 }
 ~~~
 
-- **Can:** answer !status / !neighbours <node> / !rstatus <node> / !trace <node> in DM (repeater-class targets answer more), plus a digest log of heard channel traffic you can ask the agent to summarize.
-- **Cannot:** manage a repeater that refuses remote ops (firmware-dependent); transmit to the channel it monitors.
+- **Can:** keep a digest log of heard channel traffic that you can ask the agent to summarize, and answer your DMs about it (a full agent session per paired peer). The native `!status` / `!neighbours` / `!rstatus` / `!trace` commands are default-deny in this release, so they do not answer — see README "DM commands".
+- **Cannot:** manage a repeater that refuses remote ops (firmware-dependent); transmit to the channel it monitors — the plugin never transmits to a group in any policy or mode.
+- **Note:** group monitoring is opt-in (default `groupPolicy: "disabled"`); this recipe deliberately enables it in digest mode. The digest stores full message text on disk in plain JSON — treat `meshcore-group-log.jsonl` as sensitive.
 - **Read next:** README "DM commands"; telemetry roadmap is issue #13.
 
 ## 4. Field-expedition comms hub
@@ -64,7 +65,8 @@ Gateway at base camp, handhelds in the field. Everyone DMs the hub; the hub answ
   "channels": { "meshcore": {
     "host": "<base-camp-node>",
     "dmPolicy": "pairing",
-    "groupMonitorMode": "digest",
+    // group monitoring stays off (opt-in, default "disabled") — to also listen:
+    // "groupPolicy": "allowlist", "groups": { "channel:0": {} }, "groupMonitorMode": "digest"
     "sendPacing": { "mode": "ack" }
   } }
 }
