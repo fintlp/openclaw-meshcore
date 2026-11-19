@@ -923,43 +923,27 @@
             "additionalProperties": false
           },
           "sessionSendRateLimit": {
-            "default": {
-              "enabled": true,
-              "maxSends": 10,
-              "maxBytes": 1270,
-              "windowMs": 600000
-            },
             "type": "object",
             "properties": {
               "enabled": {
-                "default": true,
                 "type": "boolean"
               },
               "maxSends": {
-                "default": 10,
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 9007199254740991
               },
               "maxBytes": {
-                "default": 1270,
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 9007199254740991
               },
               "windowMs": {
-                "default": 600000,
                 "type": "integer",
                 "minimum": 1000,
                 "maximum": 9007199254740991
               }
             },
-            "required": [
-              "enabled",
-              "maxSends",
-              "maxBytes",
-              "windowMs"
-            ],
             "additionalProperties": false
           },
           "sendRetry": {
@@ -1069,7 +1053,6 @@
           "groupPolicy",
           "sendPacing",
           "sendRateLimit",
-          "sessionSendRateLimit",
           "sendRetry"
         ],
         "additionalProperties": false
@@ -1525,43 +1508,27 @@
           "additionalProperties": false
         },
         "sessionSendRateLimit": {
-          "default": {
-            "enabled": true,
-            "maxSends": 10,
-            "maxBytes": 1270,
-            "windowMs": 600000
-          },
           "type": "object",
           "properties": {
             "enabled": {
-              "default": true,
               "type": "boolean"
             },
             "maxSends": {
-              "default": 10,
               "type": "integer",
               "minimum": 1,
               "maximum": 9007199254740991
             },
             "maxBytes": {
-              "default": 1270,
               "type": "integer",
               "minimum": 1,
               "maximum": 9007199254740991
             },
             "windowMs": {
-              "default": 600000,
               "type": "integer",
               "minimum": 1000,
               "maximum": 9007199254740991
             }
           },
-          "required": [
-            "enabled",
-            "maxSends",
-            "maxBytes",
-            "windowMs"
-          ],
           "additionalProperties": false
         },
         "sendRetry": {
@@ -1710,7 +1677,6 @@
         "groupPolicy",
         "sendPacing",
         "sendRateLimit",
-        "sessionSendRateLimit",
         "sendRetry"
       ],
       "additionalProperties": false

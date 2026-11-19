@@ -316,7 +316,7 @@ function resolveTarget(to: string, opts?: SendMeshcoreOptions): string {
   throw new Error(`Invalid MeshCore target: ${to}`);
 }
 
-/** Single source of truth for hook-time packet estimates and the radio send path. */
+/** Single source of truth for final outbound packet accounting and the radio send path. */
 export function chunkMeshcoreOutboundText(
   text: string,
   config: Pick<
@@ -366,6 +366,18 @@ export async function sendMessageMeshcore(
     throw new Error("Message must be non-empty for MeshCore sends");
   }
 
+  // Impossible sends are refused before they can consume session budget or
+  // touch a device. This ordering is deliberate and covered by tests.
+  if (isMeshcoreGroupTarget(target)) {
+    throw new Error(
+      `MeshCore group sends are disabled: ${target} is receive-only (LoRa airtime rule)`,
+    );
+  }
+  const nodeId = parseMeshcoreNodeId(target);
+  if (!nodeId) {
+    throw new Error(`Invalid MeshCore DM target: ${target}`);
+  }
+
   // Synchronous, final-cost admission before connect/device I/O and before
   // the old account guard. Pairing/native flows deliberately stay exempt.
   if ((opts.purpose ?? "dm") !== "pairing") {
@@ -391,16 +403,6 @@ export async function sendMessageMeshcore(
 
   attachSendConfirmedHandler(handle.connection, account.accountId);
 
-  if (isMeshcoreGroupTarget(target)) {
-    throw new Error(
-      `MeshCore group sends are disabled: ${target} is receive-only (LoRa airtime rule)`,
-    );
-  }
-
-  const nodeId = parseMeshcoreNodeId(target);
-  if (!nodeId) {
-    throw new Error(`Invalid MeshCore DM target: ${target}`);
-  }
   const pubkey = nodeIdToPubkey(nodeId, account.accountId);
 
   // Only DMs may be signed; groups are receive-only and stay Plain.

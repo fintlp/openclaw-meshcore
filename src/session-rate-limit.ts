@@ -101,7 +101,12 @@ export function enforceMeshcoreSessionSendRateLimit(params: {
 }): void {
   // 2026.10.5 and internal/no-session sends have no producing key: preserve
   // the old account-only behavior rather than creating a synthetic identity.
-  if (!params.sessionKey || !params.config.enabled || (params.packets <= 0 && params.bytes <= 0)) return;
+  if (
+    !params.sessionKey ||
+    params.sessionKey.trim().length === 0 ||
+    !params.config.enabled ||
+    (params.packets <= 0 && params.bytes <= 0)
+  ) return;
   const now = params.nowMs ?? Date.now();
   sweepStaleBuckets(now);
   const key = JSON.stringify(["meshcore", params.accountId, params.sessionKey]);
@@ -130,7 +135,7 @@ export function enforceMeshcoreSessionSendRateLimit(params: {
         `${exceeded} in the rolling ${Math.round(params.config.windowMs / 60_000)}m window. ` +
         `Retry in ~${Math.ceil(retryAfterMs / 1_000)}s (retryAfterMs=${retryAfterMs}). ` +
         (oversized
-          ? "This single send exceeds the session budget; split it or tune channels.meshcore.sessionSendRateLimit. "
+          ? "This single send exceeds the session budget: waiting alone will not admit it; split it or tune channels.meshcore.sessionSendRateLimit. "
           : "") +
         "Nothing was queued. The independent channels.meshcore.sendRateLimit account guard remains active.",
       retryAfterMs,

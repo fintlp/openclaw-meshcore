@@ -253,6 +253,9 @@ describe("meshcore inbound behavior", () => {
       await turn.delivery.deliver({ text: "automatic reply" });
       return { dispatched: true };
     });
+    vi.mocked(resolveAgentRoute).mockReturnValueOnce({
+      agentId: "meshcore", sessionKey: "agent:main:route-producer", accountId: "default",
+    });
     setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
     await handleMeshcoreInbound({
       message: createMessage(),
@@ -264,8 +267,9 @@ describe("meshcore inbound behavior", () => {
       sendReply,
     });
     expect(sendReply).toHaveBeenCalledWith(
-      TEST_NODE_ID, "automatic reply", undefined, undefined, `meshcore:${TEST_NODE_ID}`,
+      TEST_NODE_ID, "automatic reply", undefined, undefined, "agent:main:route-producer",
     );
+    expect("agent:main:route-producer").not.toBe(TEST_NODE_ID);
   });
 
   it("dispatches DM from allowlisted sender", async () => {

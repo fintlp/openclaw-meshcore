@@ -127,6 +127,7 @@ describe("MeshCore low-level per-session flood guard (#46)", () => {
     expect(results.filter((result) => result === null)).toHaveLength(3);
     const errors = results.filter((result) => result instanceof SessionSendRateLimitExceededError);
     expect(errors).toHaveLength(2);
+    for (const error of errors) expect(error).toBeInstanceOf(SendRateLimitExceededError);
     expect(sendTextMessage).toHaveBeenCalledTimes(3);
     expect(warn).toHaveBeenCalledTimes(2);
     for (const [line] of warn.mock.calls) {
@@ -140,11 +141,25 @@ describe("MeshCore low-level per-session flood guard (#46)", () => {
   it("refuses before connect when one payload exceeds the exact packet boundary", async () => {
     const cfg = config({ textChunkLimit: 40, sessionSendRateLimit: { maxSends: 1, maxBytes: 100 } });
     getMock.mockReturnValue(undefined);
-    await expect(sendMessageMeshcore(NODE, "x".repeat(41), {
-      cfg, sessionKey: "s",
-    })).rejects.toBeInstanceOf(SessionSendRateLimitExceededError);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const promise = sendMessageMeshcore(NODE, "x".repeat(41), { cfg, sessionKey: "s" });
+    await expect(promise).rejects.toBeInstanceOf(SessionSendRateLimitExceededError);
+    await expect(promise).rejects.toMatchObject({ retryAfterMs: 600_000 });
+    await expect(promise).rejects.toThrow("waiting alone will not admit it");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("retryAfterMs=600000"));
     expect(connectMock).not.toHaveBeenCalled();
     expect(getMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses group and invalid targets before charging or touching a device", async () => {
+    const cfg = config({ sessionSendRateLimit: { maxSends: 1, maxBytes: 1 } });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(sendMessageMeshcore("channel:0", "xx", { cfg, sessionKey: "s" })).rejects.toThrow("receive-only");
+    await expect(sendMessageMeshcore("not-a-target", "xx", { cfg, sessionKey: "s" })).rejects.toThrow("Invalid MeshCore target");
+    expect(sessionSendRateLimitBucketCountForTests()).toBe(0);
+    expect(connectMock).not.toHaveBeenCalled();
+    expect(getMock).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it("shares one producing budget across fanout A,B,C,A instead of deriving identity from targets", async () => {
@@ -195,9 +210,10 @@ describe("MeshCore low-level per-session flood guard (#46)", () => {
     const handle = device(sendTextMessage);
     expect(await attempt({ cfg, handle })).toBeNull();
     expect(await attempt({ cfg, handle, sessionKey: "" })).toBeNull();
+    expect(await attempt({ cfg, handle, sessionKey: "   " })).toBeNull();
     expect(await attempt({ cfg, handle, sessionKey: "pairing-producer", purpose: "pairing" })).toBeNull();
     expect(await attempt({ cfg, handle, sessionKey: "pairing-producer", purpose: "pairing" })).toBeNull();
-    expect(sendTextMessage).toHaveBeenCalledTimes(4);
+    expect(sendTextMessage).toHaveBeenCalledTimes(5);
   });
 
   it("disabled semantics affect only the session layer", async () => {
@@ -271,7 +287,7 @@ describe("MeshCore low-level per-session flood guard (#46)", () => {
     const manifest = JSON.parse(readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
     const surface = manifest.channelConfigs.meshcore;
     expect(surface.schema.properties.sessionSendRateLimit.default).toEqual(SESSION_SEND_RATE_LIMIT_DEFAULTS);
-    expect(surface.schema.properties.accounts.additionalProperties.properties.sessionSendRateLimit.default).toEqual(SESSION_SEND_RATE_LIMIT_DEFAULTS);
+    expect(surface.schema.properties.accounts.additionalProperties.properties.sessionSendRateLimit.default).toBeUndefined();
     expect(surface.uiHints.sessionSendRateLimit.help).toContain("10");
   });
 });
