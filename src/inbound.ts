@@ -132,15 +132,19 @@ async function deliverMeshcoreReply(params: {
     text: string,
     replyToId?: string,
     purpose?: "dm" | "pairing",
+    sessionKey?: string,
   ) => Promise<void>;
   purpose?: "dm" | "pairing";
+  sessionKey?: string;
   statusSink?: (patch: { lastOutboundAt?: number }) => void;
 }) {
   await deliverFormattedTextWithAttachments({
     payload: params.payload,
     send: async ({ text, replyToId }) => {
       if (params.sendReply) {
-        if (params.purpose) {
+        if (params.sessionKey) {
+          await params.sendReply(params.target, text, replyToId, params.purpose, params.sessionKey);
+        } else if (params.purpose) {
           await params.sendReply(params.target, text, replyToId, params.purpose);
         } else {
           await params.sendReply(params.target, text, replyToId);
@@ -215,6 +219,7 @@ export async function handleMeshcoreInbound(params: {
     text: string,
     replyToId?: string,
     purpose?: "dm" | "pairing",
+    sessionKey?: string,
   ) => Promise<void>;
   statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
   /** If provided for group messages, called after admission succeeds and then normal session dispatch is skipped. */
@@ -788,6 +793,7 @@ export async function handleMeshcoreInbound(params: {
               cfg: config,
               target: peerId,
               accountId: account.accountId,
+              sessionKey: route.sessionKey,
               sendReply: params.sendReply,
               statusSink: params.statusSink,
             });

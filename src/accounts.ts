@@ -96,7 +96,7 @@ function mergeMeshcoreAccountConfig(cfg: CoreConfig, accountId: string): Meshcor
       | undefined,
     accountId,
     omitKeys: ["defaultAccount"],
-    nestedObjectKeys: ["durability"],
+    nestedObjectKeys: ["durability", "sessionSendRateLimit"],
     normalizeAccountId,
   });
 }

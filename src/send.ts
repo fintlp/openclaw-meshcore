@@ -23,9 +23,13 @@ import {
 } from "./normalize.js";
 import { withPacedSend, type WithPacedSendOptions } from "./pacing.js";
 import { getMeshcoreRuntime } from "./runtime.js";
-import type { CoreConfig } from "./types.js";
+import type { CoreConfig, MeshcoreAccountConfig } from "./types.js";
 import { resolveSendPacingConfig } from "./airtime.js";
 import { assertSendRateLimit, resolveSendRateLimitConfig } from "./rate-limit.js";
+import {
+  enforceMeshcoreSessionSendRateLimit,
+  resolveSessionSendRateLimitConfig,
+} from "./session-rate-limit.js";
 import {
   DELIVERY_REPORT_TIMEOUT_MAX_MS,
   MeshcoreDeliveryFailedError,
@@ -95,6 +99,8 @@ function raceSendTextMessage(
 type SendMeshcoreOptions = {
   cfg: CoreConfig;
   accountId?: string;
+  /** Trusted producing session supplied by the host/delivery path (2026.11.3+). */
+  sessionKey?: string;
   replyTo?: string;
   target?: string;
   deviceHandle?: MeshcoreDeviceHandle;
@@ -310,6 +316,25 @@ function resolveTarget(to: string, opts?: SendMeshcoreOptions): string {
   throw new Error(`Invalid MeshCore target: ${to}`);
 }
 
+/** Single source of truth for final outbound packet accounting and the radio send path. */
+export function chunkMeshcoreOutboundText(
+  text: string,
+  config: Pick<
+    MeshcoreAccountConfig,
+    "textChunkLimit" | "outboundSignedPlain" | "chunkNumbering"
+  >,
+): string[] {
+  // Values above the firmware cap are clamped in both paths.
+  const plainChunkLimit = Math.min(
+    config.textChunkLimit ?? MESHCORE_WIRE_CHUNK_LIMIT,
+    MESHCORE_WIRE_CHUNK_LIMIT,
+  );
+  const chunkLimit = config.outboundSignedPlain === true
+    ? Math.max(1, plainChunkLimit - MESHCORE_SIGNED_PLAIN_PREFIX_LENGTH)
+    : plainChunkLimit;
+  return chunkTextWithNumbering(text, chunkLimit, config.chunkNumbering ?? true);
+}
+
 export async function sendMessageMeshcore(
   to: string,
   text: string,
@@ -335,25 +360,23 @@ export async function sendMessageMeshcore(
   }
 
   const target = resolveTarget(to, opts);
-  // The firmware drops the TCP companion session when a text frame exceeds
-  // 127 bytes (live-proven 2026-10-09), so values above the wire cap are
-  // clamped even if an operator sets them.
-  const plainChunkLimit = Math.min(
-    account.config.textChunkLimit ?? MESHCORE_WIRE_CHUNK_LIMIT,
-    MESHCORE_WIRE_CHUNK_LIMIT,
-  );
   const outboundSignedPlain = account.config.outboundSignedPlain === true;
-  // SignedPlain payloads embed a 4-byte sender_prefix in the wire text field.
-  // Reserve that space from the text budget to avoid firmware truncation.
-  const chunkLimit = outboundSignedPlain
-    ? Math.max(1, plainChunkLimit - MESHCORE_SIGNED_PLAIN_PREFIX_LENGTH)
-    : plainChunkLimit;
-  const chunkNumbering = account.config.chunkNumbering ?? true;
-  const chunks = chunkTextWithNumbering(text, chunkLimit, chunkNumbering);
+  const chunks = chunkMeshcoreOutboundText(text, account.config);
   if (chunks.length === 0) {
     throw new Error("Message must be non-empty for MeshCore sends");
   }
 
+  // Impossible sends are refused before they can consume session budget or
+  // touch a device. This ordering is deliberate and covered by tests.
+  if (isMeshcoreGroupTarget(target)) {
+    throw new Error(
+      `MeshCore group sends are disabled: ${target} is receive-only (LoRa airtime rule)`,
+    );
+  }
+  const nodeId = parseMeshcoreNodeId(target);
+  if (!nodeId) {
+    throw new Error(`Invalid MeshCore DM target: ${target}`);
+  }
   const handle =
     opts.deviceHandle ??
     getMeshcoreDevice(account.accountId) ??
@@ -365,17 +388,26 @@ export async function sendMessageMeshcore(
 
   attachSendConfirmedHandler(handle.connection, account.accountId);
 
-  if (isMeshcoreGroupTarget(target)) {
-    throw new Error(
-      `MeshCore group sends are disabled: ${target} is receive-only (LoRa airtime rule)`,
-    );
-  }
+  // Abbreviated-target identity is resolved against the freshly connected
+  // radio: the handle above is passed explicitly so this decision always
+  // reflects this exact connection's contacts, never a stale or unrelated
+  // one that might still be sitting in the account registry. Unresolved,
+  // ambiguous, or stale (cache-only) targets fail without session charge.
+  const pubkey = nodeIdToPubkey(nodeId, account.accountId, handle);
 
-  const nodeId = parseMeshcoreNodeId(target);
-  if (!nodeId) {
-    throw new Error(`Invalid MeshCore DM target: ${target}`);
+  // Final-cost admission after target resolution and before the first actual
+  // radio frame, always before the old account guard. Pairing is exempt.
+  if ((opts.purpose ?? "dm") !== "pairing") {
+    enforceMeshcoreSessionSendRateLimit({
+      accountId: account.accountId,
+      sessionKey: opts.sessionKey,
+      packets: chunks.length,
+      bytes: utf8ByteLength(text.trim()),
+      config: resolveSessionSendRateLimitConfig(
+        account.config.sessionSendRateLimit as Record<string, unknown> | undefined,
+      ),
+    });
   }
-  const pubkey = nodeIdToPubkey(nodeId, account.accountId);
 
   // Only DMs may be signed; groups are receive-only and stay Plain.
   const txtType = outboundSignedPlain ? 2 : undefined;

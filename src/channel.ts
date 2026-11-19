@@ -326,11 +326,14 @@ export const meshcorePlugin: ChannelPlugin<ResolvedMeshcoreAccount, MeshcoreProb
       base: meshcoreOutboundBaseAdapter,
       attachedResults: {
         channel: "meshcore",
-        sendText: async ({ cfg, to, text, accountId, replyToId }) => {
+        sendText: async (ctx) => {
+          const { cfg, to, text, accountId, replyToId } = ctx;
+          const sessionKey = (ctx as unknown as { sessionKey?: string }).sessionKey;
           const { sendMessageMeshcore } = await loadMeshcoreChannelRuntime();
           const result = await sendMessageMeshcore(to, text, {
             cfg: cfg as CoreConfig,
             accountId: accountId ?? undefined,
+            sessionKey,
             replyTo: replyToId ?? undefined,
           });
           return {

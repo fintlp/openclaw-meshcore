@@ -246,6 +246,32 @@ describe("meshcore inbound behavior", () => {
     expect(getMeshcoreRuntime().logging.getChildLogger().info).not.toHaveBeenCalled();
   });
 
+  it("forwards only the agent-turn route sessionKey to automatic reply delivery", async () => {
+    const sendReply = vi.fn(async () => undefined);
+    const inboundRunMock = vi.fn(async (params) => {
+      const turn = params.adapter.resolveTurn();
+      await turn.delivery.deliver({ text: "automatic reply" });
+      return { dispatched: true };
+    });
+    vi.mocked(resolveAgentRoute).mockReturnValueOnce({
+      agentId: "meshcore", sessionKey: "agent:main:route-producer", accountId: "default",
+    });
+    setMeshcoreRuntime(makeRuntimeWithDispatch(inboundRunMock) as never);
+    await handleMeshcoreInbound({
+      message: createMessage(),
+      account: createAccount({
+        config: { dmPolicy: "allowlist", allowFrom: [TEST_NODE_ID], groupPolicy: "disabled" },
+      }),
+      config: { channels: { meshcore: { host: "192.0.2.10" } } } as CoreConfig,
+      runtime: createRuntimeEnv(),
+      sendReply,
+    });
+    expect(sendReply).toHaveBeenCalledWith(
+      TEST_NODE_ID, "automatic reply", undefined, undefined, "agent:main:route-producer",
+    );
+    expect("agent:main:route-producer").not.toBe(TEST_NODE_ID);
+  });
+
   it("dispatches DM from allowlisted sender", async () => {
     const sendReply = vi.fn(async () => undefined);
     const inboundRunMock = vi.fn(async () => ({ dispatched: true }));

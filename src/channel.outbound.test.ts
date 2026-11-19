@@ -5,6 +5,10 @@ import { clearOutboundEchoCache } from "./echo-dedupe.js";
 import { MESHCORE_WIRE_CHUNK_LIMIT } from "./send.js";
 import { clearPacingStateForTests } from "./pacing.js";
 import { clearSendConfirmedStateForTests } from "./device-client.js";
+import {
+  clearSessionSendRateLimitState,
+  SessionSendRateLimitExceededError,
+} from "./session-rate-limit.js";
 import type { CoreConfig } from "./types.js";
 
 const TEST_NODE_ID = "!00000000000000000000000000000000000000000000000000000000aabbccdd";
@@ -64,6 +68,7 @@ describe("meshcorePlugin outbound sendText (host-chunking suppression, issue #39
     clearOutboundEchoCache();
     clearPacingStateForTests();
     clearSendConfirmedStateForTests();
+    clearSessionSendRateLimitState();
   });
 
   afterEach(() => {
@@ -71,6 +76,7 @@ describe("meshcorePlugin outbound sendText (host-chunking suppression, issue #39
     vi.clearAllMocks();
     clearPacingStateForTests();
     clearSendConfirmedStateForTests();
+    clearSessionSendRateLimitState();
   });
 
   it("regression: registered outbound adapter keeps chunker:null and textChunkLimit=127 (issue #39)", () => {
@@ -170,6 +176,19 @@ describe("meshcorePlugin outbound sendText (host-chunking suppression, issue #39
       .map((c) => c.replace(/^\[\d+\/\d+\] /, ""))
       .flatMap((c) => c.split(/\s+/).filter((w) => w.length > 0));
     expect(reassembledWords).toEqual(multibyteWords.flatMap((line) => line.split(/\s+/)));
+  });
+
+  it("forwards the producing session key through attachedResults sendText", async () => {
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 42 }));
+    getMeshcoreDeviceMock.mockReturnValue(createDeviceHandle(sendTextMessage));
+    const cfg = createConfig({ sessionSendRateLimit: { maxSends: 1, maxBytes: 100 } });
+    await meshcorePlugin.outbound.sendText({
+      cfg, to: TEST_NODE_ID, text: "first", sessionKey: "agent:main:attached",
+    } as never);
+    await expect(meshcorePlugin.outbound.sendText({
+      cfg, to: TEST_NODE_ID, text: "second", sessionKey: "agent:main:attached",
+    } as never)).rejects.toBeInstanceOf(SessionSendRateLimitExceededError);
+    expect(sendTextMessage).toHaveBeenCalledTimes(1);
   });
 
   it("does not prefix a single-chunk message", async () => {

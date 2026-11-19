@@ -160,6 +160,10 @@ Group-row behavior is unchanged, and native-command markers remain
 non-replayable. Evidence records the mapping used at intake; it is not a
 signature or cryptographic proof of origin.
 
+### Per-session outbound load containment
+
+`sessionSendRateLimit` is enforced inside the plugin's low-level send path after final SignedPlain/chunk-numbering packet computation, trimmed UTF-8 byte measurement, and target identity resolution (which may first connect to the node and sync contacts), before any radio frame and before the unchanged account guard. Defaults are 10 packets and 1270 bytes per resolved account + producing session per 10 minutes. Named accounts inherit the root object, while explicit partial overrides deep-merge field-by-field; only an explicit account `enabled: true` reverses a root opt-out. Synchronous admission charging makes concurrent bursts atomic and is deliberately not refunded after later delivery failure. Excess throws a typed error carrying `retryAfterMs` and emits exactly one metadata-only plugin warning (no body, session key, or full target); the host `onError` may additionally log that typed failure. Nothing is queued. One producing key shares its budget across fanout, so `dmScope: "main"` can be a tighter shared DM cap. Oversized single sends must be split or tuned because waiting alone will not admit them. Pairing/native replies remain exempt. Delivery retries spend the account budget per attempt while the session layer charges the admitted send once. Missing, empty, and whitespace-only keys are account-only. On 2026.10.5, host-driven adapter sends without a producing key are account-only, but plugin auto-replies still carry the route key and remain session-limited. Disabling this layer never affects account, pairing, native-ping, pacing, or retry guards. Usage is in memory and resets on restart. The entry registers no global message hooks, so it cannot flip Telegram's provider-preview gate or suppress legacy auto-replies with a lost cancellation reason.
+
 ### Pairing and reply load containment
 
 Pairing is limited to 3 successfully replied-to new challenges per 10 minutes

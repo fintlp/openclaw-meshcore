@@ -8,12 +8,14 @@ canonical source for that text.
 
 ## Unreleased
 
+Security
+
+- **A runaway AI session can no longer drain the shared radio allowance (#46).** Added a per-producing-session circuit breaker, enabled by default: over-limit sends are refused before any radio frame and logged with a retry delay instead of being queued. The existing account-wide backstop remains, and no Telegram/global message hooks are registered. `sessionSendRateLimit` enforces **10 final production chunks and 1270 trimmed UTF-8 bytes** per resolved account + producing session per rolling 10 minutes, after target identity resolution and before any radio frame and the unchanged 20-packet account backstop. Producing keys flow through the message adapter, attached-results sender, and agent-turn auto-reply path; fanout from one key (including `dmScope: "main"`) shares one budget. The secure default lives only at the root: named accounts inherit it, explicit partial account overrides deep-merge field-by-field, and only an explicit account `enabled: true` reverses a root opt-out. On 2026.10.5, host-driven adapter sends without a producing key are account-only, but plugin auto-replies still carry the route key and remain limited; the host floor is unchanged. Missing, empty, and whitespace-only keys are account-only. Admission is charged without refund, and buckets reset on restart. Delivery retries spend the account budget per attempt while the session layer charges the admitted send once. Pairing/native paths are exempt. Group, invalid-target, and abbreviated-target identity resolution/refusals happen before session accounting. Refusal throws a typed `retryAfterMs` error and emits one metadata-only plugin warning; the host `onError` may additionally log that typed failure. Oversized single sends must be split or tuned because waiting alone will not admit them. **Upgrading?** set `channels.meshcore.sessionSendRateLimit.enabled=false` to opt out of only this layer, or tune `maxSends`, `maxBytes`, and `windowMs` deliberately; named accounts inherit that opt-out unless explicitly re-enabled.
+
 Documentation
 
 - **Group monitoring is documented as opt-in, end to end.** README (safety section, first experiments, config reference, minimal config), QUICKSTART, AGENT-SCOPING, USE-CASES and the meshcore-connect skill now say the same thing: the default is `groupPolicy: "disabled"`, monitoring is a deliberate choice, and the plugin never transmits to a group in any policy or mode. The README explains what `disabled` / `allowlist` / `open` admit, what digest versus session mode does, the exact `openclaw config set` commands (gateway stopped) and the privacy note that the digest keeps full message text on disk. The QUICKSTART and the AGENT-SCOPING baseline no longer start from `"open"`.
 - **Docs no longer claim that the native DM commands answer.** USE-CASES recipe 3 and the skill advertised `!status` / `!neighbours` / `!rstatus` / `!trace` answering in DM; they are default-deny (README "DM commands"). A short note also says the never-transmit rule is specific to MeshCore and does not carry over to the Meshtastic plugin.
-- No code, schema or manifest change.
-
 ## 2026.11.3 - 2026-11-18
 
 Fixed

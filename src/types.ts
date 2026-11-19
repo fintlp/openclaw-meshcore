@@ -60,6 +60,8 @@ export type MeshcoreAccountConfig = {
   sendPacing?: MeshcoreSendPacingConfig;
   /** Outbound flood guard: cap airtime packets per rolling window (default 20 per 10 min). Refuses with a retry hint when tripped. Set enabled:false to disable. */
   sendRateLimit?: { enabled?: boolean; maxSends?: number; windowMs?: number };
+  /** Low-level per-producing-session packet and trimmed UTF-8 byte budgets. Independent of the account guard. */
+  sessionSendRateLimit?: { enabled?: boolean; maxSends?: number; maxBytes?: number; windowMs?: number };
   /** DM delivery-report auto-retry (issue #25, default disabled): retransmit when no SendConfirmed arrives within the firmware's estimated ACK window. maxAttempts counts the initial send; backoffMs is the fixed wait between attempts. Every attempt consumes sendRateLimit budget. */
   sendRetry?: { enabled?: boolean; maxAttempts?: number; backoffMs?: number };
   /** When true, inbound info logs include up to 80 characters of message text (default: metadata only). */

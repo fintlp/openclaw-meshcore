@@ -23,6 +23,15 @@ const MeshcoreGroupSchema = z
 
 const MeshcoreTransportSchema = z.enum(["tcp"]);
 
+const MeshcoreSessionSendRateLimitSchema = z
+  .object({
+    enabled: z.boolean().optional().default(true),
+    maxSends: z.number().int().min(1).optional().default(10),
+    maxBytes: z.number().int().min(1).optional().default(1_270),
+    windowMs: z.number().int().min(1_000).optional().default(600_000),
+  })
+  .strict();
+
 const MeshcoreAccountSchemaBase = z
   .object({
     name: z.string().optional(),
@@ -89,6 +98,7 @@ const MeshcoreAccountSchemaBase = z
         maxSends: 20,
         windowMs: 600_000,
       }),
+    sessionSendRateLimit: MeshcoreSessionSendRateLimitSchema.optional(),
     sendRetry: z
       .object({
         enabled: z.boolean().optional().default(false),
@@ -145,6 +155,12 @@ export const MeshcoreAccountSchema = MeshcoreAccountSchemaBase.superRefine((valu
 });
 
 export const MeshcoreConfigSchema = MeshcoreAccountSchemaBase.extend({
+  sessionSendRateLimit: MeshcoreSessionSendRateLimitSchema.optional().default({
+    enabled: true,
+    maxSends: 10,
+    maxBytes: 1_270,
+    windowMs: 600_000,
+  }),
   accounts: z.record(z.string(), MeshcoreAccountSchema.optional()).optional(),
   defaultAccount: z.string().optional(),
 }).superRefine((value, ctx) => {

@@ -60,6 +60,7 @@ import {
 import { formatMeshcoreEndpoint } from "./transport.js";
 import { getMeshcoreRuntime } from "./runtime.js";
 import { sendMessageMeshcore } from "./send.js";
+import { SessionSendRateLimitExceededError } from "./session-rate-limit.js";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import type { CoreConfig, MeshcoreInboundMessage } from "./types.js";
 
@@ -427,6 +428,7 @@ export function monitorMeshcoreProvider(
       text: string,
       replyToId?: string,
       purpose?: "dm" | "pairing",
+      sessionKey?: string,
     ) => {
       try {
         const { sendMessageMeshcore } = await import("./send.js");
@@ -436,6 +438,7 @@ export function monitorMeshcoreProvider(
           replyTo: replyToId,
           deviceHandle: handle,
           purpose: purpose ?? "dm",
+          sessionKey,
         });
         rememberOutboundEcho(text);
         opts.statusSink?.({ lastOutboundAt: Date.now() });
@@ -445,6 +448,11 @@ export function monitorMeshcoreProvider(
           direction: "outbound",
         });
       } catch (err) {
+        // Session flood refusals must reach the host's delivery onError as the
+        // typed retryable failure, without a second target-bearing plugin log.
+        if (err instanceof SessionSendRateLimitExceededError) {
+          throw err;
+        }
         // A failed reply (e.g. a pairing challenge to a prefix-only sender whose
         // full pubkey is not yet known) must not fail the inbound/pairing flow.
         const targetLabel = purpose === "pairing" ? target.slice(0, 13) : target;
