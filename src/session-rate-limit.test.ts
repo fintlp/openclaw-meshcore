@@ -1,9 +1,16 @@
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/channel-entry-contract";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import entry from "../index.js";
 import { MeshcoreConfigSchema } from "./config-schema.js";
+import {
+  rememberContact,
+  resetContactBookForTests,
+  setContactBookPathForTests,
+} from "./contact-book.js";
 import { clearSendConfirmedStateForTests } from "./device-client.js";
 import { clearOutboundEchoCache } from "./echo-dedupe.js";
 import { clearPacingStateForTests } from "./pacing.js";
@@ -85,6 +92,8 @@ beforeEach(() => {
   clearPacingStateForTests();
   clearSendConfirmedStateForTests();
   clearOutboundEchoCache();
+  resetContactBookForTests();
+  setContactBookPathForTests(join(mkdtempSync(join(tmpdir(), "meshcore-session-contacts-")), "contacts.json"));
 });
 afterEach(() => {
   clearSessionSendRateLimitState();
@@ -92,6 +101,8 @@ afterEach(() => {
   clearPacingStateForTests();
   clearSendConfirmedStateForTests();
   clearOutboundEchoCache();
+  resetContactBookForTests();
+  setContactBookPathForTests(undefined);
   vi.restoreAllMocks();
 });
 
@@ -149,6 +160,32 @@ describe("MeshCore low-level per-session flood guard (#46)", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("retryAfterMs=600000"));
     expect(connectMock).not.toHaveBeenCalled();
     expect(getMock).not.toHaveBeenCalled();
+  });
+
+  it("does not charge an unknown abbreviated target before the next valid full-key send", async () => {
+    const cfg = config({ sessionSendRateLimit: { maxSends: 1, maxBytes: 100 } });
+    getMock.mockReturnValue(undefined);
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    const handle = device(sendTextMessage);
+    const unknown = await attempt({ cfg, handle, target: "!aabbccddeeff", sessionKey: "s" });
+    expect(unknown).toBeInstanceOf(Error);
+    expect(unknown).not.toBeInstanceOf(SessionSendRateLimitExceededError);
+    expect(sessionSendRateLimitBucketCountForTests()).toBe(0);
+    expect(connectMock).not.toHaveBeenCalled();
+    expect(await attempt({ cfg, handle, target: NODES[0], sessionKey: "s" })).toBeNull();
+    expect(sendTextMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("still resolves and sends a unique cached 12-hex target before connecting", async () => {
+    const publicKey = new Uint8Array([...Buffer.from("aabbccddeeff", "hex"), ...new Uint8Array(26).fill(1)]);
+    rememberContact({ publicKey, advName: "Cached peer" }, "default");
+    const cfg = config({ sessionSendRateLimit: { maxSends: 1, maxBytes: 100 } });
+    getMock.mockReturnValue(undefined);
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    const handle = device(sendTextMessage);
+    expect(await attempt({ cfg, handle, target: "!aabbccddeeff", sessionKey: "cached" })).toBeNull();
+    expect(connectMock).not.toHaveBeenCalled();
+    expect(sendTextMessage).toHaveBeenCalledWith(publicKey, "ok");
   });
 
   it("refuses group and invalid targets before charging or touching a device", async () => {
@@ -281,6 +318,8 @@ describe("MeshCore low-level per-session flood guard (#46)", () => {
   it("pins secure runtime, zod, and generated-manifest defaults", () => {
     expect(SESSION_SEND_RATE_LIMIT_DEFAULTS).toEqual({ enabled: true, maxSends: 10, maxBytes: 1_270, windowMs: 600_000 });
     expect(resolveSessionSendRateLimitConfig(undefined)).toEqual(SESSION_SEND_RATE_LIMIT_DEFAULTS);
+    expect(resolveSessionSendRateLimitConfig({ windowMs: 999 }).windowMs).toBe(600_000);
+    expect(resolveSessionSendRateLimitConfig({ windowMs: 1_000 }).windowMs).toBe(1_000);
     const parsed = MeshcoreConfigSchema.parse({});
     expect(parsed.sessionSendRateLimit).toEqual(SESSION_SEND_RATE_LIMIT_DEFAULTS);
     expect(MeshcoreConfigSchema.safeParse({ sessionSendRateLimit: { maxBytes: 0 } }).success).toBe(false);

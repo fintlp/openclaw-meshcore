@@ -377,6 +377,9 @@ export async function sendMessageMeshcore(
   if (!nodeId) {
     throw new Error(`Invalid MeshCore DM target: ${target}`);
   }
+  // Resolve abbreviated targets before charging: unresolved/ambiguous ids
+  // must fail without consuming the producing session's packet allowance.
+  const pubkey = nodeIdToPubkey(nodeId, account.accountId);
 
   // Synchronous, final-cost admission before connect/device I/O and before
   // the old account guard. Pairing/native flows deliberately stay exempt.
@@ -402,8 +405,6 @@ export async function sendMessageMeshcore(
     }));
 
   attachSendConfirmedHandler(handle.connection, account.accountId);
-
-  const pubkey = nodeIdToPubkey(nodeId, account.accountId);
 
   // Only DMs may be signed; groups are receive-only and stay Plain.
   const txtType = outboundSignedPlain ? 2 : undefined;

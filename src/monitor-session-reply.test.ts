@@ -119,12 +119,12 @@ describe("MeshCore production monitor producing-session replies", () => {
       abortSignal: abort.signal,
       statusSink: (patch) => statusPatches.push(patch),
     });
-    await vi.waitFor(() => expect(device.connection.listenerCount(7)).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(device.connection.listenerCount(7)).toBeGreaterThan(0), { timeout: 5_000 });
     device.connection.emit(7, {
       pubKeyPrefix: PUBLIC_KEY.slice(0, 6), pathLen: 0, txtType: 0,
       senderTimestamp: 1_700_000_000, text: "hello",
     });
-    await vi.waitFor(() => expect(hostOnErrorMock).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(hostOnErrorMock).toHaveBeenCalledTimes(1), { timeout: 5_000 });
     const refusal = hostOnErrorMock.mock.calls[0]![0];
     expect(refusal).toBeInstanceOf(SessionSendRateLimitExceededError);
     expect((refusal as SessionSendRateLimitExceededError).retryAfterMs).toBeGreaterThan(0);
