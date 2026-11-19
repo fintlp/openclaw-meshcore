@@ -62,6 +62,14 @@ function device(sendTextMessage: ReturnType<typeof vi.fn>, accountId = "default"
   };
 }
 
+function connectWithoutHandle(handle: ReturnType<typeof device>, events?: string[]): void {
+  getMock.mockReturnValueOnce(undefined).mockImplementation(() => handle);
+  connectMock.mockImplementation(async () => {
+    events?.push("connect");
+    return handle;
+  });
+}
+
 async function attempt(params: {
   cfg: CoreConfig;
   handle: ReturnType<typeof device>;
@@ -70,6 +78,7 @@ async function attempt(params: {
   text?: string;
   target?: string;
   purpose?: "dm" | "pairing";
+  noDeviceHandle?: boolean;
 }): Promise<unknown | null> {
   try {
     await sendMessageMeshcore(params.target ?? NODE, params.text ?? "ok", {
@@ -77,7 +86,7 @@ async function attempt(params: {
       accountId: params.accountId,
       sessionKey: params.sessionKey,
       purpose: params.purpose,
-      deviceHandle: params.handle as never,
+      ...(params.noDeviceHandle ? {} : { deviceHandle: params.handle as never }),
     });
     return null;
   } catch (error) {
@@ -149,43 +158,101 @@ describe("MeshCore low-level per-session flood guard (#46)", () => {
     expect((errors[0] as SessionSendRateLimitExceededError).retryAfterMs).toBeGreaterThan(0);
   });
 
-  it("refuses before connect when one payload exceeds the exact packet boundary", async () => {
+  it("refuses before the first radio frame when one payload exceeds the exact packet boundary", async () => {
     const cfg = config({ textChunkLimit: 40, sessionSendRateLimit: { maxSends: 1, maxBytes: 100 } });
-    getMock.mockReturnValue(undefined);
+    const handle = device(vi.fn(async () => ({ expectedAckCrc: 1 })));
+    connectWithoutHandle(handle);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const promise = sendMessageMeshcore(NODE, "x".repeat(41), { cfg, sessionKey: "s" });
     await expect(promise).rejects.toBeInstanceOf(SessionSendRateLimitExceededError);
     await expect(promise).rejects.toMatchObject({ retryAfterMs: 600_000 });
     await expect(promise).rejects.toThrow("waiting alone will not admit it");
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("retryAfterMs=600000"));
-    expect(connectMock).not.toHaveBeenCalled();
-    expect(getMock).not.toHaveBeenCalled();
+    expect(connectMock).toHaveBeenCalledTimes(1);
+    expect(getMock).toHaveBeenCalled();
+    expect(handle.connection.sendTextMessage).not.toHaveBeenCalled();
   });
 
   it("does not charge an unknown abbreviated target before the next valid full-key send", async () => {
     const cfg = config({ sessionSendRateLimit: { maxSends: 1, maxBytes: 100 } });
-    getMock.mockReturnValue(undefined);
     const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
     const handle = device(sendTextMessage);
-    const unknown = await attempt({ cfg, handle, target: "!aabbccddeeff", sessionKey: "s" });
+    connectWithoutHandle(handle);
+    const unknown = await attempt({ cfg, handle, target: "!aabbccddeeff", sessionKey: "s", noDeviceHandle: true });
     expect(unknown).toBeInstanceOf(Error);
     expect(unknown).not.toBeInstanceOf(SessionSendRateLimitExceededError);
     expect(sessionSendRateLimitBucketCountForTests()).toBe(0);
-    expect(connectMock).not.toHaveBeenCalled();
-    expect(await attempt({ cfg, handle, target: NODES[0], sessionKey: "s" })).toBeNull();
+    expect(connectMock).toHaveBeenCalledTimes(1);
+    expect(await attempt({ cfg, handle, target: NODES[0], sessionKey: "s", noDeviceHandle: true })).toBeNull();
     expect(sendTextMessage).toHaveBeenCalledTimes(1);
   });
 
-  it("still resolves and sends a unique cached 12-hex target before connecting", async () => {
+  it("resolves and sends a cached 12-hex target once the connected radio confirms it", async () => {
     const publicKey = new Uint8Array([...Buffer.from("aabbccddeeff", "hex"), ...new Uint8Array(26).fill(1)]);
     rememberContact({ publicKey, advName: "Cached peer" }, "default");
     const cfg = config({ sessionSendRateLimit: { maxSends: 1, maxBytes: 100 } });
-    getMock.mockReturnValue(undefined);
+    const events: string[] = [];
+    const sendTextMessage = vi.fn(async () => {
+      events.push("frame");
+      return { expectedAckCrc: 1 };
+    });
+    const handle = device(sendTextMessage);
+    // The freshly connected radio also carries this contact: a cache row
+    // that merely agrees with live state must not be treated as a conflict
+    // (contrast with F3, where cache and radio disagree, and F4, where the
+    // radio is connected but no longer has the cached entry at all).
+    handle.contacts = [{ publicKey, advName: "Cached peer" }];
+    connectWithoutHandle(handle, events);
+    expect(await attempt({ cfg, handle, target: "!aabbccddeeff", sessionKey: "cached", noDeviceHandle: true })).toBeNull();
+    expect(connectMock).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(["connect", "frame"]);
+    expect(sendTextMessage).toHaveBeenCalledWith(publicKey, "ok");
+  });
+
+  it("F1: a fresh radio-only abbreviated contact resolves after connect and sends before the first frame", async () => {
+    const publicKey = new Uint8Array([...Buffer.from("aabbccddeeff", "hex"), ...new Uint8Array(26).fill(1)]);
+    const cfg = config({ sessionSendRateLimit: { maxSends: 1, maxBytes: 100 } });
+    const events: string[] = [];
+    const sendTextMessage = vi.fn(async () => {
+      events.push("frame");
+      return { expectedAckCrc: 1 };
+    });
+    const handle = device(sendTextMessage);
+    handle.contacts = [{ publicKey, advName: "Fresh radio peer" }];
+    connectWithoutHandle(handle, events);
+    expect(await attempt({ cfg, handle, target: "!aabbccddeeff", sessionKey: "fresh", noDeviceHandle: true })).toBeNull();
+    expect(connectMock).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(["connect", "frame"]);
+    expect(sendTextMessage).toHaveBeenCalledWith(publicKey, "ok");
+  });
+
+  it("F3: cached A plus fresh radio A/B is ambiguous without charging the session", async () => {
+    const publicKey = new Uint8Array([...Buffer.from("aabbccddeeff", "hex"), ...new Uint8Array(26).fill(1)]);
+    const otherKey = new Uint8Array([...Buffer.from("aabbccddeeff", "hex"), ...new Uint8Array(26).fill(2)]);
+    rememberContact({ publicKey, advName: "Cached A" }, "default");
+    const cfg = config({ sessionSendRateLimit: { maxSends: 1, maxBytes: 100 } });
     const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
     const handle = device(sendTextMessage);
-    expect(await attempt({ cfg, handle, target: "!aabbccddeeff", sessionKey: "cached" })).toBeNull();
-    expect(connectMock).not.toHaveBeenCalled();
-    expect(sendTextMessage).toHaveBeenCalledWith(publicKey, "ok");
+    handle.contacts = [{ publicKey, advName: "Radio A" }, { publicKey: otherKey, advName: "Radio B" }];
+    connectWithoutHandle(handle);
+    await expect(sendMessageMeshcore("!aabbccddeeff", "ok", { cfg, sessionKey: "ambiguous" })).rejects.toThrow("ambiguous");
+    expect(sessionSendRateLimitBucketCountForTests()).toBe(0);
+    expect(connectMock).toHaveBeenCalledTimes(1);
+    expect(sendTextMessage).not.toHaveBeenCalled();
+  });
+
+  it("F4: stale cached A absent from the radio is refused without charging the session", async () => {
+    const publicKey = new Uint8Array([...Buffer.from("aabbccddeeff", "hex"), ...new Uint8Array(26).fill(1)]);
+    rememberContact({ publicKey, advName: "Stale A" }, "default");
+    const cfg = config({ sessionSendRateLimit: { maxSends: 1, maxBytes: 100 } });
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    const handle = device(sendTextMessage);
+    handle.contacts = []; // The fresh radio no longer has A; cache must not win.
+    connectWithoutHandle(handle);
+    await expect(sendMessageMeshcore("!aabbccddeeff", "ok", { cfg, sessionKey: "stale" })).rejects.toThrow("unresolved");
+    expect(sessionSendRateLimitBucketCountForTests()).toBe(0);
+    expect(connectMock).toHaveBeenCalledTimes(1);
+    expect(sendTextMessage).not.toHaveBeenCalled();
   });
 
   it("refuses group and invalid targets before charging or touching a device", async () => {
@@ -248,9 +315,10 @@ describe("MeshCore low-level per-session flood guard (#46)", () => {
     expect(await attempt({ cfg, handle })).toBeNull();
     expect(await attempt({ cfg, handle, sessionKey: "" })).toBeNull();
     expect(await attempt({ cfg, handle, sessionKey: "   " })).toBeNull();
+    expect(await attempt({ cfg, handle, sessionKey: "   " })).toBeNull();
     expect(await attempt({ cfg, handle, sessionKey: "pairing-producer", purpose: "pairing" })).toBeNull();
     expect(await attempt({ cfg, handle, sessionKey: "pairing-producer", purpose: "pairing" })).toBeNull();
-    expect(sendTextMessage).toHaveBeenCalledTimes(5);
+    expect(sendTextMessage).toHaveBeenCalledTimes(6);
   });
 
   it("disabled semantics affect only the session layer", async () => {

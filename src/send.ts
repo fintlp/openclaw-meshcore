@@ -377,12 +377,26 @@ export async function sendMessageMeshcore(
   if (!nodeId) {
     throw new Error(`Invalid MeshCore DM target: ${target}`);
   }
-  // Resolve abbreviated targets before charging: unresolved/ambiguous ids
-  // must fail without consuming the producing session's packet allowance.
-  const pubkey = nodeIdToPubkey(nodeId, account.accountId);
+  const handle =
+    opts.deviceHandle ??
+    getMeshcoreDevice(account.accountId) ??
+    (await connectMeshcoreDevice({
+      accountId: account.accountId,
+      host: account.host,
+      port: account.port,
+    }));
 
-  // Synchronous, final-cost admission before connect/device I/O and before
-  // the old account guard. Pairing/native flows deliberately stay exempt.
+  attachSendConfirmedHandler(handle.connection, account.accountId);
+
+  // Abbreviated-target identity is resolved against the freshly connected
+  // radio: the handle above is passed explicitly so this decision always
+  // reflects this exact connection's contacts, never a stale or unrelated
+  // one that might still be sitting in the account registry. Unresolved,
+  // ambiguous, or stale (cache-only) targets fail without session charge.
+  const pubkey = nodeIdToPubkey(nodeId, account.accountId, handle);
+
+  // Final-cost admission after target resolution and before the first actual
+  // radio frame, always before the old account guard. Pairing is exempt.
   if ((opts.purpose ?? "dm") !== "pairing") {
     enforceMeshcoreSessionSendRateLimit({
       accountId: account.accountId,
@@ -394,17 +408,6 @@ export async function sendMessageMeshcore(
       ),
     });
   }
-
-  const handle =
-    opts.deviceHandle ??
-    getMeshcoreDevice(account.accountId) ??
-    (await connectMeshcoreDevice({
-      accountId: account.accountId,
-      host: account.host,
-      port: account.port,
-    }));
-
-  attachSendConfirmedHandler(handle.connection, account.accountId);
 
   // Only DMs may be signed; groups are receive-only and stay Plain.
   const txtType = outboundSignedPlain ? 2 : undefined;

@@ -740,6 +740,7 @@ export function rememberAdvertContact(
 export function nodeIdToPubkey(
   nodeId: string,
   accountId: string | undefined = undefined,
+  handle?: MeshcoreDeviceHandle,
 ): Uint8Array {
   const hex = normalizePubkeyHex(nodeId.replace(/^!/u, ""));
   if (isValidPubkeyHex(hex)) {
@@ -749,7 +750,12 @@ export function nodeIdToPubkey(
   if (hex.length !== 12 || !accountId) {
     throw new Error("invalid MeshCore node id: " + nodeId);
   }
-  const handle = getMeshcoreDevice(accountId);
+  // Callers that already hold a resolved handle (the send path, right after
+  // connecting) pass it explicitly so this decision always reflects that
+  // exact connection's live contacts. Callers without one (ops/preview
+  // paths) fall back to whatever this account currently has registered, if
+  // anything is connected at all.
+  const resolvedHandle = handle ?? getMeshcoreDevice(accountId);
   const accountContacts = getContactBookEntries(accountId).map((entry) => ({
     ...entry,
     accountId,
@@ -761,7 +767,9 @@ export function nodeIdToPubkey(
     // when no live handle was supplied. This is deliberately different from
     // untrusted inbound attribution, where cache-only NEVER establishes a
     // mapping. Conflicting/ambiguous abbreviations are still refused.
-    radioContacts: handle?.contacts.length ? handle.contacts : accountContacts,
+    // A connected radio is authoritative even when its contact list is empty;
+    // only a missing handle permits the operator-scoped cached-book fallback.
+    radioContacts: resolvedHandle ? resolvedHandle.contacts : accountContacts,
     accountContacts,
   });
   if (decision.status !== "unique") {
