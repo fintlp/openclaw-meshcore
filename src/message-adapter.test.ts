@@ -47,11 +47,12 @@ describe("meshcore message adapter", () => {
             cfg,
             to: "!aabbccdd1122",
             text: "hello meshcore",
-          });
+            sessionKey: "agent:main:producing",
+          } as never);
           expect(sendMessageMeshcoreMock).toHaveBeenCalledWith(
             "!aabbccdd1122",
             "hello meshcore",
-            expect.objectContaining({ cfg }),
+            expect.objectContaining({ cfg, sessionKey: "agent:main:producing" }),
           );
           expect(result?.receipt.platformMessageIds).toEqual(["mc-12345"]);
         },

@@ -393,8 +393,8 @@
     "sessionSendRateLimit": {
       "default": {
         "enabled": true,
-        "maxSends": 8,
-        "maxBytes": 768,
+        "maxSends": 10,
+        "maxBytes": 1270,
         "windowMs": 600000
       },
       "type": "object",
@@ -404,13 +404,13 @@
           "type": "boolean"
         },
         "maxSends": {
-          "default": 8,
+          "default": 10,
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991
         },
         "maxBytes": {
-          "default": 768,
+          "default": 1270,
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991
@@ -925,8 +925,8 @@
           "sessionSendRateLimit": {
             "default": {
               "enabled": true,
-              "maxSends": 8,
-              "maxBytes": 768,
+              "maxSends": 10,
+              "maxBytes": 1270,
               "windowMs": 600000
             },
             "type": "object",
@@ -936,13 +936,13 @@
                 "type": "boolean"
               },
               "maxSends": {
-                "default": 8,
+                "default": 10,
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 9007199254740991
               },
               "maxBytes": {
-                "default": 768,
+                "default": 1270,
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 9007199254740991
@@ -1527,8 +1527,8 @@
         "sessionSendRateLimit": {
           "default": {
             "enabled": true,
-            "maxSends": 8,
-            "maxBytes": 768,
+            "maxSends": 10,
+            "maxBytes": 1270,
             "windowMs": 600000
           },
           "type": "object",
@@ -1538,13 +1538,13 @@
               "type": "boolean"
             },
             "maxSends": {
-              "default": 8,
+              "default": 10,
               "type": "integer",
               "minimum": 1,
               "maximum": 9007199254740991
             },
             "maxBytes": {
-              "default": 768,
+              "default": 1270,
               "type": "integer",
               "minimum": 1,
               "maximum": 9007199254740991

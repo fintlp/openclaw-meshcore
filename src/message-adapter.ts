@@ -10,10 +10,15 @@ export const meshcoreMessageAdapter = defineChannelMessageAdapter({
     },
   },
   send: {
-    text: async ({ cfg, to, text, accountId, replyToId }) => {
+    text: async (ctx) => {
+      const { cfg, to, text, accountId, replyToId } = ctx;
+      // Repo SDK 2026.10.5 does not declare the producing key added by the
+      // 2026.11.3 host. Keep the older-host fallback as undefined/account-only.
+      const sessionKey = (ctx as unknown as { sessionKey?: string }).sessionKey;
       const result = await sendMessageMeshcore(to, text, {
         cfg: cfg as CoreConfig,
         accountId: accountId ?? undefined,
+        sessionKey,
         replyTo: replyToId ?? undefined,
       });
       return {

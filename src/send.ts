@@ -27,6 +27,10 @@ import type { CoreConfig, MeshcoreAccountConfig } from "./types.js";
 import { resolveSendPacingConfig } from "./airtime.js";
 import { assertSendRateLimit, resolveSendRateLimitConfig } from "./rate-limit.js";
 import {
+  enforceMeshcoreSessionSendRateLimit,
+  resolveSessionSendRateLimitConfig,
+} from "./session-rate-limit.js";
+import {
   DELIVERY_REPORT_TIMEOUT_MAX_MS,
   MeshcoreDeliveryFailedError,
   resolveDeliveryReportTimeoutMs,
@@ -95,6 +99,8 @@ function raceSendTextMessage(
 type SendMeshcoreOptions = {
   cfg: CoreConfig;
   accountId?: string;
+  /** Trusted producing session supplied by the host/delivery path (2026.11.3+). */
+  sessionKey?: string;
   replyTo?: string;
   target?: string;
   deviceHandle?: MeshcoreDeviceHandle;
@@ -358,6 +364,20 @@ export async function sendMessageMeshcore(
   const chunks = chunkMeshcoreOutboundText(text, account.config);
   if (chunks.length === 0) {
     throw new Error("Message must be non-empty for MeshCore sends");
+  }
+
+  // Synchronous, final-cost admission before connect/device I/O and before
+  // the old account guard. Pairing/native flows deliberately stay exempt.
+  if ((opts.purpose ?? "dm") !== "pairing") {
+    enforceMeshcoreSessionSendRateLimit({
+      accountId: account.accountId,
+      sessionKey: opts.sessionKey,
+      packets: chunks.length,
+      bytes: utf8ByteLength(text.trim()),
+      config: resolveSessionSendRateLimitConfig(
+        account.config.sessionSendRateLimit as Record<string, unknown> | undefined,
+      ),
+    });
   }
 
   const handle =

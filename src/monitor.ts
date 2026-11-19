@@ -427,6 +427,7 @@ export function monitorMeshcoreProvider(
       text: string,
       replyToId?: string,
       purpose?: "dm" | "pairing",
+      sessionKey?: string,
     ) => {
       try {
         const { sendMessageMeshcore } = await import("./send.js");
@@ -436,6 +437,7 @@ export function monitorMeshcoreProvider(
           replyTo: replyToId,
           deviceHandle: handle,
           purpose: purpose ?? "dm",
+          sessionKey,
         });
         rememberOutboundEcho(text);
         opts.statusSink?.({ lastOutboundAt: Date.now() });

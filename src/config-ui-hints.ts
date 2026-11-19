@@ -47,7 +47,7 @@ export const meshcoreChannelConfigUiHints = {
   },
   sessionSendRateLimit: {
     label: "Per-Session Send Rate Limit",
-    help: "Pre-delivery flood guard per trusted canonical session (default 8 estimated radio packets and 768 UTF-8 text bytes per 10 minutes). Refuses the whole payload with a retry hint; no queue. enabled:false affects only this layer, never the account Send Rate Limit.",
+    help: "Low-level flood guard per producing session (default 10 radio packets and 1270 trimmed UTF-8 text bytes per 10 minutes). Throws a typed retry error before device I/O; no global hooks or queue. 2026.10.5/no-key sends are account-only. enabled:false affects only this layer.",
   },
   sendRetry: {
     label: "DM Delivery Retry",

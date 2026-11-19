@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/channel-entry-contract";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import entry from "../index.js";
@@ -6,22 +7,26 @@ import { MeshcoreConfigSchema } from "./config-schema.js";
 import { clearSendConfirmedStateForTests } from "./device-client.js";
 import { clearOutboundEchoCache } from "./echo-dedupe.js";
 import { clearPacingStateForTests } from "./pacing.js";
-import { clearSendRateLimitState } from "./rate-limit.js";
+import { clearSendRateLimitState, SendRateLimitExceededError } from "./rate-limit.js";
 import { chunkMeshcoreOutboundText, sendMessageMeshcore } from "./send.js";
 import {
   clearSessionSendRateLimitState,
-  consumeMeshcoreSessionSendRateLimit,
-  registerMeshcoreSessionSendRateLimit,
+  enforceMeshcoreSessionSendRateLimit,
   resolveSessionSendRateLimitConfig,
+  SESSION_SEND_RATE_LIMIT_DEFAULTS,
+  SessionSendRateLimitExceededError,
+  sessionSendRateLimitBucketCountForTests,
 } from "./session-rate-limit.js";
 import type { CoreConfig } from "./types.js";
 
-const NODE = "!00000000000000000000000000000000000000000000000000000000aabbccdd";
-type HookResult = { cancel?: boolean; cancelReason?: string } | void;
-type Hook = (
-  event: { to: string; content: string },
-  ctx: { channelId: string; accountId?: string; sessionKey?: string },
-) => HookResult;
+const { connectMock, getMock } = vi.hoisted(() => ({ connectMock: vi.fn(), getMock: vi.fn() }));
+vi.mock("./device-client.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./device-client.js")>();
+  return { ...actual, connectMeshcoreDevice: connectMock, getMeshcoreDevice: getMock };
+});
+
+const NODE = "!".padEnd(1, "") + "aabbccdd".padEnd(64, "0");
+const NODES = ["a", "b", "c"].map((hex) => `!${hex.repeat(64)}`);
 
 function config(overrides: Record<string, unknown> = {}): CoreConfig {
   return {
@@ -37,67 +42,44 @@ function config(overrides: Record<string, unknown> = {}): CoreConfig {
   } as CoreConfig;
 }
 
-function captureHook(cfg: CoreConfig, useEntry = false): { hook: Hook; legacy: ReturnType<typeof vi.fn> } {
-  let hook: Hook | undefined;
-  const legacy = vi.fn();
-  const api = {
-    config: cfg,
-    registrationMode: "tool-discovery",
-    on: vi.fn((name: string, handler: Hook) => {
-      if (name === "message_sending") hook = handler;
-    }),
-    registerHook: legacy,
-  } as unknown as OpenClawPluginApi;
-  if (useEntry) entry.register(api);
-  else registerMeshcoreSessionSendRateLimit(api);
-  if (!hook) throw new Error("message_sending hook was not registered");
-  return { hook, legacy };
-}
-
 function device(sendTextMessage: ReturnType<typeof vi.fn>, accountId = "default") {
   const emitter = new EventEmitter();
   return {
     accountId,
     connection: {
       sendTextMessage,
-      on: emitter.on.bind(emitter),
-      off: emitter.off.bind(emitter),
-      once: emitter.once.bind(emitter),
-      emit: emitter.emit.bind(emitter),
-      listenerCount: emitter.listenerCount.bind(emitter),
+      on: emitter.on.bind(emitter), off: emitter.off.bind(emitter), once: emitter.once.bind(emitter),
+      emit: emitter.emit.bind(emitter), listenerCount: emitter.listenerCount.bind(emitter),
     },
-    connected: true,
-    contacts: [],
-    channels: [],
+    connected: true, contacts: [], channels: [],
   };
 }
 
 async function attempt(params: {
-  hook: Hook;
   cfg: CoreConfig;
   handle: ReturnType<typeof device>;
   sessionKey?: string;
   accountId?: string;
   text?: string;
-}) {
-  const decision = params.hook(
-    { to: NODE, content: params.text ?? "ok" },
-    { channelId: "meshcore", accountId: params.accountId, sessionKey: params.sessionKey },
-  );
-  if (decision?.cancel) return { status: "cancelled" as const, reason: decision.cancelReason };
+  target?: string;
+  purpose?: "dm" | "pairing";
+}): Promise<unknown | null> {
   try {
-    await sendMessageMeshcore(NODE, params.text ?? "ok", {
+    await sendMessageMeshcore(params.target ?? NODE, params.text ?? "ok", {
       cfg: params.cfg,
       accountId: params.accountId,
+      sessionKey: params.sessionKey,
+      purpose: params.purpose,
       deviceHandle: params.handle as never,
     });
-    return { status: "sent" as const };
+    return null;
   } catch (error) {
-    return { status: "account-refused" as const, error };
+    return error;
   }
 }
 
 beforeEach(() => {
+  vi.clearAllMocks();
   clearSessionSendRateLimitState();
   clearSendRateLimitState();
   clearPacingStateForTests();
@@ -113,120 +95,183 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("MeshCore per-session outbound flood guard (#46)", () => {
-  it("validates secure defaults and rejects invalid session knobs", () => {
-    const parsed = MeshcoreConfigSchema.parse({ sessionSendRateLimit: { maxSends: 2 } });
-    expect(parsed.sessionSendRateLimit).toEqual({ enabled: true, maxSends: 2, maxBytes: 768, windowMs: 600_000 });
-    expect(MeshcoreConfigSchema.safeParse({ sessionSendRateLimit: { maxBytes: 0 } }).success).toBe(false);
-    expect(MeshcoreConfigSchema.safeParse({ sessionSendRateLimit: { unexpected: true } }).success).toBe(false);
+describe("MeshCore low-level per-session flood guard (#46)", () => {
+  it("registers zero global message hooks and leaves Telegram preview/auto-reply behavior untouched", () => {
+    const telegram = { allowProviderPreview: true };
+    const on = vi.fn();
+    const registerHook = vi.fn();
+    const registerChannel = vi.fn();
+    const api = {
+      config: { channels: { meshcore: { host: "192.0.2.10" }, telegram } },
+      registrationMode: "full",
+      runtime: { channel: { activity: { record: vi.fn() } } },
+      on,
+      registerHook,
+      registerChannel,
+    } as unknown as OpenClawPluginApi;
+    entry.register(api);
+    expect(registerChannel).toHaveBeenCalledTimes(1);
+    expect(on).not.toHaveBeenCalled();
+    expect(registerHook).not.toHaveBeenCalled();
+    expect(telegram).toEqual({ allowProviderPreview: true });
   });
 
-  it("registers through the real bundled entry via api.on, never legacy registerHook", () => {
-    const { legacy } = captureHook(config(), true);
-    expect(legacy).not.toHaveBeenCalled();
-  });
-
-  it("atomically refuses a same-session concurrent burst before device sends", async () => {
+  it("refuses a real same-session Promise.all burst before device I/O with typed errors and safe logs", async () => {
     const cfg = config();
-    const { hook } = captureHook(cfg);
     const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
     const handle = device(sendTextMessage);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const results = await Promise.all(
-      Array.from({ length: 5 }, () => attempt({ hook, cfg, handle, sessionKey: "agent:main:test" })),
+      Array.from({ length: 5 }, () => attempt({ cfg, handle, sessionKey: "agent:main:producer" })),
     );
-    expect(results.filter((r) => r.status === "sent")).toHaveLength(3);
-    const refused = results.filter((r) => r.status === "cancelled");
-    expect(refused).toHaveLength(2);
-    expect(refused[0]?.reason).toContain("retryAfterMs=");
-    expect(refused[0]?.reason).toContain("Nothing was queued");
+    expect(results.filter((result) => result === null)).toHaveLength(3);
+    const errors = results.filter((result) => result instanceof SessionSendRateLimitExceededError);
+    expect(errors).toHaveLength(2);
+    expect(sendTextMessage).toHaveBeenCalledTimes(3);
+    expect(warn).toHaveBeenCalledTimes(2);
+    for (const [line] of warn.mock.calls) {
+      expect(line).not.toContain("agent:main:producer");
+      expect(line).not.toContain(NODE);
+      expect(line).not.toContain("ok");
+    }
+    expect((errors[0] as SessionSendRateLimitExceededError).retryAfterMs).toBeGreaterThan(0);
+  });
+
+  it("refuses before connect when one payload exceeds the exact packet boundary", async () => {
+    const cfg = config({ textChunkLimit: 40, sessionSendRateLimit: { maxSends: 1, maxBytes: 100 } });
+    getMock.mockReturnValue(undefined);
+    await expect(sendMessageMeshcore(NODE, "x".repeat(41), {
+      cfg, sessionKey: "s",
+    })).rejects.toBeInstanceOf(SessionSendRateLimitExceededError);
+    expect(connectMock).not.toHaveBeenCalled();
+    expect(getMock).not.toHaveBeenCalled();
+  });
+
+  it("shares one producing budget across fanout A,B,C,A instead of deriving identity from targets", async () => {
+    const cfg = config();
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    const handle = device(sendTextMessage);
+    const results = [];
+    for (const target of [NODES[0]!, NODES[1]!, NODES[2]!, NODES[0]!]) {
+      results.push(await attempt({ cfg, handle, target, sessionKey: "one-producing-session" }));
+    }
+    expect(results.slice(0, 3)).toEqual([null, null, null]);
+    expect(results[3]).toBeInstanceOf(SessionSendRateLimitExceededError);
     expect(sendTextMessage).toHaveBeenCalledTimes(3);
   });
 
-  it("isolates independent sessions and accounts using trusted context only", () => {
+  it("isolates independent sessions and resolved accounts", async () => {
     const cfg = config({
       defaultAccount: "a",
       accounts: { a: { host: "192.0.2.11" }, b: { host: "192.0.2.12" } },
       sessionSendRateLimit: { maxSends: 1, maxBytes: 100 },
     });
-    const { hook } = captureHook(cfg);
-    const send = (sessionKey: string, accountId = "a", channelId = "meshcore") =>
-      hook({ to: NODE, content: "x" }, { channelId, accountId, sessionKey });
-    expect(send("session:a")?.cancel).toBeUndefined();
-    expect(send("session:a")?.cancel).toBe(true);
-    expect(send("session:b")?.cancel).toBeUndefined();
-    expect(send("session:a", "b")?.cancel).toBeUndefined();
-    expect(send("session:a", "a", "other-channel")?.cancel).toBeUndefined();
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    const a = device(sendTextMessage, "a");
+    const b = device(sendTextMessage, "b");
+    expect(await attempt({ cfg, handle: a, accountId: "a", sessionKey: "s:a" })).toBeNull();
+    expect(await attempt({ cfg, handle: a, accountId: "a", sessionKey: "s:a" })).toBeInstanceOf(SessionSendRateLimitExceededError);
+    expect(await attempt({ cfg, handle: a, accountId: "a", sessionKey: "s:b" })).toBeNull();
+    expect(await attempt({ cfg, handle: b, accountId: "b", sessionKey: "s:a" })).toBeNull();
   });
 
-  it("keeps the account aggregate backstop bounding a multi-session flood", async () => {
-    const cfg = config({
-      sendRateLimit: { maxSends: 3 },
-      sessionSendRateLimit: { maxSends: 2, maxBytes: 100 },
-    });
-    const { hook } = captureHook(cfg);
+  it("keeps the old aggregate account backstop across independent sessions", async () => {
+    const cfg = config({ sendRateLimit: { maxSends: 3 }, sessionSendRateLimit: { maxSends: 2, maxBytes: 100 } });
     const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
     const handle = device(sendTextMessage);
     const results = await Promise.all(
-      ["a", "b", "c"].flatMap((sessionKey) =>
-        [0, 1].map(() => attempt({ hook, cfg, handle, sessionKey })),
-      ),
+      ["a", "b", "c"].flatMap((sessionKey) => [0, 1].map(() => attempt({ cfg, handle, sessionKey }))),
     );
-    expect(results.filter((r) => r.status === "sent")).toHaveLength(3);
-    expect(results.filter((r) => r.status === "account-refused")).toHaveLength(3);
-    expect(results.filter((r) => r.status === "cancelled")).toHaveLength(0);
+    expect(results.filter((result) => result === null)).toHaveLength(3);
+    const errors = results.filter((result) => result instanceof SendRateLimitExceededError);
+    expect(errors).toHaveLength(3);
+    expect(errors.every((error) => !(error instanceof SessionSendRateLimitExceededError))).toBe(true);
     expect(sendTextMessage).toHaveBeenCalledTimes(3);
   });
 
-  it.each([
-    ["missing sessionKey", undefined, { maxSends: 1, maxBytes: 100 }],
-    ["explicitly disabled session guard", "session:a", { enabled: false, maxSends: 1, maxBytes: 100 }],
-  ])("%s leaves the old account guard active", async (_name, sessionKey, sessionConfig) => {
-    const cfg = config({
-      sendRateLimit: { maxSends: 1 },
-      sessionSendRateLimit: sessionConfig,
-    });
-    const { hook } = captureHook(cfg);
+  it("keeps missing/empty keys and keyed pairing sends account-only", async () => {
+    const cfg = config({ sessionSendRateLimit: { maxSends: 1, maxBytes: 100 } });
     const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
     const handle = device(sendTextMessage);
-    const first = await attempt({ hook, cfg, handle, sessionKey });
-    const second = await attempt({ hook, cfg, handle, sessionKey });
-    expect(first.status).toBe("sent");
-    expect(second.status).toBe("account-refused");
-    expect(String((second as { error?: unknown }).error)).toContain("rate limit");
+    expect(await attempt({ cfg, handle })).toBeNull();
+    expect(await attempt({ cfg, handle, sessionKey: "" })).toBeNull();
+    expect(await attempt({ cfg, handle, sessionKey: "pairing-producer", purpose: "pairing" })).toBeNull();
+    expect(await attempt({ cfg, handle, sessionKey: "pairing-producer", purpose: "pairing" })).toBeNull();
+    expect(sendTextMessage).toHaveBeenCalledTimes(4);
+  });
+
+  it("disabled semantics affect only the session layer", async () => {
+    const cfg = config({
+      sendRateLimit: { maxSends: 1 },
+      sessionSendRateLimit: { enabled: false, maxSends: 1, maxBytes: 100 },
+    });
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    const handle = device(sendTextMessage);
+    expect(await attempt({ cfg, handle, sessionKey: "s" })).toBeNull();
+    const error = await attempt({ cfg, handle, sessionKey: "s" });
+    expect(error).toBeInstanceOf(SendRateLimitExceededError);
+    expect(error).not.toBeInstanceOf(SessionSendRateLimitExceededError);
     expect(sendTextMessage).toHaveBeenCalledTimes(1);
   });
 
-  it("slides the window and returns an accurate conservative retry reason without charging refusals", () => {
-    const cfg = resolveSessionSendRateLimitConfig({ maxSends: 2, maxBytes: 100, windowMs: 1_000 });
+  it("computes retryAfter from the events that must expire and does not charge refusals", () => {
+    const cfg = resolveSessionSendRateLimitConfig({ maxSends: 2, maxBytes: 100, windowMs: 5_000 });
     const base = { accountId: "default", sessionKey: "s", packets: 1, bytes: 1, config: cfg };
-    expect(consumeMeshcoreSessionSendRateLimit({ ...base, nowMs: 0 }).allowed).toBe(true);
-    expect(consumeMeshcoreSessionSendRateLimit({ ...base, nowMs: 100 }).allowed).toBe(true);
-    const refused = consumeMeshcoreSessionSendRateLimit({ ...base, nowMs: 200 });
-    expect(refused).toMatchObject({ allowed: false, retryAfterMs: 1_000 });
-    if (!refused.allowed) expect(refused.cancelReason).toContain("Retry in ~1s");
-    // The oldest event expires at t=1000; the earlier refusal consumed nothing.
-    expect(consumeMeshcoreSessionSendRateLimit({ ...base, nowMs: 1_000 }).allowed).toBe(true);
-    expect(consumeMeshcoreSessionSendRateLimit({ ...base, nowMs: 1_001 }).allowed).toBe(false);
-    expect(consumeMeshcoreSessionSendRateLimit({ ...base, nowMs: 1_100 }).allowed).toBe(true);
+    enforceMeshcoreSessionSendRateLimit({ ...base, nowMs: 0 });
+    enforceMeshcoreSessionSendRateLimit({ ...base, nowMs: 1_000 });
+    let error: unknown;
+    try { enforceMeshcoreSessionSendRateLimit({ ...base, nowMs: 2_000 }); } catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(SessionSendRateLimitExceededError);
+    expect((error as SessionSendRateLimitExceededError).retryAfterMs).toBe(3_000);
+    expect(() => enforceMeshcoreSessionSendRateLimit({ ...base, nowMs: 5_000 })).not.toThrow();
+    expect(() => enforceMeshcoreSessionSendRateLimit({ ...base, nowMs: 6_000 })).not.toThrow();
   });
 
-  it("uses real UTF-8 chunking for non-ASCII packets and a distinct UTF-8 byte budget", () => {
-    const cfg = config({
-      textChunkLimit: 40,
-      sessionSendRateLimit: { maxSends: 2, maxBytes: 1_000 },
-    });
-    const { hook } = captureHook(cfg);
-    const text = "😀".repeat(11); // 44 UTF-8 bytes -> two real radio chunks.
-    expect(chunkMeshcoreOutboundText(text, { textChunkLimit: 40, chunkNumbering: false })).toHaveLength(2);
-    expect(hook({ to: NODE, content: text }, { channelId: "meshcore", sessionKey: "unicode" })?.cancel).toBeUndefined();
-    const refused = hook({ to: NODE, content: "x" }, { channelId: "meshcore", sessionKey: "unicode" });
-    expect(refused?.cancel).toBe(true);
+  it("cleans stale buckets during the periodic sweep", () => {
+    const cfg = resolveSessionSendRateLimitConfig({ windowMs: 1_000 });
+    enforceMeshcoreSessionSendRateLimit({ accountId: "a", sessionKey: "old", packets: 1, bytes: 1, config: cfg, nowMs: 0 });
+    expect(sessionSendRateLimitBucketCountForTests()).toBe(1);
+    enforceMeshcoreSessionSendRateLimit({ accountId: "a", sessionKey: "new", packets: 1, bytes: 1, config: cfg, nowMs: 60_000 });
+    expect(sessionSendRateLimitBucketCountForTests()).toBe(1);
+  });
 
-    const byteCfg = resolveSessionSendRateLimitConfig({ maxSends: 20, maxBytes: 4 });
-    const base = { accountId: "default", sessionKey: "bytes", packets: 1, config: byteCfg };
-    expect(consumeMeshcoreSessionSendRateLimit({ ...base, bytes: new TextEncoder().encode("éé").length }).allowed).toBe(true);
-    const byteRefusal = consumeMeshcoreSessionSendRateLimit({ ...base, bytes: 1 });
-    expect(byteRefusal).toMatchObject({ allowed: false });
-    if (!byteRefusal.allowed) expect(byteRefusal.cancelReason).toContain("UTF-8 text bytes 4+1/4");
+  it("uses trimmed UTF-8 bytes for the independent byte budget", async () => {
+    const cfg = config({ sessionSendRateLimit: { maxSends: 20, maxBytes: 4 } });
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    const handle = device(sendTextMessage);
+    expect(await attempt({ cfg, handle, text: "  éé  ", sessionKey: "bytes" })).toBeNull();
+    const error = await attempt({ cfg, handle, text: "a", sessionKey: "bytes" });
+    expect(error).toBeInstanceOf(SessionSendRateLimitExceededError);
+    expect(String(error)).toContain("UTF-8 bytes 4+1/4");
+    expect(sendTextMessage).toHaveBeenCalledWith(expect.any(Uint8Array), "éé");
+  });
+
+  it("matches final SignedPlain and chunk-numbering packet accounting exactly", async () => {
+    const text = "😀".repeat(20);
+    const accountConfig = { textChunkLimit: 40, outboundSignedPlain: true, chunkNumbering: true };
+    const chunks = chunkMeshcoreOutboundText(text, accountConfig);
+    expect(chunks.length).toBeGreaterThan(2);
+    const cfg = config({
+      ...accountConfig,
+      sessionSendRateLimit: { maxSends: chunks.length, maxBytes: 1_000 },
+    });
+    const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
+    const handle = device(sendTextMessage);
+    expect(await attempt({ cfg, handle, text, sessionKey: "signed" })).toBeNull();
+    expect(sendTextMessage).toHaveBeenCalledTimes(chunks.length);
+    expect(await attempt({ cfg, handle, text: "x", sessionKey: "signed" })).toBeInstanceOf(SessionSendRateLimitExceededError);
+  });
+
+  it("pins secure runtime, zod, and generated-manifest defaults", () => {
+    expect(SESSION_SEND_RATE_LIMIT_DEFAULTS).toEqual({ enabled: true, maxSends: 10, maxBytes: 1_270, windowMs: 600_000 });
+    expect(resolveSessionSendRateLimitConfig(undefined)).toEqual(SESSION_SEND_RATE_LIMIT_DEFAULTS);
+    const parsed = MeshcoreConfigSchema.parse({});
+    expect(parsed.sessionSendRateLimit).toEqual(SESSION_SEND_RATE_LIMIT_DEFAULTS);
+    expect(MeshcoreConfigSchema.safeParse({ sessionSendRateLimit: { maxBytes: 0 } }).success).toBe(false);
+    const manifest = JSON.parse(readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
+    const surface = manifest.channelConfigs.meshcore;
+    expect(surface.schema.properties.sessionSendRateLimit.default).toEqual(SESSION_SEND_RATE_LIMIT_DEFAULTS);
+    expect(surface.schema.properties.accounts.additionalProperties.properties.sessionSendRateLimit.default).toEqual(SESSION_SEND_RATE_LIMIT_DEFAULTS);
+    expect(surface.uiHints.sessionSendRateLimit.help).toContain("10");
   });
 });
