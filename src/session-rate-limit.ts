@@ -131,7 +131,7 @@ export function enforceMeshcoreSessionSendRateLimit(params: {
       `[meshcore] per-session send refused kind=dm packets=${params.packets} bytes=${params.bytes} retryAfterMs=${retryAfterMs}`,
     );
     throw new SessionSendRateLimitExceededError(
-      `MeshCore per-session flood guard refused the whole payload before device I/O: ` +
+      `MeshCore per-session flood guard refused the whole payload after target resolution and before any radio frame: ` +
         `${exceeded} in the rolling ${Math.round(params.config.windowMs / 60_000)}m window. ` +
         `Retry in ~${Math.ceil(retryAfterMs / 1_000)}s (retryAfterMs=${retryAfterMs}). ` +
         (oversized

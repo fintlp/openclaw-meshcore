@@ -136,7 +136,7 @@ describe("MeshCore low-level per-session flood guard (#46)", () => {
     expect(telegram).toEqual({ allowProviderPreview: true });
   });
 
-  it("refuses a real same-session Promise.all burst before device I/O with typed errors and safe logs", async () => {
+  it("refuses a real same-session Promise.all burst before any radio frame with typed errors and safe logs", async () => {
     const cfg = config();
     const sendTextMessage = vi.fn(async () => ({ expectedAckCrc: 1 }));
     const handle = device(sendTextMessage);

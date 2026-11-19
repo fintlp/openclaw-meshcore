@@ -47,7 +47,7 @@ export const meshcoreChannelConfigUiHints = {
   },
   sessionSendRateLimit: {
     label: "Per-Session Send Rate Limit",
-    help: "Low-level flood guard per producing session (default 10 radio packets and 1270 trimmed UTF-8 text bytes per 10 minutes). Throws a typed retry error before device I/O; no global hooks or queue. Named accounts inherit the root and partial overrides deep-merge. 2026.10.5 adapter sends without a producing key are account-only; plugin auto-replies still use their route key. enabled:false affects only this layer.",
+    help: "Low-level flood guard per producing session (default 10 radio packets and 1270 trimmed UTF-8 text bytes per 10 minutes). Throws a typed retry error after target identity resolution, before any radio frame; no global hooks or queue. Named accounts inherit the root and partial overrides deep-merge. 2026.10.5 adapter sends without a producing key are account-only; plugin auto-replies still use their route key. enabled:false affects only this layer.",
   },
   sendRetry: {
     label: "DM Delivery Retry",
